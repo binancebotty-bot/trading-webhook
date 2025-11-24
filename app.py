@@ -2,9 +2,34 @@ from flask import Flask, request, jsonify
 import ccxt
 import os
 import logging
+import threading
+import time
+import requests
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
+
+# Keep-alive function to prevent Render from sleeping
+def keep_alive():
+    while True:
+        try:
+            # Get the current app URL (works in production)
+            base_url = os.getenv('RENDER_EXTERNAL_URL') or 'https://your-project-name.onrender.com'
+            health_url = f"{base_url}/health"
+            
+            response = requests.get(health_url, timeout=10)
+            app.logger.info(f"Keep-alive ping successful: {response.status_code}")
+        except Exception as e:
+            app.logger.warning(f"Keep-alive ping failed: {str(e)}")
+        
+        # Ping every 5 minutes (more frequent than 15-minute sleep threshold)
+        time.sleep(300)  # 300 seconds = 5 minutes
+
+# Start keep-alive in background thread
+if os.getenv('RENDER'):  # Only run in production, not locally
+    keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
+    keep_alive_thread.start()
+    app.logger.info("Keep-alive service started")
 
 def get_binance():
     return ccxt.binance({
@@ -69,7 +94,7 @@ def extract_centreline(alert_message):
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'healthy'})
+    return jsonify({'status': 'healthy', 'service': 'tradingview-webhook'})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
