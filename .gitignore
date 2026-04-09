@@ -1,0 +1,13 @@
+# Ignore live output data
+hyperliquid_live_output/
+
+# Ignore logs
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS junk
+.DS_Store
+Thumbs.db
