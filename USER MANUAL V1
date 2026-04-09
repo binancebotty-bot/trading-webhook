@@ -1,0 +1,151 @@
+HYPERLIQUID PIPELINE — OPERATOR MANUAL (COMPACT)
+0. 📍 ROOT
+C:\Users\wigmore\trading_stack\Hyperliquid scanner
+1. 🔁 FULL PIPELINE FLOW
+DISCOVER → FILTER → DEEP ANALYSE → TRACK LIVE → VIEW OUTPUT
+2. 🔍 STAGE 1 — WALLET DISCOVERY
+Run:
+python 1WalletFinder.py
+Output:
+feeds into:
+hl_stage1_pass.csv
+hl_wallets_filtered.csv
+3. 🧪 STAGE 2 — DEEP ANALYSIS (IMPORTANT)
+Run:
+python 3hl_stage2_useful_wallet_scanner.py
+Output folder:
+hl_stage2\
+Key files:
+File	Meaning
+copyable_wallets.csv	✅ FINAL shortlist
+summary.csv	stats per wallet
+all_trades.csv	full trade history
+wallet_progress.json	run tracking
+4. 📡 LIVE TRACKING ENGINE (CORE)
+Input:
+WALLETS TO TRACK
+
+(manually paste OR from Stage 2)
+
+Run:
+python wallet_listener_ws_v1.py
+Output folder:
+hyperliquid_live_output\
+Files:
+File	Purpose
+live_wallet_metrics.csv	✅ MAIN OUTPUT
+raw_trades.csv	trade stream
+equity_curves\	pnl curves
+wallet_listener_ws_v1.log	debug
+5. 📊 METRICS FILE (WHAT MATTERS)
+live_wallet_metrics.csv
+
+Each row = wallet snapshot
+
+Key fields:
+
+realistic_pnl → TRUE performance
+ideal_pnl → perfect fills
+bad_pnl → worst case
+degradation → execution loss
+trade_count
+open_positions
+
+👉 Ranking uses: realistic_pnl
+
+6. 🖥 DASHBOARD (CURRENT STATE)
+Works:
+loads CSV via fetch()
+refresh every 60s
+REQUIREMENT:
+python -m http.server
+DOES NOT WORK:
+file:// mode (blocked by browser)
+7. ⚠️ RUN RULES (CRITICAL)
+❌ DO NOT RUN TOGETHER:
+wallet_listener_ws_v1.py
++
+WalletFinder / Stage2
+
+👉 Causes:
+
+rate limits
+dropped data
+lag
+✅ SAFE MODES:
+Mode	Allowed
+Discovery only	✅
+Stage2 only	✅
+Listener only	✅
+8. 🧪 HEALTH CHECKS
+✅ SYSTEM HEALTHY:
+CSV updating timestamp
+log file growing
+equity_curves filling
+wallets active
+🚨 PROBLEMS:
+Symptom	Meaning
+Top 10 = 0	dead wallets
+stale wallets high	feed lag
+latency high	API throttling
+no trades	ingestion broken
+9. 🛠 COMMON ISSUES
+❌ “file locked”
+
+→ listener still running
+
+Fix:
+
+CTRL+C
+❌ “dashboard not updating”
+
+→ server not running
+
+❌ “missing data”
+
+→ rate limit or bad wallets
+
+❌ “CSV not updating”
+
+→ listener crashed → check log
+
+10. 🎯 ACTUAL WORKFLOW (REAL USE)
+STEP 1 — FIND
+python 1WalletFinder.py
+STEP 2 — FILTER
+python 2hl_Stage1_Filter.py
+STEP 3 — ANALYSE
+python 3hl_stage2_useful_wallet_scanner.py
+STEP 4 — SELECT
+
+→ copy from:
+
+hl_stage2/copyable_wallets.csv
+STEP 5 — TRACK
+python wallet_listener_ws_v1.py
+STEP 6 — VIEW
+
+→ dashboard / CSV
+
+11. 🔥 WHAT THIS SYSTEM ACTUALLY DOES
+
+You now have:
+
+wallet discovery ✔
+full trade history ✔
+execution simulation ✔
+slippage modelling ✔
+live tracking ✔
+pnl curves ✔
+
+👉 This is effectively:
+a copy-trading intelligence engine
+
+12. ⚠️ FINAL TRUTH
+Listener = real-time engine
+CSV = source of truth
+Dashboard = optional viewer
+
+👉 If dashboard dies, system still works
+
+DONE

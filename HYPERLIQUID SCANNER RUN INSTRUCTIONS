@@ -1,0 +1,68 @@
+HYPERLIQUID SCANNER RUN INSTRUCTIONS
+
+
+▶️ RUN COMMANDS (Windows CMD)
+📁 Go to your project folder
+cd C:\Users\wigmore\trading_stack\Hyperliquid scanner
+
+▶️ Run main pipeline
+cd C:\Users\wigmore\trading_stack\Hyperliquid scanner
+WalletFinder.py
+
+▶️ First Filter wallets
+cd C:\Users\wigmore\trading_stack\Hyperliquid scanner
+hl_Stage1_Filter.py
+
+▶️ Scan Wallets
+cd C:\Users\wigmore\trading_stack\Hyperliquid scanner
+python hl_stage2_useful_wallet_scanner.py
+
+▶️ Throw back non interest wallets
+cd C:\Users\wigmore\trading_stack\Hyperliquid scanner
+python wallet_copyability_test.py
+
+▶️ Begin LIVE tracking
+cd C:\Users\wigmore\trading_stack\Hyperliquid scanner
+python wallet_listener_ws_v1.py
+
+▶️ DASHBOARD
+cd C:\Users\wigmore\trading_stack\Hyperliquid scanner
+python -m streamlit run dashboard_app.py
+
+
+
+
+
+
+
+🚀 STAGE 2+3 SCANNER
+📂 OUTPUT FILES (auto-created)
+
+You don’t run these — just know where they are:
+
+Summary (your main dataset)
+hl_stage2\summary.csv
+🧪 OPTIONAL QUICK CHECK
+
+View summary file:
+
+notepad hl_stage2\summary.csv
+🔁 RE-RUN BEHAVIOUR
+
+If you run again:
+
+python hl_stage2_useful_wallet_scanner.py
+
+👉 It will:
+
+skip already collected wallets
+continue where it left off
+🧼 RESET (only if needed)
+
+⚠️ Only if you want a fresh run:
+
+rmdir /s /q hl_stage2
+⚡ ONE-LINER VERSION
+cd C:\Users\wigmore\trading_stack\Hyperliquid scanner && python hl_stage2_useful_wallet_scanner.py
+
+

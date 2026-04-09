@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hyperliquid Wallet Dashboard - First Draft</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #121933;
+      --panel-2: #182244;
+      --panel-3: #0d1530;
+      --text: #e8ecf8;
+      --muted: #98a4c7;
+      --border: #2b3764;
+      --good: #34d399;
+      --bad: #f87171;
+      --accent: #60a5fa;
+      --accent-2: #a78bfa;
+      --warn: #fbbf24;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, Segoe UI, Arial, sans-serif;
+      background: linear-gradient(180deg, #0b1020 0%, #0e1430 100%);
+      color: var(--text);
+    }
+
+    .wrap {
+      max-width: 1650px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: 1.25fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .card {
+      background: rgba(18, 25, 51, 0.96);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+    }
+
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 28px; margin-bottom: 6px; }
+    h2 { font-size: 18px; margin-bottom: 12px; }
+    h3 { font-size: 14px; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .06em; }
+    .sub { color: var(--muted); line-height: 1.45; }
+
+    .uploader-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .upload-box {
+      background: var(--panel-2);
+      border: 1px dashed var(--border);
+      border-radius: 14px;
+      padding: 14px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    input[type="file"], input[type="text"], select {
+      width: 100%;
+      background: var(--panel-3);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 14px;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .metric {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+    }
+
+    .metric .label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+
+    .metric .value {
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 560px 1fr;
+      gap: 16px;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 160px 200px;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .table-wrap {
+      overflow: auto;
+      max-height: 760px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 1080px;
+      background: transparent;
+    }
+
+    thead th {
+      position: sticky;
+      top: 0;
+      background: var(--panel-3);
+      color: var(--muted);
+      text-align: left;
+      font-size: 12px;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+      padding: 12px 10px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    tbody td {
+      padding: 10px;
+      border-bottom: 1px solid rgba(43, 55, 100, 0.45);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    tbody tr { cursor: pointer; }
+    tbody tr:hover { background: rgba(96, 165, 250, 0.08); }
+    tbody tr.active { background: rgba(96, 165, 250, 0.16); }
+
+    .good { color: var(--good); }
+    .bad { color: var(--bad); }
+    .warn { color: var(--warn); }
+    .muted { color: var(--muted); }
+
+    .details-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .wallet-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .wallet-id {
+      font-family: Consolas, monospace;
+      font-size: 13px;
+      color: var(--muted);
+      word-break: break-all;
+    }
+
+    .chart-wrap {
+      background: var(--panel-3);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 10px;
+      margin-bottom: 12px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 460px;
+      display: block;
+    }
+
+    .legend {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+
+    .details-pre {
+      background: var(--panel-3);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      max-height: 290px;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #dbe4ff;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .footer-note {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .health-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .mini-table-wrap {
+      overflow: auto;
+      max-height: 280px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--panel-3);
+    }
+
+    .section-gap { margin-top: 16px; }
+
+    @media (max-width: 1200px) {
+      .topbar, .layout, .details-grid, .stats-grid, .uploader-row, .controls, .health-grid {
+        grid-template-columns: 1fr;
+      }
+      .table-wrap { max-height: 520px; }
+      canvas { height: 360px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="card">
+        <h1>Hyperliquid Wallet Dashboard</h1>
+        <p class="sub">Auto-loading <strong>live_wallet_metrics.csv</strong> — refreshes every 60 seconds. Ranking is driven by <strong>realistic_pnl</strong>.</p>
+      </div>
+      <div class="card">
+        <h2>Run Summary</h2>
+        <div class="stats-grid">
+          <div class="metric"><div class="label">Wallets Loaded</div><div id="walletCount" class="value">0</div></div>
+          <div class="metric"><div class="label">Active Wallets</div><div id="activeCount" class="value">0</div></div>
+          <div class="metric"><div class="label">Best Realistic PnL</div><div id="bestPnl" class="value">0</div></div>
+          <div class="metric"><div class="label">Worst Realistic PnL</div><div id="worstPnl" class="value">0</div></div>
+        </div>
+        <div class="health-grid section-gap">
+          <div class="metric"><div class="label">Top 10 Live</div><div id="top10Live" class="value">0/10</div></div>
+          <div class="metric"><div class="label">Fresh Wallets</div><div id="freshWallets" class="value">0</div></div>
+          <div class="metric"><div class="label">Stale Wallets</div><div id="staleWallets" class="value">0</div></div>
+          <div class="metric"><div class="label">Worst Latency</div><div id="worstLatency" class="value">0</div></div>
+        </div>
+        <p class="footer-note">Draft assumptions: browser still loads local files manually. Ranking for inspection can be switched between realistic, ideal, bad, trade count, and degradation. Health uses loaded metrics only.</p>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div class="card">
+        <h2>Leaderboard</h2>
+        <div class="controls">
+          <input id="searchInput" type="text" placeholder="Search wallet..." />
+          <select id="activeFilter">
+            <option value="all">All wallets</option>
+            <option value="active">Active only</option>
+            <option value="inactive">Inactive only</option>
+          </select>
+          <select id="sortSelect">
+            <option value="realistic_desc">Realistic PnL ↓</option>
+            <option value="ideal_desc">Ideal PnL ↓</option>
+            <option value="bad_desc">Bad PnL ↓</option>
+            <option value="realistic_asc">Realistic PnL ↑</option>
+            <option value="ideal_asc">Ideal PnL ↑</option>
+            <option value="bad_asc">Bad PnL ↑</option>
+            <option value="trade_desc">Trade Count ↓</option>
+            <option value="degrade_desc">Degradation % ↓</option>
+          </select>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Wallet</th>
+                <th>Trades</th>
+                <th>Realistic</th>
+                <th>Ideal</th>
+                <th>Bad</th>
+                <th>Degrade %</th>
+                <th>Unrealized</th>
+                <th>Open Pos</th>
+              </tr>
+            </thead>
+            <tbody id="leaderboardBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="wallet-title">
+          <div>
+            <h2 id="detailTitle">Wallet Details</h2>
+            <div id="detailWallet" class="wallet-id">Load metrics and select a wallet</div>
+          </div>
+        </div>
+
+        <div class="details-grid">
+          <div class="metric"><div class="label">Realistic PnL</div><div id="detailRealistic" class="value">0</div></div>
+          <div class="metric"><div class="label">Degradation %</div><div id="detailDegrade" class="value">0%</div></div>
+          <div class="metric"><div class="label">Trade Count</div><div id="detailTrades" class="value">0</div></div>
+          <div class="metric"><div class="label">Open Positions</div><div id="detailOpenPositions" class="value">0</div></div>
+        </div>
+
+        <div class="chart-wrap">
+          <canvas id="equityCanvas" width="1100" height="460"></canvas>
+          <div class="legend">
+            <span><span class="dot" style="background:#60a5fa"></span>Ideal</span>
+            <span><span class="dot" style="background:#a78bfa"></span>Realistic</span>
+            <span><span class="dot" style="background:#f87171"></span>Bad</span>
+          </div>
+        </div>
+
+        <div class="details-grid">
+          <div>
+            <h3>Wallet Snapshot</h3>
+            <div id="snapshotBox" class="details-pre">No wallet selected.</div>
+          </div>
+          <div>
+            <h3>Positions JSON</h3>
+            <div id="positionsBox" class="details-pre">No wallet selected.</div>
+          </div>
+        </div>
+
+        <div class="section-gap">
+          <h3>Top 10 Health View</h3>
+          <div class="mini-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Wallet</th>
+                  <th>Realistic</th>
+                  <th>Trades</th>
+                  <th>Last Recv</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="top10HealthBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      metrics: [],
+      filtered: [],
+      equityByWallet: {},
+      selectedWallet: null,
+    };
+
+    const els = {
+      leaderboardBody: document.getElementById('leaderboardBody'),
+      top10HealthBody: document.getElementById('top10HealthBody'),
+      searchInput: document.getElementById('searchInput'),
+      activeFilter: document.getElementById('activeFilter'),
+      sortSelect: document.getElementById('sortSelect'),
+      walletCount: document.getElementById('walletCount'),
+      activeCount: document.getElementById('activeCount'),
+      bestPnl: document.getElementById('bestPnl'),
+      worstPnl: document.getElementById('worstPnl'),
+      top10Live: document.getElementById('top10Live'),
+      freshWallets: document.getElementById('freshWallets'),
+      staleWallets: document.getElementById('staleWallets'),
+      worstLatency: document.getElementById('worstLatency'),
+      detailWallet: document.getElementById('detailWallet'),
+      detailRealistic: document.getElementById('detailRealistic'),
+      detailDegrade: document.getElementById('detailDegrade'),
+      detailTrades: document.getElementById('detailTrades'),
+      detailOpenPositions: document.getElementById('detailOpenPositions'),
+      snapshotBox: document.getElementById('snapshotBox'),
+      positionsBox: document.getElementById('positionsBox'),
+      canvas: document.getElementById('equityCanvas'),
+    };
+
+    function parseCSV(text) {
+      const rows = [];
+      let row = [];
+      let cell = '';
+      let inQuotes = false;
+
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        const next = text[i + 1];
+
+        if (ch === '"') {
+          if (inQuotes && next === '"') {
+            cell += '"';
+            i++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (ch === ',' && !inQuotes) {
+          row.push(cell);
+          cell = '';
+        } else if ((ch === '\n' || ch === '\r') && !inQuotes) {
+          if (ch === '\r' && next === '\n') i++;
+          row.push(cell);
+          if (row.some(v => v !== '')) rows.push(row);
+          row = [];
+          cell = '';
+        } else {
+          cell += ch;
+        }
+      }
+
+      if (cell.length || row.length) {
+        row.push(cell);
+        if (row.some(v => v !== '')) rows.push(row);
+      }
+
+      if (!rows.length) return [];
+      const headers = rows[0];
+      return rows.slice(1).map(r => {
+        const obj = {};
+        headers.forEach((h, idx) => obj[h] = r[idx] ?? '');
+        return obj;
+      });
+    }
+
+    function n(v) {
+      const x = Number(v);
+      return Number.isFinite(x) ? x : 0;
+    }
+
+    function fmt(v) {
+      const num = n(v);
+      if (Math.abs(num) >= 1000) return num.toLocaleString(undefined, { maximumFractionDigits: 2 });
+      return num.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 6 });
+    }
+
+    function fmtPct(v) {
+      return `${n(v).toFixed(2)}%`;
+    }
+
+    function degradationPct(row) {
+      const ideal = n(row.ideal_pnl);
+      const bad = n(row.bad_pnl);
+      if (ideal === 0) return 0;
+      return ((ideal - bad) / Math.abs(ideal)) * 100;
+    }
+
+    function isActive(row) {
+      return n(row.trade_count) > 0 || n(row.open_position_count) > 0 || n(row.realistic_pnl) !== 0;
+    }
+
+    function loadMetrics(rows) {
+      state.metrics = rows;
+      updateSummary();
+      applyFilters();
+      const firstActive = state.filtered.find(isActive);
+      if (firstActive) selectWallet(firstActive.wallet);
+    }
+
+    function updateSummary() {
+      els.walletCount.textContent = state.metrics.length.toLocaleString();
+      const active = state.metrics.filter(isActive);
+      els.activeCount.textContent = active.length.toLocaleString();
+      const realistic = state.metrics.map(r => n(r.realistic_pnl));
+      els.bestPnl.textContent = realistic.length ? fmt(Math.max(...realistic)) : '0';
+      els.worstPnl.textContent = realistic.length ? fmt(Math.min(...realistic)) : '0';
+      els.bestPnl.className = 'value good';
+      els.worstPnl.className = 'value bad';
+
+      const freshThresholdMs = 120000;
+      const nowish = Math.max(0, ...state.metrics.map(r => n(r.last_recv_ts_ms)));
+      const fresh = state.metrics.filter(r => n(r.last_recv_ts_ms) > 0 && (nowish - n(r.last_recv_ts_ms)) <= freshThresholdMs);
+      const stale = state.metrics.filter(r => n(r.trade_count) > 0 && (n(r.last_recv_ts_ms) === 0 || (nowish - n(r.last_recv_ts_ms)) > freshThresholdMs));
+      const top10 = [...state.metrics].sort((a, b) => n(b.realistic_pnl) - n(a.realistic_pnl)).slice(0, 10);
+      const top10LiveCount = top10.filter(r => n(r.last_recv_ts_ms) > 0 && (nowish - n(r.last_recv_ts_ms)) <= freshThresholdMs).length;
+
+      els.top10Live.textContent = `${top10LiveCount}/10`;
+      els.top10Live.className = `value ${top10LiveCount >= 8 ? 'good' : top10LiveCount >= 5 ? 'warn' : 'bad'}`;
+      els.freshWallets.textContent = fresh.length.toLocaleString();
+      els.freshWallets.className = 'value good';
+      els.staleWallets.textContent = stale.length.toLocaleString();
+      els.staleWallets.className = `value ${stale.length === 0 ? 'good' : 'warn'}`;
+      const worstLatency = state.metrics.length ? Math.max(...state.metrics.map(r => n(r.max_latency_ms))) : 0;
+      els.worstLatency.textContent = fmt(worstLatency);
+      els.worstLatency.className = `value ${worstLatency > 300000 ? 'bad' : worstLatency > 120000 ? 'warn' : 'good'}`;
+
+      renderTop10Health(top10, nowish, freshThresholdMs);
+    }
+
+    function applyFilters() {
+      const q = els.searchInput.value.trim().toLowerCase();
+      const mode = els.activeFilter.value;
+      const sort = els.sortSelect.value;
+
+      let rows = [...state.metrics];
+
+      if (q) rows = rows.filter(r => (r.wallet || '').toLowerCase().includes(q));
+      if (mode === 'active') rows = rows.filter(isActive);
+      if (mode === 'inactive') rows = rows.filter(r => !isActive(r));
+
+      rows.sort((a, b) => {
+        if (sort === 'realistic_asc') return n(a.realistic_pnl) - n(b.realistic_pnl);
+        if (sort === 'ideal_desc') return n(b.ideal_pnl) - n(a.ideal_pnl);
+        if (sort === 'ideal_asc') return n(a.ideal_pnl) - n(b.ideal_pnl);
+        if (sort === 'bad_desc') return n(b.bad_pnl) - n(a.bad_pnl);
+        if (sort === 'bad_asc') return n(a.bad_pnl) - n(b.bad_pnl);
+        if (sort === 'trade_desc') return n(b.trade_count) - n(a.trade_count);
+        if (sort === 'degrade_desc') return degradationPct(b) - degradationPct(a);
+        return n(b.realistic_pnl) - n(a.realistic_pnl);
+      });
+
+      rows.sort((a, b) => Number(isActive(b)) - Number(isActive(a)) || 0);
+
+      state.filtered = rows;
+      renderTable();
+
+      if (!state.selectedWallet && rows.length) selectWallet(rows[0].wallet);
+      if (state.selectedWallet && !rows.some(r => r.wallet === state.selectedWallet) && rows.length) {
+        selectWallet(rows[0].wallet);
+      }
+    }
+
+    function renderTable() {
+      els.leaderboardBody.innerHTML = '';
+      state.filtered.forEach((row, idx) => {
+        const tr = document.createElement('tr');
+        if (row.wallet === state.selectedWallet) tr.classList.add('active');
+        tr.innerHTML = `
+          <td>${idx + 1}</td>
+          <td title="${row.wallet}">${shortWallet(row.wallet)}</td>
+          <td>${fmt(row.trade_count)}</td>
+          <td class="${n(row.realistic_pnl) >= 0 ? 'good' : 'bad'}">${fmt(row.realistic_pnl)}</td>
+          <td class="${n(row.ideal_pnl) >= 0 ? 'good' : 'bad'}">${fmt(row.ideal_pnl)}</td>
+          <td class="${n(row.bad_pnl) >= 0 ? 'good' : 'bad'}">${fmt(row.bad_pnl)}</td>
+          <td class="${degradationPct(row) >= 0 ? 'warn' : 'good'}">${fmtPct(degradationPct(row))}</td>
+          <td class="${n(row.unrealized_pnl) >= 0 ? 'good' : 'bad'}">${fmt(row.unrealized_pnl)}</td>
+          <td>${fmt(row.open_position_count)}</td>
+        `;
+        tr.addEventListener('click', () => selectWallet(row.wallet));
+        els.leaderboardBody.appendChild(tr);
+      });
+    }
+
+    function renderTop10Health(top10, nowish, freshThresholdMs) {
+      els.top10HealthBody.innerHTML = '';
+      top10.forEach((row, idx) => {
+        const ageMs = n(row.last_recv_ts_ms) > 0 ? Math.max(0, nowish - n(row.last_recv_ts_ms)) : Infinity;
+        const status = ageMs <= freshThresholdMs ? 'Live' : ageMs < Infinity ? 'Stale' : 'No recv';
+        const statusClass = ageMs <= freshThresholdMs ? 'good' : ageMs < Infinity ? 'warn' : 'bad';
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${idx + 1}</td>
+          <td title="${row.wallet}">${shortWallet(row.wallet)}</td>
+          <td class="${n(row.realistic_pnl) >= 0 ? 'good' : 'bad'}">${fmt(row.realistic_pnl)}</td>
+          <td>${fmt(row.trade_count)}</td>
+          <td>${n(row.last_recv_ts_ms) ? new Date(n(row.last_recv_ts_ms)).toLocaleTimeString() : '-'}</td>
+          <td class="${statusClass}">${status}</td>
+        `;
+        els.top10HealthBody.appendChild(tr);
+      });
+    }
+
+    function shortWallet(wallet) {
+      if (!wallet) return '';
+      return `${wallet.slice(0, 8)}...${wallet.slice(-6)}`;
+    }
+
+    function selectWallet(wallet) {
+      state.selectedWallet = wallet;
+      renderTable();
+      const row = state.metrics.find(r => r.wallet === wallet);
+      if (!row) return;
+
+      els.detailWallet.textContent = wallet;
+      els.detailRealistic.textContent = fmt(row.realistic_pnl);
+      els.detailRealistic.className = `value ${n(row.realistic_pnl) >= 0 ? 'good' : 'bad'}`;
+      els.detailDegrade.textContent = fmtPct(degradationPct(row));
+      els.detailTrades.textContent = fmt(row.trade_count);
+      els.detailOpenPositions.textContent = fmt(row.open_position_count);
+
+      const snapshot = {
+        trade_count: row.trade_count,
+        unique_event_count: row.unique_event_count,
+        realized_pnl: row.realized_pnl,
+        ideal_pnl: row.ideal_pnl,
+        realistic_pnl: row.realistic_pnl,
+        bad_pnl: row.bad_pnl,
+        unrealized_pnl: row.unrealized_pnl,
+        total_pnl: row.total_pnl,
+        total_fees: row.total_fees,
+        slippage_cost_total: row.slippage_cost_total,
+        avg_latency_ms: row.avg_latency_ms,
+        max_latency_ms: row.max_latency_ms,
+        last_fill_source: row.last_fill_source,
+        polled_fill_count: row.polled_fill_count,
+        websocket_fill_count: row.websocket_fill_count,
+      };
+      els.snapshotBox.textContent = JSON.stringify(snapshot, null, 2);
+      els.positionsBox.textContent = prettyPositions(row.positions_json);
+      renderEquityChart(wallet);
+    }
+
+    function prettyPositions(raw) {
+      if (!raw) return 'No positions JSON';
+      try {
+        return JSON.stringify(JSON.parse(raw), null, 2);
+      } catch {
+        return raw;
+      }
+    }
+
+    function loadEquityFiles(files) {
+      state.equityByWallet = {};
+      const tasks = [...files].map(file => file.text().then(text => ({ file, text })));
+      Promise.all(tasks).then(results => {
+        results.forEach(({ file, text }) => {
+          const wallet = file.name.replace(/\.csv$/i, '');
+          const rows = parseCSV(text).map(r => ({
+            ts: n(r.ts),
+            profile: r.profile,
+            equity: n(r.equity),
+          }));
+          state.equityByWallet[wallet] = rows;
+        });
+        if (state.selectedWallet) renderEquityChart(state.selectedWallet);
+      });
+    }
+
+    function renderEquityChart(wallet) {
+      const ctx = els.canvas.getContext('2d');
+      const width = els.canvas.width;
+      const height = els.canvas.height;
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = '#0d1530';
+      ctx.fillRect(0, 0, width, height);
+
+      const rows = state.equityByWallet[wallet] || [];
+      if (!rows.length) {
+        drawEmptyChart(ctx, width, height, 'No equity points loaded for this wallet');
+        return;
+      }
+
+      const profiles = ['ideal', 'realistic', 'bad'];
+      const colors = { ideal: '#60a5fa', realistic: '#a78bfa', bad: '#f87171' };
+      const grouped = Object.fromEntries(profiles.map(p => [p, rows.filter(r => r.profile === p).sort((a,b) => a.ts - b.ts)]));
+      const allPoints = profiles.flatMap(p => grouped[p]);
+      if (!allPoints.length) {
+        drawEmptyChart(ctx, width, height, 'Equity file loaded, but no chartable points found');
+        return;
+      }
+
+      const minTs = Math.min(...allPoints.map(p => p.ts));
+      const maxTs = Math.max(...allPoints.map(p => p.ts));
+      const minEq = Math.min(...allPoints.map(p => p.equity));
+      const maxEq = Math.max(...allPoints.map(p => p.equity));
+
+      const padL = 76, padR = 28, padT = 24, padB = 52;
+      const plotW = width - padL - padR;
+      const plotH = height - padT - padB;
+
+      ctx.strokeStyle = 'rgba(152,164,199,.18)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 6; i++) {
+        const y = padT + (plotH / 5) * i;
+        ctx.beginPath();
+        ctx.moveTo(padL, y);
+        ctx.lineTo(width - padR, y);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = '#98a4c7';
+      ctx.font = '12px Inter, sans-serif';
+      ctx.fillText(fmt(maxEq), 10, padT + 8);
+      ctx.fillText(fmt((maxEq + minEq) / 2), 10, padT + plotH / 2);
+      ctx.fillText(fmt(minEq), 10, padT + plotH);
+
+      profiles.forEach(profile => {
+        const pts = grouped[profile];
+        if (!pts.length) return;
+        ctx.strokeStyle = colors[profile];
+        ctx.lineWidth = profile === 'realistic' ? 3.2 : 2.2;
+        ctx.beginPath();
+        pts.forEach((p, i) => {
+          const x = padL + ((p.ts - minTs) / Math.max(1, maxTs - minTs)) * plotW;
+          const y = padT + (1 - ((p.equity - minEq) / Math.max(1e-9, maxEq - minEq))) * plotH;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      });
+
+      ctx.fillStyle = '#98a4c7';
+      ctx.fillText(new Date(minTs).toLocaleTimeString(), padL, height - 16);
+      ctx.fillText(new Date(maxTs).toLocaleTimeString(), width - padR - 74, height - 16);
+    }
+
+    function drawEmptyChart(ctx, width, height, message) {
+      ctx.fillStyle = '#0d1530';
+      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = '#98a4c7';
+      ctx.font = '16px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(message, width / 2, height / 2);
+      ctx.textAlign = 'left';
+    }
+
+    async function loadMetricsFromServer() {
+      const res = await fetch("live_wallet_metrics.csv?_=" + Date.now());
+      const text = await res.text();
+      const rows = parseCSV(text);
+      loadMetrics(rows);
+    }
+
+    loadMetricsFromServer();
+    setInterval(loadMetricsFromServer, 60000);
+
+    els.searchInput.addEventListener('input', applyFilters);
+    els.activeFilter.addEventListener('change', applyFilters);
+    els.sortSelect.addEventListener('change', applyFilters);
+  </script>
+</body>
+</html>
