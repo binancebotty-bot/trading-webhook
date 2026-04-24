@@ -1,0 +1,21 @@
+# Ignore live output data
+hyperliquid_live_output/
+
+# Ignore logs
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS junk
+.DS_Store
+Thumbs.dbhl_stage2/all_trades.csv 
+*.patch 
+.venv/ 
+hl_stage2/all_trades.csv 
+hl_stage2/hl_copy_output/ 
+*.tmp 
+*.lock 
+*.json 
+*.csv 
