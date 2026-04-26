@@ -271,19 +271,6 @@ def _update_equity_history(state: dict) -> None:
         history = state.get("normalised_portfolio_history")
         if isinstance(history, list):
             _portfolio_history[:] = _normalize_portfolio_history(history)
-        elif PORTFOLIO_HISTORY_FILE.exists():
-            try:
-                _portfolio_history[:] = _normalize_portfolio_history(
-                    json.loads(PORTFOLIO_HISTORY_FILE.read_text(encoding="utf-8"))
-                )
-            except Exception:
-                _portfolio_history[:] = []
-        else:
-            point = state.get("normalised_portfolio") or {}
-            if isinstance(point, dict) and point:
-                _portfolio_history[:] = _normalize_portfolio_history([point])
-            else:
-                _portfolio_history[:] = []
 
         portfolio_state = state.get("normalised_portfolio") or {}
         if isinstance(portfolio_state, dict) and isinstance(portfolio_state.get("copy"), dict):

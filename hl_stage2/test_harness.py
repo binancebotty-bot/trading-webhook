@@ -777,9 +777,9 @@ pt16b = app16b._portfolio_history[-1]
 
 base_shift = pt16a["equity"] - pt16a["alloc"]
 scaled_shift = pt16b["equity"] - pt16b["alloc"]
-check("TEST16-A: canonical realized unchanged by app norm setting", round(pt16b["realized"], 6) == round(pt16a["realized"], 6), f"{pt16a['realized']} -> {pt16b['realized']}")
-check("TEST16-B: canonical drawdown unchanged by app norm setting", round(pt16b["drawdown_usd"], 6) == round(pt16a["drawdown_usd"], 6), f"{pt16a['drawdown_usd']} -> {pt16b['drawdown_usd']}")
-check("TEST16-C: canonical equity shift unchanged by app norm setting", round(scaled_shift, 6) == round(base_shift, 6), f"{base_shift} -> {scaled_shift}")
+check("TEST16-A: realized unchanged by app norm (engine is truth)", round(pt16b["realized"], 6) == round(pt16a["realized"], 6), f"{pt16a['realized']} -> {pt16b['realized']}")
+check("TEST16-B: drawdown_usd unchanged by app norm (engine is truth)", round(pt16b["drawdown_usd"], 6) == round(pt16a["drawdown_usd"], 6), f"{pt16a['drawdown_usd']} -> {pt16b['drawdown_usd']}")
+check("TEST16-C: equity shift unchanged by app norm (engine is truth)", round(scaled_shift, 6) == round(base_shift, 6), f"{base_shift} -> {scaled_shift}")
 check("TEST16-D: no app-side norm rescale log emitted", "[NORM_APPLIED]" not in buf16b.getvalue(), buf16b.getvalue().strip() or "no log")
 
 state16_wallet = {
