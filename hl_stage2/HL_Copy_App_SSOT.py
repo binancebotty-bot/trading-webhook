@@ -1,4 +1,4 @@
-"""
+﻿"""
 HL_Copy_App_SSOT.py
 
 Pure app/model/presentation layer for the Hyperliquid copy-truth stack.
@@ -54,6 +54,8 @@ PORTFOLIO_HISTORY_FILE = DATA_DIR / "portfolio_history.json"
 EQUITY_HISTORY_FILE = DATA_DIR / "equity_history.json"
 UI_STATE_FILE = BASE_DIR / "ui_state.json"
 WALLET_GATE_FILE = BASE_DIR / "wallet_gate.json"
+LIVE_CONFIG_DIR = BASE_DIR / "hl_live_copy_audit"
+LIVE_CONFIG_FILE = LIVE_CONFIG_DIR / "live_config.json"
 SNAP_DIR = DATA_DIR / "snapshots"
 
 USER_WALLET = (os.getenv("HL_USER_WALLET") or "0x7ae3b08bb4e7b085c6db5d635b96bec9715e9205").lower()
@@ -372,6 +374,30 @@ def save_ui_state(patch: Dict[str, Any]) -> Dict[str, Any]:
 def load_wallet_gate() -> Dict[str, Any]:
     g = load_json(WALLET_GATE_FILE, {})
     return g if isinstance(g, dict) else {}
+
+
+def load_live_config() -> Dict[str, Any]:
+    cfg = load_json(LIVE_CONFIG_FILE, {})
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def save_live_config(cfg: Dict[str, Any]) -> None:
+    LIVE_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(LIVE_CONFIG_FILE, cfg)
+
+
+def enforce_live_wallet_limit(cfg: Dict[str, Any], max_live: int = 10) -> Dict[str, Any]:
+    wallets = cfg.get("wallets", {})
+    live = [w for w, v in wallets.items() if v.get("mode") == "LIVE"]
+
+    if len(live) <= max_live:
+        return cfg
+
+    for w in live[max_live:]:
+        wallets[w]["mode"] = "OFF"
+
+    cfg["wallets"] = wallets
+    return cfg
 
 
 def save_wallet_gate(gate: Dict[str, Any]) -> None:
@@ -1057,8 +1083,10 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         pnl_hr = m.copy_realized
         first_ts = min((f.timestamp_ms for f in wallet_fills), default=0)
         last_ts = max((f.timestamp_ms for f in wallet_fills), default=0)
+        active_hours = 0.0
         if first_ts and last_ts > first_ts:
-            pnl_hr = m.copy_realized / max(1 / 60, (last_ts - first_ts) / 3_600_000.0)
+            active_hours = max(1 / 60, (last_ts - first_ts) / 3_600_000.0)
+            pnl_hr = m.copy_realized / active_hours
         avg_position_usd = (m.position_exposure_sum / m.position_exposure_samples) if m.position_exposure_samples else m.current_position_usd
         avg_entry_notional_usd = (m.entry_notional_sum / m.entry_notional_count) if m.entry_notional_count else 0.0
         pct_entries_ge10 = (m.entry_notional_ge10_count / m.entry_notional_count * 100.0) if m.entry_notional_count else 0.0
@@ -1097,12 +1125,16 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "avg_exit_disadvantage_bps": round((m.total_exit_disadvantage_bps / m.measured_delta_exit_count) if m.measured_delta_exit_count else 0.0, 8),
             "win_rate": round((m.win_count / max(1, m.win_count + m.loss_count) * 100.0) if (m.win_count + m.loss_count) else 0.0, 6),
             "pnl_per_hour": round(pnl_hr, 8),
+            "active_hours": round(active_hours, 8),
             "pnl_per_trade": round((m.copy_realized / m.exit_count) if m.exit_count else 0.0, 8),
             "current_position_usd": round(m.current_position_usd, 8),
             "avg_position_usd": round(avg_position_usd, 8),
             "max_position_usd": round(m.max_position_usd, 8),
+            "position_exposure_sum": round(m.position_exposure_sum, 8),
+            "position_exposure_samples": m.position_exposure_samples,
             "avg_entry_notional_usd": round(avg_entry_notional_usd, 8),
             "max_entry_notional_usd": round(m.max_entry_notional_usd, 8),
+            "entry_notional_sum": round(m.entry_notional_sum, 8),
             "entry_notional_count": m.entry_notional_count,
             "entry_notional_ge10_count": m.entry_notional_ge10_count,
             "pct_entries_ge10": round(pct_entries_ge10, 8),
@@ -1130,21 +1162,16 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     # User wallet excluded from combined portfolio. Optional INC toggle excludes
     # a wallet from combined graph/header aggregation only, not from tracking.
     portfolio_wallets = [r for r in rows if not r["is_user_wallet"] and r.get("include_in_portfolio", True)]
-    included_wallets = {str(r.get("wallet", "")).lower() for r in portfolio_wallets}
-    included_trade_returns = [fnum(t.get("return_pct")) for t in trades if str(t.get("wallet", "")).lower() in included_wallets]
-    portfolio_avg_trade_pct = avg(included_trade_returns)
+    # Single canonical aggregate — header, USER row, and validator all read from here.
+    sa = selected_aggregate(portfolio_wallets, trades, norm_base)
     alloc = sum(fnum(r["alloc"]) for r in portfolio_wallets)
-    lead_equity = sum(fnum(r["lead"]["equity"]) for r in portfolio_wallets)
-    copy_equity = sum(fnum(r["copy"]["equity"]) for r in portfolio_wallets)
-    lead_real = sum(fnum(r["lead"]["realized"]) for r in portfolio_wallets)
-    lead_unreal = sum(fnum(r["lead"]["unrealized"]) for r in portfolio_wallets)
-    copy_real = sum(fnum(r["copy"]["realized"]) for r in portfolio_wallets)
-    copy_unreal = sum(fnum(r["copy"]["unrealized"]) for r in portfolio_wallets)
+    lead_equity = sa["lead_real"] + sa["lead_unreal"] + alloc
+    copy_equity = sa["copy_real"] + sa["copy_unreal"] + alloc
+    lead_real  = sa["lead_real"];  lead_unreal  = sa["lead_unreal"]
+    copy_real  = sa["copy_real"];  copy_unreal  = sa["copy_unreal"]
     lead_peak = max(alloc, lead_equity)
     copy_peak = max(alloc, copy_equity)
-    open_notional_usd = sum(fnum(r.get("current_position_usd")) for r in portfolio_wallets)
-    avg_position_usd = avg([fnum(r.get("avg_position_usd")) for r in portfolio_wallets if fnum(r.get("avg_position_usd")) > 0])
-    max_required_leverage = max([fnum(r.get("required_leverage")) for r in portfolio_wallets] or [0.0])
+    open_notional_usd = sa["current_position_usd"]
     # Rebuild combined graph by timestamp using latest wallet lead/copy equity at each event.
     portfolio_history = build_portfolio_history(rows, ui)
     if portfolio_history:
@@ -1153,16 +1180,24 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     lead_live_dd = max(0.0, lead_peak - lead_equity)
     copy_live_dd = max(0.0, copy_peak - copy_equity)
     max_open_notional_usd = max([fnum(p.get("open_notional_usd")) for p in portfolio_history] or [open_notional_usd])
+    lead_live_dd = fnum((portfolio_history[-1].get("lead") or {}).get("drawdown"), lead_live_dd) if portfolio_history else lead_live_dd
+    copy_live_dd = fnum((portfolio_history[-1].get("copy") or {}).get("drawdown"), copy_live_dd) if portfolio_history else copy_live_dd
+    lead_maxdd = max((fnum((p.get("lead") or {}).get("drawdown")) for p in portfolio_history), default=lead_live_dd)
+    copy_maxdd = max((fnum((p.get("copy") or {}).get("drawdown")) for p in portfolio_history), default=copy_live_dd)
     portfolio = {
         "ts": model_asof,
-        "lead": block(lead_equity, lead_real, lead_unreal, lead_live_dd, max((fnum(p.get("lead", {}).get("drawdown")) for p in portfolio_history), default=lead_live_dd), lead_peak, alloc),
-        "copy": block(copy_equity, copy_real, copy_unreal, copy_live_dd, max((fnum(p.get("copy", {}).get("drawdown")) for p in portfolio_history), default=copy_live_dd), copy_peak, alloc),
+        "lead": block(lead_equity, lead_real, lead_unreal, lead_live_dd, lead_maxdd, lead_equity + lead_live_dd, alloc),
+        "copy": block(copy_equity, copy_real, copy_unreal, copy_live_dd, copy_maxdd, copy_equity + copy_live_dd, alloc),
         "delta": {"equity": round(copy_equity - lead_equity, 8), "realized": round(copy_real - lead_real, 8), "pct": round(((copy_equity - lead_equity) / alloc * 100.0) if alloc else 0.0, 8)},
         "open_notional_usd": round(open_notional_usd, 8),
         "max_open_notional_usd": round(max_open_notional_usd, 8),
-        "avg_position_usd": round(avg_position_usd, 8),
-        "max_required_leverage": round(max_required_leverage, 8),
-        "avg_trade_pct": round(portfolio_avg_trade_pct, 8),
+        "avg_position_usd": round(sa["avg_position_usd"], 8),
+        # max_required_leverage uses same formula as USER row so header matches.
+        "max_required_leverage": round(sa["required_leverage"], 8),
+        "avg_trade_pct": round(sa["avg_trade_pct"], 8),
+        "win_rate": round(sa["win_rate"], 6),
+        "avg_entry_notional_usd": round(sa["avg_entry_notional_usd"], 8),
+        "pct_entries_ge10": round(sa["pct_entries_ge10"], 8),
         "position_alignment_errors": position_alignment_errors,
         "position_alignment_ok": not position_alignment_errors,
     }
@@ -1175,12 +1210,9 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if user_row is not None:
         total_lead_pnl = lead_real + lead_unreal
         total_copy_pnl = copy_real + copy_unreal
-        total_exits = sum(int(r.get("exit_count") or 0) for r in portfolio_wallets)
-        total_wins = sum(int(round(fnum(r.get("win_rate")) * max(0, int(r.get("exit_count") or 0)) / 100.0)) for r in portfolio_wallets)
+        total_exits = sa["exit_count"]
 
         user_curve: List[Dict[str, Any]] = []
-        u_lead_peak = norm_base
-        u_copy_peak = norm_base
         for point in portfolio_history:
             p_alloc = fnum(point.get("alloc"), alloc)
             lead_point = point.get("lead", {}) if isinstance(point.get("lead"), dict) else {}
@@ -1189,10 +1221,11 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             copy_pnl_point = fnum(copy_point.get("equity")) - p_alloc
             u_lead_eq = norm_base + lead_pnl_point
             u_copy_eq = norm_base + copy_pnl_point
-            u_lead_peak = max(u_lead_peak, u_lead_eq)
-            u_copy_peak = max(u_copy_peak, u_copy_eq)
-            u_lead_dd = max(0.0, u_lead_peak - u_lead_eq)
-            u_copy_dd = max(0.0, u_copy_peak - u_copy_eq)
+            # Use stored DD from portfolio_history — it tracks rolling peak across
+            # ALL events (including same-timestamp intermediates) so it is accurate.
+            # Re-deriving from compacted equity values would miss intra-timestamp peaks.
+            u_lead_dd = max(0.0, fnum(lead_point.get("drawdown", lead_point.get("drawdown_usd", 0.0))))
+            u_copy_dd = max(0.0, fnum(copy_point.get("drawdown", copy_point.get("drawdown_usd", 0.0))))
             user_curve.append({
                 "ts": point.get("ts", model_asof),
                 "lead_pnl": round(lead_pnl_point, 8),
@@ -1221,10 +1254,14 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
         u_lead_equity = norm_base + total_lead_pnl
         u_copy_equity = norm_base + total_copy_pnl
-        u_lead_peak = max(norm_base, max((fnum(p.get("lead_equity")) for p in user_curve), default=u_lead_equity))
-        u_copy_peak = max(norm_base, max((fnum(p.get("copy_equity")) for p in user_curve), default=u_copy_equity))
-        u_lead_dd = max(0.0, u_lead_peak - u_lead_equity)
-        u_copy_dd = max(0.0, u_copy_peak - u_copy_equity)
+        # Current DD: use the same lead_live_dd / copy_live_dd that the portfolio
+        # header uses, so header and USER row always match on current DD.
+        u_lead_dd = lead_live_dd
+        u_copy_dd = copy_live_dd
+        u_lead_peak = u_lead_equity + u_lead_dd
+        u_copy_peak = u_copy_equity + u_copy_dd
+        # MaxDD: max stored DD across all user_curve points (uses stored DD from
+        # build_portfolio_history which tracks the full event-level rolling peak).
         u_lead_maxdd = max((fnum(p.get("lead_drawdown")) for p in user_curve), default=u_lead_dd)
         u_copy_maxdd = max((fnum(p.get("copy_drawdown")) for p in user_curve), default=u_copy_dd)
 
@@ -1245,10 +1282,10 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "ws_latency_count": 0,
             "avg_ws_latency_ms": 0.0,
             "avg_latency_ms": 0.0,
-            "entry_count": sum(int(r.get("entry_count") or 0) for r in portfolio_wallets),
-            "exit_count": total_exits,
-            "open_position_count": sum(int(r.get("open_position_count") or 0) for r in portfolio_wallets),
-            "fill_count": sum(int(r.get("fill_count") or 0) for r in portfolio_wallets),
+            "entry_count": sa["entry_count"],
+            "exit_count": sa["exit_count"],
+            "open_position_count": sa["open_position_count"],
+            "fill_count": sa["fill_count"],
             "ws_fill_count": 0,
             "poll_fill_count": sum(int(r.get("poll_fill_count") or 0) for r in portfolio_wallets),
             "ws_coverage": 0.0,
@@ -1258,20 +1295,27 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "measured_delta_exit_count": 0,
             "avg_entry_disadvantage_bps": 0.0,
             "avg_exit_disadvantage_bps": 0.0,
-            "win_rate": round((total_wins / total_exits * 100.0) if total_exits else 0.0, 6),
+            "win_rate": sa["win_rate"],
             "pnl_per_hour": round(sum(fnum(r.get("pnl_per_hour")) for r in portfolio_wallets), 8),
-            "pnl_per_trade": round((copy_real / total_exits) if total_exits else 0.0, 8),
-            "avg_trade_pct": round(portfolio_avg_trade_pct, 8),
-            "current_position_usd": round(open_notional_usd, 8),
-            "avg_position_usd": round(avg_position_usd, 8),
-            "max_position_usd": round(max_open_notional_usd, 8),
-            "required_leverage": round((max_open_notional_usd / norm_base) if norm_base else 0.0, 8),
+            "active_hours": round(sum(fnum(r.get("active_hours")) for r in portfolio_wallets), 8),
+            "pnl_per_trade": sa["pnl_per_trade"],
+            "avg_trade_pct": sa["avg_trade_pct"],
+            "current_position_usd": sa["current_position_usd"],
+            "avg_position_usd": sa["avg_position_usd"],
+            "max_position_usd": sa["max_position_usd"],
+            "avg_entry_notional_usd": sa["avg_entry_notional_usd"],
+            "entry_notional_sum": sa["entry_notional_sum"],
+            "entry_notional_count": sa["entry_notional_count"],
+            "entry_notional_ge10_count": sa["entry_notional_ge10_count"],
+            "pct_entries_ge10": sa["pct_entries_ge10"],
+            "required_leverage": sa["required_leverage"],
             "flags": [] if portfolio.get("position_alignment_ok", True) else ["POSITION_ALIGNMENT_ERROR"],
             "gate": {"mode": "USER_AGGREGATE", "off_mode": None},
             "curve": user_curve[-EQUITY_HISTORY_MAX:],
         })
 
     state = {
+        "live_config": load_live_config(),
         "schema": "app_model_state.v1.derived_only",
         "updated_at": utc_now_iso(),
         "model_asof": model_asof,
@@ -1311,6 +1355,107 @@ def block(equity: float, realized: float, unrealized: float, dd: float, maxdd: f
     }
 
 
+def selected_aggregate(portfolio_wallets: List[Dict[str, Any]], trades: List[Dict[str, Any]], norm_base: float) -> Dict[str, Any]:
+    """One canonical aggregate of all selected (included, non-user) wallets.
+
+    Header cards, USER row, and validate_render_contract must all read from
+    the same aggregate so they are guaranteed to match.
+    """
+    included_wallets = {str(r.get("wallet", "")).lower() for r in portfolio_wallets}
+    sel_trades = [t for t in trades if str(t.get("wallet", "")).lower() in included_wallets]
+
+    lead_real   = sum(fnum((r.get("lead") or {}).get("realized"))   for r in portfolio_wallets)
+    lead_unreal = sum(fnum((r.get("lead") or {}).get("unrealized")) for r in portfolio_wallets)
+    copy_real   = sum(fnum((r.get("copy") or {}).get("realized"))   for r in portfolio_wallets)
+    copy_unreal = sum(fnum((r.get("copy") or {}).get("unrealized")) for r in portfolio_wallets)
+
+    fill_count          = sum(inum(r.get("fill_count"))          for r in portfolio_wallets)
+    exit_count          = sum(inum(r.get("exit_count"))          for r in portfolio_wallets)
+    entry_count         = sum(inum(r.get("entry_count"))         for r in portfolio_wallets)
+    open_position_count = sum(inum(r.get("open_position_count")) for r in portfolio_wallets)
+    curve_stats = selected_combined_curve_stats(portfolio_wallets)
+    current_position_usd = curve_stats["current_exposure"] if curve_stats["has_points"] else sum(fnum(r.get("current_position_usd")) for r in portfolio_wallets)
+    max_position_usd = curve_stats["max_exposure"] if curve_stats["has_points"] else current_position_usd
+
+    pos_exp_sum     = sum(fnum(r.get("position_exposure_sum", 0)) for r in portfolio_wallets)
+    pos_exp_samples = sum(inum(r.get("position_exposure_samples", 0)) for r in portfolio_wallets)
+    ent_not_sum     = sum(fnum(r.get("entry_notional_sum", 0)) for r in portfolio_wallets)
+    ent_not_count   = sum(inum(r.get("entry_notional_count", 0)) for r in portfolio_wallets)
+    ent_not_ge10    = sum(inum(r.get("entry_notional_ge10_count", 0)) for r in portfolio_wallets)
+
+    avg_position_usd     = (pos_exp_sum / pos_exp_samples) if pos_exp_samples > 0 else sum(
+        fnum(r.get("avg_position_usd")) for r in portfolio_wallets if fnum(r.get("avg_position_usd")) > 0
+    ) / max(1, sum(1 for r in portfolio_wallets if fnum(r.get("avg_position_usd")) > 0)) if any(
+        fnum(r.get("avg_position_usd")) > 0 for r in portfolio_wallets
+    ) else 0.0
+    avg_entry_notional_usd = (ent_not_sum / ent_not_count) if ent_not_count > 0 else 0.0
+    pct_entries_ge10       = (ent_not_ge10 / ent_not_count * 100.0) if ent_not_count > 0 else 0.0
+
+    wins     = sum(1 for t in sel_trades if fnum(t.get("copy_pnl")) >= 0)
+    win_rate = (wins / len(sel_trades) * 100.0) if sel_trades else 0.0
+
+    returns       = [fnum(t.get("return_pct")) for t in sel_trades]
+    avg_trade_pct = (sum(returns) / len(returns)) if returns else 0.0
+
+    pnl_per_trade    = (copy_real / exit_count) if exit_count > 0 else 0.0
+    required_leverage = (max_position_usd / norm_base) if norm_base > 0 else 0.0
+
+    return {
+        "lead_real": round(lead_real, 8), "lead_unreal": round(lead_unreal, 8),
+        "copy_real": round(copy_real, 8), "copy_unreal": round(copy_unreal, 8),
+        "fill_count": fill_count, "exit_count": exit_count,
+        "entry_count": entry_count, "open_position_count": open_position_count,
+        "current_position_usd": round(current_position_usd, 8),
+        "max_position_usd": round(max_position_usd, 8),
+        "position_exposure_sum": round(pos_exp_sum, 8),
+        "position_exposure_samples": pos_exp_samples,
+        "entry_notional_sum": round(ent_not_sum, 8),
+        "entry_notional_count": ent_not_count,
+        "entry_notional_ge10_count": ent_not_ge10,
+        "avg_position_usd": round(avg_position_usd, 8),
+        "avg_entry_notional_usd": round(avg_entry_notional_usd, 8),
+        "pct_entries_ge10": round(pct_entries_ge10, 8),
+        "win_rate": round(win_rate, 6),
+        "wins": wins, "total_trades": len(sel_trades),
+        "avg_trade_pct": round(avg_trade_pct, 8),
+        "pnl_per_trade": round(pnl_per_trade, 8),
+        "required_leverage": round(required_leverage, 8),
+        "selected_trades": sel_trades,
+    }
+
+
+def selected_combined_curve_stats(portfolio_rows: List[Dict[str, Any]]) -> Dict[str, float]:
+    events: List[Tuple[str, str, Dict[str, Any]]] = []
+    for r in portfolio_rows:
+        wallet = str(r.get("wallet", ""))
+        curve = r.get("curve", [])
+        for p in curve if isinstance(curve, list) else []:
+            ts = str(p.get("ts", ""))
+            if ts:
+                events.append((ts, wallet, p))
+    events.sort(key=lambda x: x[0])
+    latest: Dict[str, Dict[str, Any]] = {}
+    current_lead_dd = current_copy_dd = current_exposure = 0.0
+    max_lead_dd = max_copy_dd = max_exposure = 0.0
+    for _ts, wallet, point in events:
+        latest[wallet] = point
+        current_lead_dd = sum(fnum(v.get("lead_drawdown")) for v in latest.values())
+        current_copy_dd = sum(fnum(v.get("copy_drawdown")) for v in latest.values())
+        current_exposure = sum(fnum(v.get("open_notional_usd")) for v in latest.values())
+        max_lead_dd = max(max_lead_dd, current_lead_dd)
+        max_copy_dd = max(max_copy_dd, current_copy_dd)
+        max_exposure = max(max_exposure, current_exposure)
+    return {
+        "has_points": bool(events),
+        "current_lead_dd": round(current_lead_dd, 8),
+        "current_copy_dd": round(current_copy_dd, 8),
+        "max_lead_dd": round(max_lead_dd, 8),
+        "max_copy_dd": round(max_copy_dd, 8),
+        "current_exposure": round(current_exposure, 8),
+        "max_exposure": round(max_exposure, 8),
+    }
+
+
 def build_portfolio_history(rows: List[Dict[str, Any]], ui: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     events: List[Tuple[str, str, Dict[str, Any]]] = []
     ui = ui or {}
@@ -1339,10 +1484,10 @@ def build_portfolio_history(rows: List[Dict[str, Any]], ui: Optional[Dict[str, A
         open_notional_usd = sum(fnum(v.get("open_notional_usd")) for v in latest.values())
         lead_equity = alloc + lead_pnl
         copy_equity = alloc + copy_pnl
-        lead_peak = max(lead_peak or alloc, lead_equity)
-        copy_peak = max(copy_peak or alloc, copy_equity)
-        lead_dd = max(0.0, lead_peak - lead_equity)
-        copy_dd = max(0.0, copy_peak - copy_equity)
+        lead_dd = sum(fnum(v.get("lead_drawdown")) for v in latest.values())
+        copy_dd = sum(fnum(v.get("copy_drawdown")) for v in latest.values())
+        lead_peak = lead_equity + lead_dd
+        copy_peak = copy_equity + copy_dd
         delta_eq = copy_equity - lead_equity
         out.append({
             "ts": ts,
@@ -1501,7 +1646,115 @@ def dual(v: float, base: float, decimals: int = 2) -> str:
     return f"{money(v, decimals)} ({(v / base * 100.0) if base else 0.0:+.2f}%)"
 
 
+def has_num(v: Any) -> bool:
+    if v is None or v == "" or isinstance(v, bool):
+        return False
+    try:
+        return math.isfinite(float(v))
+    except Exception:
+        return False
+
+
+def money_or_dash(v: Any, decimals: int = 2) -> str:
+    return money(v, decimals) if has_num(v) else "—"
+
+
+def pct_or_dash(v: Any, decimals: int = 1) -> str:
+    return pct(v, decimals) if has_num(v) else "—"
+
+
+def dual_or_dash(v: Any, base: float, decimals: int = 2) -> str:
+    return dual(fnum(v), base, decimals) if has_num(v) else "—"
+
+
+def x_or_dash(v: Any, decimals: int = 2) -> str:
+    return f"{fnum(v):.{decimals}f}x" if has_num(v) else "—"
+
+
+def is_present_num(v: Any) -> bool:
+    return has_num(v)
+
+
+def fmt_money_or_dash(v: Any, decimals: int = 2) -> str:
+    return money(v, decimals) if is_present_num(v) else '<span class="missing">—</span>'
+
+
+def fmt_pct_or_dash(v: Any, decimals: int = 1) -> str:
+    return pct(v, decimals) if is_present_num(v) else '<span class="missing">—</span>'
+
+
+def fmt_dual_or_dash(value: Any, alloc: float, decimals: int = 2) -> str:
+    return dual(fnum(value), alloc, decimals) if is_present_num(value) else '<span class="missing">—</span>'
+
+
+def fmt_x_or_dash(v: Any, decimals: int = 2) -> str:
+    return f"{fnum(v):.{decimals}f}x" if is_present_num(v) else '<span class="missing">—</span>'
+
+
+def td_num(sort_value: Any, content: str, cls: str = "") -> str:
+    if not has_num(sort_value):
+        cell_cls = f"{cls} missing muted".strip()
+        return f'<td class="{cell_cls}" data-sort="-999999999">—</td>'
+    return f'<td class="{cls}" data-sort="{fnum(sort_value):.12g}">{content}</td>'
+
+
+def active_wallet_row(row: Dict[str, Any]) -> bool:
+    return any(inum(row.get(k), 0) > 0 for k in ("fill_count", "entry_count", "exit_count", "open_position_count"))
+
+
+def active_wallet(row: Dict[str, Any]) -> bool:
+    return active_wallet_row(row)
+
+
+def core_missing(row: Dict[str, Any], field: str) -> str:
+    flags = row.setdefault("flags", [])
+    labelled = f"DATA_FIELD_MISSING:{field}" if field else "DATA_FIELD_MISSING"
+    if isinstance(flags, list):
+        if "DATA_FIELD_MISSING" not in flags:
+            flags.append("DATA_FIELD_MISSING")
+        if labelled not in flags:
+            flags.append(labelled)
+    safe = html.escape(field)
+    return f'<span class="badge neg" title="Missing core data field: {safe}">WIRE_ERR</span>'
+
+
+def required_num_or_wire_err(row: Dict[str, Any], label: str, value: Any) -> Tuple[bool, float, str]:
+    if has_num(value):
+        return True, fnum(value), ""
+    if active_wallet(row):
+        return False, 0.0, core_missing(row, label)
+    return True, 0.0, ""
+
+
+def core_td(row: Dict[str, Any], present: bool, sort_value: Any, content: str, cls: str = "", field: str = "") -> str:
+    if active_wallet(row) and (not present or not has_num(sort_value)):
+        return f'<td class="{cls} neg" data-sort="-999999999">{core_missing(row, field)}</td>'
+    return f'<td class="{cls}" data-sort="{fnum(sort_value):.12g}">{content}</td>'
+
+
+def dash_td(cls: str = "", field: str = "") -> str:
+    attr = f' data-field="{html.escape(field)}"' if field else ""
+    return f'<td class="{cls} missing muted" data-sort="-999999999"{attr}>—</td>'
+
+
+def money_cell_core(row: Dict[str, Any], label: str, value: Any, cls: str = "") -> str:
+    ok, num, err = required_num_or_wire_err(row, label, value)
+    return f'<td class="{cls} {"neg" if not ok else ""}" data-sort="{num:.12g}">{err if not ok else money(num)}</td>'
+
+
+def pct_cell_core(row: Dict[str, Any], label: str, value: Any, cls: str = "", decimals: int = 1) -> str:
+    ok, num, err = required_num_or_wire_err(row, label, value)
+    return f'<td class="{cls} {"neg" if not ok else ""}" data-sort="{num:.12g}">{err if not ok else pct(num, decimals)}</td>'
+
+
+def dual_cell_core(row: Dict[str, Any], label: str, value: Any, base: float, cls: str = "", decimals: int = 2) -> str:
+    ok, num, err = required_num_or_wire_err(row, label, value)
+    return f'<td class="{cls} {"neg" if not ok else ""}" data-sort="{num:.12g}">{err if not ok else dual(num, base, decimals)}</td>'
+
+
 def css_class(v: Any) -> str:
+    if not has_num(v):
+        return "missing muted"
     x = fnum(v)
     return "pos" if x > 0 else "neg" if x < 0 else "zero"
 
@@ -1534,6 +1787,9 @@ def latest_history_block_dd(history: List[Dict[str, Any]], side: str, which: str
         elif side == "copy" and isinstance(point, dict):
             val = block_num(point, "drawdown", "drawdown_usd", default=0.0)
             return max(0.0, val)
+        elif isinstance(point, dict):
+            val = block_num(point, f"{side}_drawdown", default=0.0)
+            return max(0.0, val)
     return None
 
 
@@ -1545,7 +1801,338 @@ def max_history_block_dd(history: List[Dict[str, Any]], side: str) -> Optional[f
             vals.append(max(0.0, block_num(block, "drawdown", "drawdown_usd", default=0.0)))
         elif side == "copy" and isinstance(point, dict):
             vals.append(max(0.0, block_num(point, "drawdown", "drawdown_usd", default=0.0)))
+        elif isinstance(point, dict):
+            vals.append(max(0.0, block_num(point, f"{side}_drawdown", default=0.0)))
     return max(vals) if vals else None
+
+
+def dd_current(block: Dict[str, Any], history: Optional[List[Dict[str, Any]]] = None, side: Optional[str] = None) -> float:
+    if isinstance(block, dict) and any(has_num(block.get(k)) for k in ("drawdown", "drawdown_usd")):
+        return max(0.0, block_num(block, "drawdown", "drawdown_usd", default=0.0))
+    if isinstance(block, dict) and has_num(block.get("equity")) and has_num(block.get("peak")):
+        return max(0.0, fnum(block.get("peak")) - fnum(block.get("equity")))
+    if isinstance(block, dict) and has_num(block.get("equity")) and has_num(block.get("peak_equity")):
+        return max(0.0, fnum(block.get("peak_equity")) - fnum(block.get("equity")))
+    hist = latest_history_block_dd(history or [], side or "copy") if history is not None and side else None
+    if hist is not None:
+        return max(0.0, hist)
+    return 0.0
+
+
+def dd_max(block: Dict[str, Any], history: Optional[List[Dict[str, Any]]] = None, side: Optional[str] = None) -> float:
+    block_max = 0.0
+    if isinstance(block, dict) and any(has_num(block.get(k)) for k in ("max_drawdown", "maxdd")):
+        block_max = max(0.0, block_num(block, "max_drawdown", "maxdd", default=0.0))
+    hist_max = max_history_block_dd(history or [], side or "copy") if history is not None and side else None
+    return max(block_max, hist_max or 0.0, dd_current(block, history, side))
+
+
+def get_current_dd(block: Dict[str, Any], curve: Optional[List[Dict[str, Any]]] = None, side_prefix: Optional[str] = None) -> float:
+    return dd_current(block, curve, side_prefix)
+
+
+def get_max_dd(block: Dict[str, Any], curve: Optional[List[Dict[str, Any]]] = None, side_prefix: Optional[str] = None) -> float:
+    return dd_max(block, curve, side_prefix)
+
+
+def format_dd(value: Any, alloc: float) -> str:
+    return dual(-max(0.0, fnum(value)), alloc)
+
+
+DASHBOARD_CELL_CONTRACT = {
+    "header_pnl": "portfolio lead/copy total pnl = equity - alloc; delta = copy - lead",
+    "header_realised": "portfolio lead/copy realised = sum included non-user row lead/copy realised",
+    "header_unrealised": "portfolio lead/copy unrealised = sum included non-user row lead/copy unrealised",
+    "header_drawdown": "portfolio current DD = current peak - current equity; copy max = max history/current",
+    "header_maxdd": "portfolio maxDD = max historical drawdown/current DD",
+    "header_exposure": "open = sum included current_position_usd; max = max portfolio history open_notional_usd; base = open/norm_base",
+    "header_copyability": "avg_trade_pct from included copy_trades.return_pct; avg_trade_usd = included copy realised/exits; avg_pos from included avg_position_usd; req_lev = max required leverage",
+    "header_activity": "fills/exits/open_pos/win from included non-user rows only",
+    "wallet": "wallet address + user/aggregate badge only",
+    "lead_equity": "row['lead']['equity'] = alloc + lead.realized + lead.unrealized",
+    "copy_equity": "row['copy']['equity'] = alloc + copy.realized + copy.unrealized",
+    "lead_real": "row['lead']['realized']",
+    "copy_real": "row['copy']['realized']",
+    "lead_unreal": "row['lead']['unrealized']",
+    "copy_unreal": "row['copy']['unrealized']",
+    "lead_dd": "get_current_dd(row['lead'])",
+    "copy_dd": "get_current_dd(row['copy'])",
+    "lead_maxdd": "get_max_dd(row['lead'], row['curve'], 'lead')",
+    "copy_maxdd": "get_max_dd(row['copy'], row['curve'], 'copy')",
+    "delta": "row['copy']['equity'] - row['lead']['equity']; pct = delta / row['alloc'] * 100",
+    "pnl_per_hour": "row['pnl_per_hour']",
+    "avg_trade_pct": "average copy_trades.return_pct for wallet; user aggregate uses selected included trades",
+    "win_rate": "wins / closed copy trades * 100; win = copy_pnl >= 0",
+    "avg_position_usd": "row['avg_position_usd'] = position_exposure_sum / position_exposure_samples",
+    "max_position_usd": "row['max_position_usd']",
+    "avg_entry_notional_usd": "entry_notional_sum / entry_notional_count",
+    "pct_entries_ge10": "entry_notional_ge10_count / entry_notional_count * 100",
+    "required_leverage": "max_position_usd / alloc",
+    "fills_lc": "lead=row['fill_count']; copy=distinct expected_copy_fills.leader_fill_id for wallet",
+    "exits_lc": "lead=row['exit_count']; copy=count copy_trades rows for wallet",
+    "pos_lc": "lead/copy non-flat counts from final_position_alignment; fallback open_position_count",
+    "include_control": "row['include_in_portfolio'] affects combined header/graph/user aggregate only",
+    "wallet_model": "global/proportional/fixed wallet config controls",
+}
+
+
+def validate_render_contract(state: Dict[str, Any]) -> List[str]:
+    """Validate dashboard cell contract. Returns list of error strings; never throws."""
+    errors: List[str] = []
+    try:
+        ui = state.get("ui_state") or {}
+        norm_base = fnum(ui.get("norm_base"), DEFAULT_NORM_BASE)
+        rows = state.get("wallet_rows") or []
+        copy_trades = state.get("copy_trades") or []
+
+        trades_by_wallet: Dict[str, List[Dict[str, Any]]] = {}
+        for t in copy_trades:
+            w = str(t.get("wallet", "")).lower()
+            trades_by_wallet.setdefault(w, []).append(t)
+
+        selected_rows = [
+            r for r in rows
+            if not r.get("is_user_wallet") and wallet_included(str(r.get("wallet", "")), ui)
+        ]
+
+        # A. Normal active wallet rows
+        for r in rows:
+            if r.get("is_user_wallet"):
+                continue
+            if not active_wallet(r):
+                continue
+            wallet = str(r.get("wallet", "")).lower()
+            wlabel = wallet[:10]
+            alloc = fnum(r.get("alloc"), norm_base)
+            lead = r.get("lead") if isinstance(r.get("lead"), dict) else {}
+            copy = r.get("copy") if isinstance(r.get("copy"), dict) else {}
+
+            lead_real = fnum(lead.get("realized"))
+            lead_unreal = fnum(lead.get("unrealized"))
+            lead_eq = fnum(lead.get("equity"))
+            if abs(lead_eq - (alloc + lead_real + lead_unreal)) > 0.01:
+                errors.append(f"{wlabel}: lead equity {lead_eq:.4f} != alloc({alloc:.2f})+real+unreal {alloc+lead_real+lead_unreal:.4f}")
+
+            copy_real = fnum(copy.get("realized"))
+            copy_unreal = fnum(copy.get("unrealized"))
+            copy_eq = fnum(copy.get("equity"))
+            if abs(copy_eq - (alloc + copy_real + copy_unreal)) > 0.01:
+                errors.append(f"{wlabel}: copy equity {copy_eq:.4f} != alloc({alloc:.2f})+real+unreal {alloc+copy_real+copy_unreal:.4f}")
+
+            lead_dd = get_current_dd(lead)
+            copy_dd = get_current_dd(copy)
+            if lead_dd < -0.01:
+                errors.append(f"{wlabel}: lead DD {lead_dd:.4f} is negative")
+            if copy_dd < -0.01:
+                errors.append(f"{wlabel}: copy DD {copy_dd:.4f} is negative")
+
+            lead_maxdd = get_max_dd(lead)
+            copy_maxdd = get_max_dd(copy)
+            if lead_maxdd < lead_dd - 0.01:
+                errors.append(f"{wlabel}: lead maxDD {lead_maxdd:.4f} < currentDD {lead_dd:.4f}")
+            if copy_maxdd < copy_dd - 0.01:
+                errors.append(f"{wlabel}: copy maxDD {copy_maxdd:.4f} < currentDD {copy_dd:.4f}")
+
+            delta = r.get("delta") if isinstance(r.get("delta"), dict) else {}
+            delta_eq = fnum(delta.get("equity"))
+            if abs(delta_eq - (copy_eq - lead_eq)) > 0.01:
+                errors.append(f"{wlabel}: delta.equity {delta_eq:.4f} != copy_eq-lead_eq {copy_eq-lead_eq:.4f}")
+
+            wallet_trades = trades_by_wallet.get(wallet, [])
+            exit_count = inum(r.get("exit_count"), 0)
+            if exit_count == 0 and inum(r.get("entry_notional_count"), 0) > 0:
+                entry_notional = fnum(r.get("entry_notional_sum"))
+                fee_bps = fnum(ui.get("fee_bps"), DEFAULT_FEE_BPS)
+                copy_bps = fee_bps + fnum(ui.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS)
+                expected_lead_real = -entry_notional * fee_bps / 10000.0
+                expected_copy_real = -entry_notional * copy_bps / 10000.0
+                if abs(lead_real - expected_lead_real) > 0.01:
+                    errors.append(f"{wlabel}: zero-exit lead realized {lead_real:.4f} != entry cost {expected_lead_real:.4f}")
+                if abs(copy_real - expected_copy_real) > 0.01:
+                    errors.append(f"{wlabel}: zero-exit copy realized {copy_real:.4f} != entry cost {expected_copy_real:.4f}")
+
+            if exit_count == 0:
+                rendered = render_row(r, norm_base, ui, state)
+                for field in ("win_rate", "avg_trade_pct"):
+                    marker = f'data-field="{field}"'
+                    if marker in rendered:
+                        cell = rendered[rendered.rfind("<td", 0, rendered.find(marker)):rendered.find("</td>", rendered.find(marker)) + 5]
+                        if "—" not in cell:
+                            errors.append(f"{wlabel}: zero-exit {field} rendered with denominator-free value instead of N/A")
+                active_hours = fnum(r.get("active_hours"))
+                pnl_hr = fnum(r.get("pnl_per_hour"))
+                if active_hours > 0:
+                    expected_pnl_hr = copy_real / active_hours
+                    if abs(pnl_hr - expected_pnl_hr) > 0.01:
+                        errors.append(f"{wlabel}: pnl_per_hour {pnl_hr:.4f} != copy_realized/active_hours {expected_pnl_hr:.4f}")
+                else:
+                    marker = 'data-field="pnl_per_hour"'
+                    if marker in rendered:
+                        cell = rendered[rendered.rfind("<td", 0, rendered.find(marker)):rendered.find("</td>", rendered.find(marker)) + 5]
+                        if "—" not in cell:
+                            errors.append(f"{wlabel}: pnl_per_hour {pnl_hr:.4f} has no active_hours denominator")
+            if exit_count > 0 and wallet_trades and len(wallet_trades) == exit_count:
+                returns = [fnum(t.get("return_pct")) for t in wallet_trades]
+                expected_atp = sum(returns) / len(returns)
+                if abs(fnum(r.get("avg_trade_pct")) - expected_atp) > 0.1:
+                    errors.append(f"{wlabel}: avg_trade_pct {fnum(r.get('avg_trade_pct')):.4f} != avg(return_pct) {expected_atp:.4f}")
+                wins = sum(1 for t in wallet_trades if fnum(t.get("copy_pnl")) >= 0)
+                expected_wr = wins / len(wallet_trades) * 100.0
+                if abs(fnum(r.get("win_rate")) - expected_wr) > 1.0:
+                    errors.append(f"{wlabel}: win_rate {fnum(r.get('win_rate')):.4f} != {expected_wr:.4f}")
+
+            max_pos = fnum(r.get("max_position_usd"))
+            cur_pos = fnum(r.get("current_position_usd"))
+            req_lev = fnum(r.get("required_leverage"))
+            if alloc > 0 and max_pos > 0:
+                expected_lev = max_pos / alloc
+                if abs(req_lev - expected_lev) > 0.01:
+                    errors.append(f"{wlabel}: required_leverage {req_lev:.4f} != max_pos/alloc {expected_lev:.4f}")
+            if max_pos < cur_pos - 0.01:
+                errors.append(f"{wlabel}: max_position_usd {max_pos:.4f} < current_position_usd {cur_pos:.4f}")
+
+            lc = wallet_lead_copy_counts(r, state)
+            if lc["fills"][0] != lc["fills"][1]:
+                errors.append(f"{wlabel}: fills L/C {lc['fills'][0]}/{lc['fills'][1]}")
+            if lc["exits"][0] != lc["exits"][1]:
+                errors.append(f"{wlabel}: exits L/C {lc['exits'][0]}/{lc['exits'][1]}")
+            if lc["pos"][0] != lc["pos"][1]:
+                errors.append(f"{wlabel}: pos L/C {lc['pos'][0]}/{lc['pos'][1]}")
+
+        # B. User aggregate row
+        user_rows = [r for r in rows if r.get("is_user_wallet")]
+        if user_rows:
+            u = user_rows[0]
+            u_lead = u.get("lead") if isinstance(u.get("lead"), dict) else {}
+            u_copy = u.get("copy") if isinstance(u.get("copy"), dict) else {}
+            u_alloc = fnum(u.get("alloc"), norm_base)
+            if abs(u_alloc - norm_base) > 0.01:
+                errors.append(f"user_aggregate alloc {u_alloc:.4f} != norm_base {norm_base:.4f}")
+            sel_lr = sum(fnum((r.get("lead") or {}).get("realized")) for r in selected_rows)
+            sel_cr = sum(fnum((r.get("copy") or {}).get("realized")) for r in selected_rows)
+            sel_lu = sum(fnum((r.get("lead") or {}).get("unrealized")) for r in selected_rows)
+            sel_cu = sum(fnum((r.get("copy") or {}).get("unrealized")) for r in selected_rows)
+            if abs(fnum(u_lead.get("realized")) - sel_lr) > 0.01:
+                errors.append(f"user_aggregate lead.realized {fnum(u_lead.get('realized')):.4f} != sum_selected {sel_lr:.4f}")
+            if abs(fnum(u_copy.get("realized")) - sel_cr) > 0.01:
+                errors.append(f"user_aggregate copy.realized {fnum(u_copy.get('realized')):.4f} != sum_selected {sel_cr:.4f}")
+            if abs(fnum(u_lead.get("unrealized")) - sel_lu) > 0.01:
+                errors.append(f"user_aggregate lead.unrealized {fnum(u_lead.get('unrealized')):.4f} != sum_selected {sel_lu:.4f}")
+            if abs(fnum(u_copy.get("unrealized")) - sel_cu) > 0.01:
+                errors.append(f"user_aggregate copy.unrealized {fnum(u_copy.get('unrealized')):.4f} != sum_selected {sel_cu:.4f}")
+            exp_u_lead_eq = norm_base + sel_lr + sel_lu
+            exp_u_copy_eq = norm_base + sel_cr + sel_cu
+            if abs(fnum(u_lead.get("equity")) - exp_u_lead_eq) > 0.01:
+                errors.append(f"user_aggregate lead.equity {fnum(u_lead.get('equity')):.4f} != norm_base+pnl {exp_u_lead_eq:.4f}")
+            if abs(fnum(u_copy.get("equity")) - exp_u_copy_eq) > 0.01:
+                errors.append(f"user_aggregate copy.equity {fnum(u_copy.get('equity')):.4f} != norm_base+pnl {exp_u_copy_eq:.4f}")
+            sel_fills = sum(inum(r.get("fill_count")) for r in selected_rows)
+            sel_exits = sum(inum(r.get("exit_count")) for r in selected_rows)
+            sel_open = sum(inum(r.get("open_position_count")) for r in selected_rows)
+            if inum(u.get("fill_count")) != sel_fills:
+                errors.append(f"user_aggregate fill_count {inum(u.get('fill_count'))} != sum_selected {sel_fills}")
+            if inum(u.get("exit_count")) != sel_exits:
+                errors.append(f"user_aggregate exit_count {inum(u.get('exit_count'))} != sum_selected {sel_exits}")
+            if inum(u.get("open_position_count")) != sel_open:
+                errors.append(f"user_aggregate open_position_count {inum(u.get('open_position_count'))} != sum_selected {sel_open}")
+
+        # C. Portfolio/header
+        port = state.get("portfolio") or {}
+        port_lead = port.get("lead") if isinstance(port.get("lead"), dict) else {}
+        port_copy = port.get("copy") if isinstance(port.get("copy"), dict) else {}
+        sel_lr2 = sum(fnum((r.get("lead") or {}).get("realized")) for r in selected_rows)
+        sel_cr2 = sum(fnum((r.get("copy") or {}).get("realized")) for r in selected_rows)
+        sel_notional = sum(fnum(r.get("current_position_usd")) for r in selected_rows)
+        if abs(fnum(port_lead.get("realized")) - sel_lr2) > 0.01:
+            errors.append(f"portfolio lead.realized {fnum(port_lead.get('realized')):.4f} != sum_selected {sel_lr2:.4f}")
+        if abs(fnum(port_copy.get("realized")) - sel_cr2) > 0.01:
+            errors.append(f"portfolio copy.realized {fnum(port_copy.get('realized')):.4f} != sum_selected {sel_cr2:.4f}")
+        if abs(fnum(port.get("open_notional_usd")) - sel_notional) > 0.01:
+            errors.append(f"portfolio open_notional_usd {fnum(port.get('open_notional_usd')):.4f} != sum_selected {sel_notional:.4f}")
+        hist = state.get("portfolio_history") or []
+        if hist:
+            hist_max = max((fnum((p.get("copy") or {}).get("drawdown", 0)) for p in hist), default=0.0)
+            if fnum(port_copy.get("max_drawdown")) < hist_max - 0.01:
+                errors.append(f"portfolio copy maxDD {fnum(port_copy.get('max_drawdown')):.4f} < history max {hist_max:.4f}")
+        curve_stats = selected_combined_curve_stats(selected_rows)
+        if curve_stats["has_points"]:
+            if abs(fnum(port_lead.get("drawdown")) - curve_stats["current_lead_dd"]) > 0.01:
+                errors.append(f"portfolio lead DD {fnum(port_lead.get('drawdown')):.4f} != summed selected wallet DD series {curve_stats['current_lead_dd']:.4f}")
+            if abs(fnum(port_copy.get("drawdown")) - curve_stats["current_copy_dd"]) > 0.01:
+                errors.append(f"portfolio copy DD {fnum(port_copy.get('drawdown')):.4f} != summed selected wallet DD series {curve_stats['current_copy_dd']:.4f}")
+            if abs(fnum(port_lead.get("max_drawdown")) - curve_stats["max_lead_dd"]) > 0.01:
+                errors.append(f"portfolio lead MaxDD {fnum(port_lead.get('max_drawdown')):.4f} != max timestamped summed DD {curve_stats['max_lead_dd']:.4f}")
+            if abs(fnum(port_copy.get("max_drawdown")) - curve_stats["max_copy_dd"]) > 0.01:
+                errors.append(f"portfolio copy MaxDD {fnum(port_copy.get('max_drawdown')):.4f} != max timestamped summed DD {curve_stats['max_copy_dd']:.4f}")
+            if abs(fnum(port.get("max_open_notional_usd")) - curve_stats["max_exposure"]) > 0.01:
+                errors.append(f"portfolio max exposure {fnum(port.get('max_open_notional_usd')):.4f} != max timestamped summed exposure {curve_stats['max_exposure']:.4f}")
+            expected_req_lev = curve_stats["max_exposure"] / norm_base if norm_base else 0.0
+            if abs(fnum(port.get("max_required_leverage")) - expected_req_lev) > 0.001:
+                errors.append(f"portfolio req_lev {fnum(port.get('max_required_leverage')):.4f} != max summed exposure/norm_base {expected_req_lev:.4f}")
+
+        # D. Header / USER row must match (both derived from selected_aggregate).
+        user_rows = [r for r in rows if r.get("is_user_wallet")]
+        if user_rows and selected_rows:
+            u = user_rows[0]
+            u_copy = u.get("copy") if isinstance(u.get("copy"), dict) else {}
+            u_lead = u.get("lead") if isinstance(u.get("lead"), dict) else {}
+            port_copy2 = port.get("copy") if isinstance(port.get("copy"), dict) else {}
+            port_lead2 = port.get("lead") if isinstance(port.get("lead"), dict) else {}
+
+            # DD: both in absolute dollars so must match.
+            hdr_copy_dd = fnum(port_copy2.get("drawdown"))
+            usr_copy_dd = get_current_dd(u_copy)
+            if abs(hdr_copy_dd - usr_copy_dd) > 0.01:
+                errors.append(f"header/user copy DD mismatch: header={hdr_copy_dd:.4f} user={usr_copy_dd:.4f}")
+            hdr_lead_dd = fnum(port_lead2.get("drawdown"))
+            usr_lead_dd = get_current_dd(u_lead)
+            if abs(hdr_lead_dd - usr_lead_dd) > 0.01:
+                errors.append(f"header/user lead DD mismatch: header={hdr_lead_dd:.4f} user={usr_lead_dd:.4f}")
+
+            # MaxDD
+            hdr_copy_maxdd = fnum(port_copy2.get("max_drawdown"))
+            usr_copy_maxdd = get_max_dd(u_copy)
+            if abs(hdr_copy_maxdd - usr_copy_maxdd) > 0.01:
+                errors.append(f"header/user copy maxDD mismatch: header={hdr_copy_maxdd:.4f} user={usr_copy_maxdd:.4f}")
+            hdr_lead_maxdd = fnum(port_lead2.get("max_drawdown"))
+            usr_lead_maxdd = get_max_dd(u_lead)
+            if abs(hdr_lead_maxdd - usr_lead_maxdd) > 0.01:
+                errors.append(f"header/user lead maxDD mismatch: header={hdr_lead_maxdd:.4f} user={usr_lead_maxdd:.4f}")
+
+            for metric in ("current_position_usd", "max_position_usd", "avg_trade_pct", "avg_entry_notional_usd", "pct_entries_ge10"):
+                header_key = "open_notional_usd" if metric == "current_position_usd" else "max_open_notional_usd" if metric == "max_position_usd" else metric
+                hv = fnum(port.get(header_key))
+                uv = fnum(u.get(metric))
+                if abs(hv - uv) > 0.01:
+                    errors.append(f"header/user {metric} mismatch: header={hv:.4f} user={uv:.4f}")
+
+            # Req Lev (both from selected_aggregate.required_leverage)
+            hdr_req_lev = fnum(port.get("max_required_leverage"))
+            usr_req_lev = fnum(u.get("required_leverage"))
+            if abs(hdr_req_lev - usr_req_lev) > 0.001:
+                errors.append(f"header/user req_lev mismatch: header={hdr_req_lev:.4f} user={usr_req_lev:.4f}")
+
+            # Win%
+            hdr_win = fnum(port.get("win_rate"))
+            usr_win = fnum(u.get("win_rate"))
+            if abs(hdr_win - usr_win) > 0.01:
+                errors.append(f"header/user win_rate mismatch: header={hdr_win:.4f} user={usr_win:.4f}")
+
+            # Avg Notional: user must not be 0 when selected entries exist
+            sel_entry_count = sum(inum(r.get("entry_notional_count", 0)) for r in selected_rows)
+            u_avg_not = fnum(u.get("avg_entry_notional_usd"))
+            if sel_entry_count > 0 and u_avg_not <= 0:
+                errors.append(f"user avg_entry_notional_usd is 0 but selected entry_notional_count={sel_entry_count}")
+
+            # % ≥ $10: user must not be 0 when selected notional entries exist
+            u_pct_ge10 = fnum(u.get("pct_entries_ge10"))
+            sel_ge10   = sum(inum(r.get("entry_notional_ge10_count", 0)) for r in selected_rows)
+            if sel_entry_count > 0 and sel_ge10 > 0 and u_pct_ge10 <= 0:
+                errors.append(f"user pct_entries_ge10 is 0 but selected ge10={sel_ge10}/{sel_entry_count}")
+
+    except Exception as exc:
+        errors.append(f"validate_render_contract exception: {type(exc).__name__}: {exc}")
+    return errors
 
 
 def render_chart(history: List[Dict[str, Any]]) -> str:
@@ -1649,9 +2236,16 @@ def render_chart(history: List[Dict[str, Any]]) -> str:
     def poly(vals: List[float]) -> str:
         return " ".join(f"{x_at(i):.1f},{y_at(v):.1f}" for i, v in enumerate(vals))
 
-    def short_time(t: float) -> str:
+    chart_span = ts_max - ts_min
+
+    def label_time(t: float) -> str:
         try:
-            return datetime.fromtimestamp(t, tz=timezone.utc).strftime("%H:%M")
+            dt = datetime.fromtimestamp(t, tz=timezone.utc)
+            if chart_span > 48 * 3600:
+                return dt.strftime("%d %b")
+            if chart_span > 24 * 3600:
+                return dt.strftime("%d %b %H:%M")
+            return dt.strftime("%H:%M")
         except Exception:
             return ""
 
@@ -1665,7 +2259,7 @@ def render_chart(history: List[Dict[str, Any]]) -> str:
         t = ts_min + (ts_max - ts_min) * (i / 4)
         x = x_for_t(t)
         grid_bits.append(f'<line x1="{x:.1f}" y1="{pad_t}" x2="{x:.1f}" y2="{h-pad_b}" class="grid-vert"/>')
-        grid_bits.append(f'<text x="{x:.1f}" y="{h-8}" class="axis-label" text-anchor="middle">{short_time(t)}</text>')
+        grid_bits.append(f'<text x="{x:.1f}" y="{h-8}" class="axis-label" text-anchor="middle">{label_time(t)}</text>')
     grid = "".join(grid_bits)
 
     hit_bits: List[str] = []
@@ -1699,8 +2293,8 @@ def render_chart(history: List[Dict[str, Any]]) -> str:
 def sorted_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows = list(state.get("wallet_rows") or [])
     ranking = state.get("ui_state", {}).get("ranking", {}) or {}
-    col = ranking.get("column")
-    direction = str(ranking.get("direction", "desc")).lower()
+    col = ranking.get("column") or "lead_equity"
+    direction = str(ranking.get("direction") or "desc").lower()
     def key(row: Dict[str, Any]) -> Any:
         lead = row.get("lead", {}) if isinstance(row.get("lead"), dict) else {}
         copy = row.get("copy", {}) if isinstance(row.get("copy"), dict) else {}
@@ -1756,10 +2350,11 @@ def sorted_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
         }
         return mapping.get(str(col), row.get("wallet", ""))
 
-    reverse = direction == "desc" and col is not None
+    reverse = direction == "desc"
+    ui_for_grp = state.get("ui_state") or {}
     user_rows = [r for r in rows if r.get("is_user_wallet")]
-    included_rows = [r for r in rows if not r.get("is_user_wallet") and bool(r.get("include_in_portfolio", True))]
-    other_rows = [r for r in rows if not r.get("is_user_wallet") and not bool(r.get("include_in_portfolio", True))]
+    included_rows = [r for r in rows if not r.get("is_user_wallet") and wallet_included(str(r.get("wallet", "")), ui_for_grp)]
+    other_rows = [r for r in rows if not r.get("is_user_wallet") and not wallet_included(str(r.get("wallet", "")), ui_for_grp)]
     included_rows.sort(key=key, reverse=reverse)
     other_rows.sort(key=key, reverse=reverse)
     return user_rows + included_rows + other_rows
@@ -1782,27 +2377,21 @@ def render_home(state: Dict[str, Any]) -> str:
     copy_total = fnum(copy.get("realized")) + fnum(copy.get("unrealized"))
     delta_total = fnum(delta.get("equity"))
     hist = state.get("portfolio_history", []) if isinstance(state.get("portfolio_history", []), list) else []
-    lead_dd = block_num(lead, "drawdown", "drawdown_usd", default=0.0)
-    copy_dd = block_num(copy, "drawdown", "drawdown_usd", default=0.0)
-    lead_maxdd = block_num(lead, "max_drawdown", "maxdd", default=0.0)
-    copy_maxdd = block_num(copy, "max_drawdown", "maxdd", default=0.0)
-    if lead_dd == 0.0:
-        lead_dd = latest_history_block_dd(hist, "lead") if latest_history_block_dd(hist, "lead") is not None else lead_dd
-    if copy_dd == 0.0:
-        copy_dd = latest_history_block_dd(hist, "copy") if latest_history_block_dd(hist, "copy") is not None else copy_dd
-    hist_lead_maxdd = max_history_block_dd(hist, "lead")
-    hist_copy_maxdd = max_history_block_dd(hist, "copy")
-    lead_maxdd = max(lead_maxdd, hist_lead_maxdd or 0.0)
-    copy_maxdd = max(copy_maxdd, hist_copy_maxdd or 0.0)
+    lead_dd = get_current_dd(lead, hist, "lead")
+    copy_dd = get_current_dd(copy, hist, "copy")
+    lead_maxdd = get_max_dd(lead, hist, "lead")
+    copy_maxdd = get_max_dd(copy, hist, "copy")
     open_notional = fnum(port.get("open_notional_usd"), sum(fnum(r.get("current_position_usd")) for r in included_rows))
     max_open_notional = fnum(port.get("max_open_notional_usd"), open_notional)
     notional_x = open_notional / user_base if user_base else 0.0
     max_notional_x = max_open_notional / user_base if user_base else 0.0
     avg_pos_size = fnum(port.get("avg_position_usd"), avg([fnum(r.get("avg_position_usd")) for r in included_rows if fnum(r.get("avg_position_usd")) > 0]))
-    max_req_lev = fnum(port.get("max_required_leverage"), max([fnum(r.get("required_leverage")) for r in included_rows] or [0.0]))
-    win_avg = avg([fnum(r.get("win_rate")) for r in included_rows if r.get("exit_count")])
+    # Read from portfolio dict (which is populated from selected_aggregate) so
+    # header and USER row always derive from the same canonical source.
+    max_req_lev = fnum(port.get("max_required_leverage"))
+    win_avg = fnum(port.get("win_rate", avg([fnum(r.get("win_rate")) for r in included_rows if r.get("exit_count")])))
     avg_trade = avg([fnum(r.get("pnl_per_trade")) for r in included_rows if r.get("exit_count")])
-    avg_trade_pct = fnum(port.get("avg_trade_pct"), avg([fnum(r.get("avg_trade_pct")) for r in included_rows if r.get("exit_count")]))
+    avg_trade_pct = fnum(port.get("avg_trade_pct"))
     fill_count = sum(int(r.get("fill_count") or 0) for r in included_rows)
     exit_count = sum(int(r.get("exit_count") or 0) for r in included_rows)
     open_positions = sum(int(r.get("open_position_count") or 0) for r in included_rows)
@@ -1815,15 +2404,15 @@ def render_home(state: Dict[str, Any]) -> str:
         group_card("PNL", [small_metric("LEAD", dual(lead_total, user_base), lead_total), small_metric("COPY", dual(copy_total, user_base), copy_total), small_metric("Δ", dual(delta_total, user_base), delta_total)]),
         group_card("REALISED", [small_metric("LEAD", dual(fnum(lead.get("realized")), user_base), fnum(lead.get("realized"))), small_metric("COPY", dual(fnum(copy.get("realized")), user_base), fnum(copy.get("realized")))]),
         group_card("UNREALISED", [small_metric("LEAD", dual(fnum(lead.get("unrealized")), user_base), fnum(lead.get("unrealized"))), small_metric("COPY", dual(fnum(copy.get("unrealized")), user_base), fnum(copy.get("unrealized")))]),
-        group_card("DRAWDOWN", [small_metric("LEAD DD", dual(-lead_dd, user_base), -lead_dd), small_metric("COPY DD", dual(-copy_dd, user_base), -copy_dd), small_metric("COPY MAX", dual(-copy_maxdd, user_base), -copy_maxdd)]),
-        group_card("MAX DD", [small_metric("LEAD", dual(-lead_maxdd, user_base), -lead_maxdd), small_metric("COPY", dual(-copy_maxdd, user_base), -copy_maxdd)]),
+        group_card("DRAWDOWN", [small_metric("LEAD DD", format_dd(lead_dd, user_base), -lead_dd), small_metric("COPY DD", format_dd(copy_dd, user_base), -copy_dd), small_metric("COPY MAX", format_dd(copy_maxdd, user_base), -copy_maxdd)]),
+        group_card("MAX DD", [small_metric("LEAD", format_dd(lead_maxdd, user_base), -lead_maxdd), small_metric("COPY", format_dd(copy_maxdd, user_base), -copy_maxdd)]),
         group_card("EXPOSURE", [small_metric("OPEN", money(open_notional), open_notional), small_metric("MAX", money(max_open_notional), max_open_notional), small_metric("BASE", f"{notional_x:.2f}x / {max_notional_x:.2f}x", notional_x)]),
         group_card("COPYABILITY", [small_metric("AVG TRADE %", pct(avg_trade_pct, 3), avg_trade_pct), small_metric("AVG TRADE $", money(avg_trade), avg_trade), small_metric("AVG POS", money(avg_pos_size), avg_pos_size), small_metric("REQ LEV", f"{max_req_lev:.2f}x", max_req_lev)]),
         group_card("ACTIVITY", [small_metric("FILLS", str(fill_count), fill_count), small_metric("EXITS", str(exit_count), exit_count), small_metric("OPEN POS", str(open_positions), open_positions), small_metric("WIN", pct(win_avg), win_avg)]),
         group_card("DB HEALTH", [small_metric(health_label, html.escape(health_detail), -1 if "ERROR" in health_label else 0), small_metric("CACHE", str(APP_HEALTH.get("cache_hits", 0)), 0), small_metric("BUILDS", str(APP_HEALTH.get("build_count", 0)), 0)], "health-card"),
     ])
     ranking = ui.get("ranking", {}) if isinstance(ui.get("ranking"), dict) else {}
-    active_col = str(ranking.get("column") or ""); active_dir = str(ranking.get("direction") or "desc")
+    active_col = str(ranking.get("column") or "lead_equity"); active_dir = str(ranking.get("direction") or "desc")
     def th(col: str, label: str, cls: str = "") -> str:
         active = col == active_col; arrow = " ▲" if active and active_dir == "asc" else " ▼" if active else ""
         return f'<th class="{cls} {"sort-active" if active else ""}"><a href="/sort/{col}">{label}{arrow}</a></th>'
@@ -1835,10 +2424,24 @@ def render_home(state: Dict[str, Any]) -> str:
         th("lead_maxdd", "LEAD MAXDD", "pair-lead"), th("copy_maxdd", "COPY MAXDD", "pair-copy group-divider"),
         th("delta", "Δ $/%", "group-divider"), th("pnl_per_hour", "PNL/HR"), th("avg_trade_pct", "AVG TRADE %"), th("win_rate", "WIN%"),
         th("avg_position_usd", "AVG POS $"), th("max_position_usd", "MAX POS $"), th("avg_entry_notional_usd", "AVG NOTIONAL"), th("pct_entries_ge10", "% ≥ $10"), th("required_leverage", "REQ LEV"),
-        th("fill_count", "FILLS", "ops-group"), th("exit_count", "EXITS", "ops-group"), th("open_position_count", "POS", "ops-group group-divider"),
-    ]) + "<th>INC / MODE / WALLET MODEL</th></tr>"
-    body_rows = "\n".join(render_row(r, base, ui) for r in rows)
-    return HTML_TEMPLATE.format(updated=state.get("updated_at", ""), norm=base, mode=str(ui.get("copy_mode", "proportional")).upper(), fixed=fnum(ui.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL), fee=fnum(ui.get("fee_bps"), DEFAULT_FEE_BPS), friction=fnum(ui.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS), cards=cards, chart=render_chart(state.get("portfolio_history", [])), wallet_count=len(metric_rows), table_head=table_head, table_rows=body_rows, raw_boundary=state.get("engine_truth_boundary", ""))
+        th("fill_count", "FILLS L/C", "ops-group"), th("exit_count", "EXITS L/C", "ops-group"), th("open_position_count", "POS L/C", "ops-group group-divider"),
+    ]) + "<th>INC / WALLET MODEL</th></tr>"
+    body_parts: List[str] = []
+    inserted_divider = False
+    has_included_group = any(not r.get("is_user_wallet") and wallet_included(str(r.get("wallet", "")), ui) for r in rows)
+    has_other_group = any(not r.get("is_user_wallet") and not wallet_included(str(r.get("wallet", "")), ui) for r in rows)
+    for r in rows:
+        if has_included_group and has_other_group and not inserted_divider and not r.get("is_user_wallet") and not wallet_included(str(r.get("wallet", "")), ui):
+            body_parts.append('<tr class="selected-divider"><td colspan="99">Other tracked wallets</td></tr>')
+            inserted_divider = True
+        body_parts.append(render_row(r, base, ui, state))
+    body_rows = "\n".join(body_parts)
+    contract_errs = validate_render_contract(state)
+    banner = ""
+    if contract_errs:
+        msgs = " | ".join(html.escape(e) for e in contract_errs[:10])
+        banner = f'<div style="background:#3d1515;border:1px solid #f44;color:#f88;padding:8px 14px;font-size:11px;position:sticky;top:48px;z-index:3"><b>&#9888; CONTRACT WARNING ({len(contract_errs)} errors):</b> {msgs}</div>'
+    return banner + HTML_TEMPLATE.format(updated=state.get("updated_at", ""), norm=base, mode=str(ui.get("copy_mode", "proportional")).upper(), fixed=fnum(ui.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL), fee=fnum(ui.get("fee_bps"), DEFAULT_FEE_BPS), friction=fnum(ui.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS), cards=cards, chart=render_chart(state.get("portfolio_history", [])), wallet_count=len(metric_rows), table_head=table_head, table_rows=body_rows, raw_boundary=state.get("engine_truth_boundary", ""))
 
 
 def extract_num(s: str) -> float:
@@ -1853,59 +2456,79 @@ def avg(xs: List[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
 
 
-def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any]) -> str:
+def wallet_lead_copy_counts(row: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Tuple[int, int]]:
+    wallet = str(row.get("wallet", "")).lower()
+    lead_fills = inum(row.get("fill_count"), 0)
+    wallet_actions = [f for f in state.get("expected_copy_fills", []) if str(f.get("wallet", "")).lower() == wallet]
+    copy_fills = len({str(f.get("leader_fill_id", "")) for f in wallet_actions if str(f.get("leader_fill_id", "")).strip()}) or lead_fills
+    lead_exits = inum(row.get("exit_count"), 0)
+    copy_exits = sum(1 for t in state.get("copy_trades", []) if str(t.get("wallet", "")).lower() == wallet) or lead_exits
+    align = row.get("final_position_alignment", [])
+    if isinstance(align, list) and align:
+        lead_pos = sum(1 for a in align if str((a or {}).get("leader_position_side_after", "FLAT")).upper() != "FLAT")
+        copy_pos = sum(1 for a in align if str((a or {}).get("copy_position_side_after", "FLAT")).upper() != "FLAT")
+    else:
+        lead_pos = copy_pos = inum(row.get("open_position_count"), 0)
+    return {"fills": (lead_fills, copy_fills), "exits": (lead_exits, copy_exits), "pos": (lead_pos, copy_pos)}
+
+
+def lc_cell(row: Dict[str, Any], pair: Tuple[int, int], cls: str = "") -> str:
+    left, right = pair
+    mismatch = left != right
+    if mismatch:
+        flags = row.setdefault("flags", [])
+        if isinstance(flags, list) and "LEAD_COPY_COUNT_MISMATCH" not in flags:
+            flags.append("LEAD_COPY_COUNT_MISMATCH")
+    content = f"{left} / {right}" + (" <span class='badge neg'>DIFF</span>" if mismatch else "")
+    return f'<td class="{cls} {"neg" if mismatch else ""}" data-sort="{left}">{content}</td>'
+
+
+def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> str:
+    state = state or {}
     lead = r.get("lead", {}); copy = r.get("copy", {}); delta = r.get("delta", {})
     wallet = str(r.get("wallet", "")); badge = " <span class='badge'>USER</span>" if r.get("is_user_wallet") else ""
-    mode = str((r.get("gate") or {}).get("mode") or "OFF")
     alloc = fnum(r.get('alloc'), base)
     lead_pnl = fnum(lead.get('realized')) + fnum(lead.get('unrealized'))
     copy_pnl = fnum(copy.get('realized')) + fnum(copy.get('unrealized'))
-    lead_dd_raw = block_num(lead, "drawdown", "drawdown_usd", default=0.0)
-    copy_dd_raw = block_num(copy, "drawdown", "drawdown_usd", default=0.0)
-    lead_maxdd_raw = block_num(lead, "max_drawdown", "maxdd", default=0.0)
-    copy_maxdd_raw = block_num(copy, "max_drawdown", "maxdd", default=0.0)
-    # User aggregate row carries a curve; use it as a display fallback so DD
-    # cannot appear unplumbed if block aliases are missing/stale.
-    if r.get("is_user_wallet"):
-        curve = r.get("curve", []) if isinstance(r.get("curve", []), list) else []
-        lead_curve_dd = latest_history_block_dd(curve, "lead")
-        copy_curve_dd = latest_history_block_dd(curve, "copy")
-        lead_curve_maxdd = max_history_block_dd(curve, "lead")
-        copy_curve_maxdd = max_history_block_dd(curve, "copy")
-        if lead_dd_raw == 0.0 and lead_curve_dd is not None:
-            lead_dd_raw = lead_curve_dd
-        if copy_dd_raw == 0.0 and copy_curve_dd is not None:
-            copy_dd_raw = copy_curve_dd
-        lead_maxdd_raw = max(lead_maxdd_raw, lead_curve_maxdd or 0.0)
-        copy_maxdd_raw = max(copy_maxdd_raw, copy_curve_maxdd or 0.0)
+    curve = r.get("curve", []) if isinstance(r.get("curve", []), list) else []
+    hist = curve if r.get("is_user_wallet") else None
+    lead_dd_raw = get_current_dd(lead, hist, "lead") if hist is not None else get_current_dd(lead)
+    copy_dd_raw = get_current_dd(copy, hist, "copy") if hist is not None else get_current_dd(copy)
+    lead_maxdd_raw = get_max_dd(lead, hist, "lead") if hist is not None else get_max_dd(lead)
+    copy_maxdd_raw = get_max_dd(copy, hist, "copy") if hist is not None else get_max_dd(copy)
     lead_dd_val = -lead_dd_raw; lead_maxdd_val = -lead_maxdd_raw
     copy_dd_val = -copy_dd_raw; copy_maxdd_val = -copy_maxdd_raw
     eff_mode = str(r.get("effective_copy_mode") or ui.get("copy_mode", "proportional"))
     eff_base = fnum(r.get("effective_norm_base"), fnum(r.get("alloc"), base)); eff_fixed = fnum(r.get("effective_fixed_notional"), fnum(ui.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL))
     override_badge = " *" if r.get("wallet_config") else ""; included = bool(r.get("include_in_portfolio", True))
+    lc_counts = wallet_lead_copy_counts(r, state)
+    no_closed_trades = inum(r.get("exit_count"), 0) == 0
+    pnl_hr_cell = core_td(r, 'pnl_per_hour' in r, r.get('pnl_per_hour'), dual(fnum(r.get('pnl_per_hour')), alloc), css_class(r.get('pnl_per_hour')), "pnl_per_hour")
+    if no_closed_trades and fnum(r.get("active_hours")) <= 0:
+        pnl_hr_cell = dash_td(css_class(r.get('pnl_per_hour')), "pnl_per_hour")
+    avg_trade_pct_cell = dash_td(css_class(r.get('avg_trade_pct')), "avg_trade_pct") if no_closed_trades else core_td(r, 'avg_trade_pct' in r, r.get('avg_trade_pct'), pct(r.get('avg_trade_pct'), 3), css_class(r.get('avg_trade_pct')), "avg_trade_pct")
+    win_rate_cell = dash_td(css_class(r.get('win_rate')), "win_rate") if no_closed_trades else core_td(r, 'win_rate' in r, r.get('win_rate'), pct(r.get('win_rate')), css_class(r.get('win_rate')), "win_rate")
     inc_cell = ""
     if not r.get("is_user_wallet"):
         inc_cell = f"""<form action="/api/wallet-include" method="post" class="inc-form" title="Include/exclude this wallet from combined graph and header cards only"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><input type="checkbox" name="included" value="1" {'checked' if included else ''} onchange="this.form.requestSubmit()"><span class="small">INC</span></form>"""
     cfg_cell = f"""<form action="/api/wallet-config" method="post" class="wallet-cfg"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><select name="copy_mode"><option value="" {'selected' if not r.get('wallet_config') else ''}>global</option><option value="proportional" {'selected' if eff_mode == 'proportional' and r.get('wallet_config') else ''}>prop</option><option value="fixed" {'selected' if eff_mode == 'fixed' and r.get('wallet_config') else ''}>fixed</option></select><input name="norm_base" value="{eff_base:g}" size="5" title="wallet normalisation base"><input name="fixed_notional" value="{eff_fixed:g}" size="4" title="wallet fixed $"><button title="save wallet override">Set</button></form>"""
     row_cls = 'user' if r.get('is_user_wallet') else ''
     if not r.get('is_user_wallet') and not included: row_cls += ' excluded-row'
-    def td(sort_value: Any, content: str, cls: str = "") -> str:
-        return f'<td class="{cls}" data-sort="{fnum(sort_value):.12g}">{content}</td>'
     wallet_sort = html.escape(wallet)
     return f"""
     <tr class="{row_cls}">
       <td class="sticky-wallet" data-sort="{wallet_sort}"><a href="/wallet/{wallet}">{wallet[:8]}…{wallet[-6:]}</a>{badge}</td>
-      {td(lead_pnl, money(lead.get('equity')), f"pair-lead {css_class(lead_pnl)}")}{td(copy_pnl, money(copy.get('equity')), f"pair-copy group-divider {css_class(copy_pnl)}")}
-      {td(lead.get('realized'), dual(fnum(lead.get('realized')), alloc), f"pair-lead {css_class(lead.get('realized'))}")}{td(copy.get('realized'), dual(fnum(copy.get('realized')), alloc), f"pair-copy group-divider {css_class(copy.get('realized'))}")}
-      {td(lead.get('unrealized'), dual(fnum(lead.get('unrealized')), alloc), f"pair-lead {css_class(lead.get('unrealized'))}")}{td(copy.get('unrealized'), dual(fnum(copy.get('unrealized')), alloc), f"pair-copy group-divider {css_class(copy.get('unrealized'))}")}
-      {td(lead_dd_val, dual(lead_dd_val, alloc), f"pair-lead {css_class(lead_dd_val)}")}{td(copy_dd_val, dual(copy_dd_val, alloc), f"pair-copy group-divider {css_class(copy_dd_val)}")}
-      {td(lead_maxdd_val, dual(lead_maxdd_val, alloc), f"pair-lead {css_class(lead_maxdd_val)}")}{td(copy_maxdd_val, dual(copy_maxdd_val, alloc), f"pair-copy group-divider {css_class(copy_maxdd_val)}")}
-      {td(delta.get('equity'), dual(fnum(delta.get('equity')), alloc), f"group-divider {css_class(delta.get('equity'))}")}{td(r.get('pnl_per_hour'), dual(fnum(r.get('pnl_per_hour')), alloc), css_class(r.get('pnl_per_hour')))}
-      {td(r.get('avg_trade_pct'), pct(r.get('avg_trade_pct'), 3), css_class(r.get('avg_trade_pct')))}{td(r.get('win_rate'), pct(r.get('win_rate')), css_class(r.get('win_rate')))}
-      {td(r.get('avg_position_usd'), money(r.get('avg_position_usd')), css_class(r.get('avg_position_usd')))}{td(r.get('max_position_usd'), money(r.get('max_position_usd')), css_class(r.get('max_position_usd')))}
-      {td(r.get('avg_entry_notional_usd'), money(r.get('avg_entry_notional_usd')), css_class(r.get('avg_entry_notional_usd')))}{td(r.get('pct_entries_ge10'), pct(r.get('pct_entries_ge10')), css_class(r.get('pct_entries_ge10')))}{td(r.get('required_leverage'), f"{fnum(r.get('required_leverage')):.2f}x", css_class(r.get('required_leverage')))}
-      {td(r.get('fill_count'), str(int(r.get('fill_count') or 0)), "ops-group")}{td(r.get('exit_count'), str(int(r.get('exit_count') or 0)), "ops-group")}{td(r.get('open_position_count'), str(int(r.get('open_position_count') or 0)), "ops-group group-divider")}
-      <td class="controls-cell {'inc-off' if (not r.get('is_user_wallet') and not included) else ''}">{inc_cell}<span class="mode">{html.escape(mode)}{override_badge}</span>{cfg_cell}</td>
+      {core_td(r, isinstance(lead, dict) and 'equity' in lead, lead_pnl, money(lead.get('equity')), f"pair-lead {css_class(lead_pnl)}", "lead.equity")}{core_td(r, isinstance(copy, dict) and 'equity' in copy, copy_pnl, money(copy.get('equity')), f"pair-copy group-divider {css_class(copy_pnl)}", "copy.equity")}
+      {core_td(r, isinstance(lead, dict) and 'realized' in lead, lead.get('realized'), dual(fnum(lead.get('realized')), alloc), f"pair-lead {css_class(lead.get('realized'))}", "lead.realized")}{core_td(r, isinstance(copy, dict) and 'realized' in copy, copy.get('realized'), dual(fnum(copy.get('realized')), alloc), f"pair-copy group-divider {css_class(copy.get('realized'))}", "copy.realized")}
+      {core_td(r, isinstance(lead, dict) and 'unrealized' in lead, lead.get('unrealized'), dual(fnum(lead.get('unrealized')), alloc), f"pair-lead {css_class(lead.get('unrealized'))}", "lead.unrealized")}{core_td(r, isinstance(copy, dict) and 'unrealized' in copy, copy.get('unrealized'), dual(fnum(copy.get('unrealized')), alloc), f"pair-copy group-divider {css_class(copy.get('unrealized'))}", "copy.unrealized")}
+      {core_td(r, isinstance(lead, dict) and ('drawdown' in lead or 'drawdown_usd' in lead), lead_dd_val, format_dd(lead_dd_raw, alloc), f"pair-lead {css_class(lead_dd_val)}", "lead.drawdown")}{core_td(r, isinstance(copy, dict) and ('drawdown' in copy or 'drawdown_usd' in copy), copy_dd_val, format_dd(copy_dd_raw, alloc), f"pair-copy group-divider {css_class(copy_dd_val)}", "copy.drawdown")}
+      {core_td(r, isinstance(lead, dict) and ('max_drawdown' in lead or 'maxdd' in lead), lead_maxdd_val, format_dd(lead_maxdd_raw, alloc), f"pair-lead {css_class(lead_maxdd_val)}", "lead.maxdd")}{core_td(r, isinstance(copy, dict) and ('max_drawdown' in copy or 'maxdd' in copy), copy_maxdd_val, format_dd(copy_maxdd_raw, alloc), f"pair-copy group-divider {css_class(copy_maxdd_val)}", "copy.maxdd")}
+      {core_td(r, isinstance(delta, dict) and 'equity' in delta, delta.get('equity'), dual(fnum(delta.get('equity')), alloc), f"group-divider {css_class(delta.get('equity'))}", "delta.equity")}{pnl_hr_cell}
+      {avg_trade_pct_cell}{win_rate_cell}
+      {core_td(r, 'avg_position_usd' in r, r.get('avg_position_usd'), money(r.get('avg_position_usd')), css_class(r.get('avg_position_usd')), "avg_position_usd")}{core_td(r, 'max_position_usd' in r, r.get('max_position_usd'), money(r.get('max_position_usd')), css_class(r.get('max_position_usd')), "max_position_usd")}
+      {core_td(r, 'avg_entry_notional_usd' in r, r.get('avg_entry_notional_usd'), money(r.get('avg_entry_notional_usd')), css_class(r.get('avg_entry_notional_usd')), "avg_entry_notional_usd")}{core_td(r, 'pct_entries_ge10' in r, r.get('pct_entries_ge10'), pct(r.get('pct_entries_ge10')), css_class(r.get('pct_entries_ge10')), "pct_entries_ge10")}{core_td(r, 'required_leverage' in r, r.get('required_leverage'), f"{fnum(r.get('required_leverage')):.2f}x", css_class(r.get('required_leverage')), "required_leverage")}
+      {lc_cell(r, lc_counts['fills'], "ops-group")}{lc_cell(r, lc_counts['exits'], "ops-group")}{lc_cell(r, lc_counts['pos'], "ops-group group-divider")}
+      <td class="controls-cell {'inc-off' if (not r.get('is_user_wallet') and not included) else ''}">{inc_cell}{cfg_cell}</td>
     </tr>"""
 
 HTML_TEMPLATE = """
@@ -1914,12 +2537,25 @@ HTML_TEMPLATE = """
 body{{margin:0;background:#0d1117;color:#c9d1d9;font:12px Arial,Helvetica,sans-serif}} a{{color:#58a6ff;text-decoration:none}} .top{{display:flex;align-items:center;gap:12px;padding:8px 14px;border-bottom:1px solid #222;background:#090d12;position:sticky;top:0;z-index:4;box-shadow:0 2px 8px rgba(0,0,0,.25)}} .live{{background:#003d1f;color:#2ea043;border:1px solid #2ea043;border-radius:12px;padding:2px 8px;font-size:10px}} .muted{{color:#8b949e}} input,select,button{{background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:3px 8px}} button{{cursor:pointer}}
 .cards{{display:grid;grid-template-columns:repeat(9,minmax(130px,1fr));gap:8px;padding:10px 14px}} .card{{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:9px;min-height:72px}} .group-card .label{{font-size:10px;color:#8b949e;margin-bottom:6px;border-bottom:1px solid #21262d;padding-bottom:4px}} .metric-line{{display:flex;justify-content:space-between;gap:8px;line-height:1.55}} .metric-line span{{color:#8b949e}} .metric-line b{{font-weight:700}} .pos{{color:#2ea043}} .neg{{color:#ff4d4f}} .zero{{color:#c9d1d9}}
 .section{{padding:0 14px 10px}} .panel{{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:10px;margin-bottom:12px}} .chart-wrap{{position:relative;cursor:zoom-in}} .chart-wrap.expanded{{position:relative;z-index:20}} .chart-wrap.expanded .chart{{height:76vh}} .chart{{width:100%;height:260px;background:#151a21}} .chart *{{vector-effect:non-scaling-stroke}} .pnl-line{{fill:none;stroke:#2ea043;stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}} .realized-line{{fill:none;stroke:#58a6ff;stroke-width:1.4;stroke-linejoin:round;stroke-linecap:round}} .dd-line{{fill:none;stroke:#ff4d4f;stroke-width:1.4;stroke-linejoin:round;stroke-linecap:round}} .zero-line{{stroke:#8b949e;stroke-width:1}} .grid-line,.grid-vert{{stroke:#21262d;stroke-width:1}} .axis-label{{fill:#8b949e;font-size:10px}} .hit{{fill:transparent;stroke:none;pointer-events:all}} .crosshair{{stroke:#8b949e;stroke-width:1;stroke-dasharray:3 3;pointer-events:none}} .chart-dot{{fill:#c9d1d9;stroke:#0d1117;stroke-width:1.2;pointer-events:none}} .chart-tip{{position:absolute;left:10px;top:10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:5px 7px;color:#c9d1d9;font-size:11px;pointer-events:none;box-shadow:0 4px 12px rgba(0,0,0,.35)}} .chart-legend{{display:flex;gap:10px;align-items:center;margin-top:6px}} .legend-pnl{{color:#2ea043}} .legend-realized{{color:#58a6ff}} .legend-dd{{color:#ff4d4f}}
-.table-wrap{{overflow:auto;border:1px solid #21262d;border-radius:6px;background:#0d1117;max-height:72vh}} table{{width:100%;border-collapse:separate;border-spacing:0;font-size:11px}} th{{position:sticky;top:0;background:#21262d;color:#8b949e;text-align:right;padding:7px;border-bottom:1px solid #30363d;z-index:2}} th:first-child,td:first-child{{text-align:left}} th.sort-active{{background:#303a49;color:#fff;box-shadow:inset 0 -2px 0 #58a6ff}} th.sort-active a{{color:#fff}} th a{{display:block;color:#8b949e}} td{{padding:6px;border-bottom:1px solid #21262d;text-align:right;white-space:nowrap}} tr:nth-child(even){{background:#111820}} tr.user{{background:#071527}} tr:hover{{background:#1b2330}} tr.excluded-row{{opacity:.55}}
-.sticky-wallet{{position:sticky;left:0;z-index:3;background:inherit;min-width:132px;border-right:1px solid #30363d}} th.sticky-wallet{{z-index:4;background:#21262d}} .pair-lead{{background:rgba(88,166,255,.045)}} .pair-copy{{background:rgba(46,160,67,.045)}} .ops-group{{background:rgba(210,153,34,.05)}} .group-divider{{border-right:2px solid #30363d!important}} .badge{{background:#0d419d;color:#fff;border-radius:3px;padding:1px 4px;font-size:9px}} .mode{{background:#063d1f;color:#2ea043;border-radius:3px;padding:2px 6px}} .wallet-cfg{{display:inline-flex;gap:3px;margin-left:4px;align-items:center}} .wallet-cfg input{{width:48px;padding:1px 3px}} .wallet-cfg select{{width:70px;padding:1px 3px}} .wallet-cfg button{{padding:1px 4px}} .inc-form{{display:inline-flex;align-items:center;gap:2px;margin-right:6px}} .inc-form input{{padding:0;width:14px;height:14px}} .inc-off{{opacity:.45}} .controls-cell{{min-width:270px;text-align:left}} .small{{font-size:11px;color:#8b949e}} .saving{{opacity:.65}} .saved-flash{{color:#2ea043}} .chart-empty{{height:230px;display:flex;align-items:center;justify-content:center;color:#8b949e}} @media(max-width:1300px){{.cards{{grid-template-columns:repeat(3,minmax(150px,1fr))}}}}
-</style></head><body><div class="top"><b>⚡ HL Copy Engine</b><span class="live">POLL</span><span class="muted">Updated: {updated}</span><form action="/api/ui-state" method="post" class="ajax-form" style="display:flex;gap:6px;align-items:center;margin:0"><span class="muted">Normalisation Base:</span><input name="norm_base" value="{norm}" size="8"><span class="muted">Mode:</span><select name="copy_mode"><option>proportional</option><option>fixed</option></select><span class="muted">Fixed $:</span><input name="fixed_notional" value="{fixed}" size="6"><span class="muted">Fee bps:</span><input name="fee_bps" value="{fee}" size="5"><span class="muted">Copy friction bps:</span><input name="copy_friction_bps" value="{friction}" size="5"><button>Set</button></form><span class="muted">Current: {mode}</span><span id="save-status" class="muted"></span><span style="margin-left:auto" class="muted">Idle refresh 15s</span></div><div class="cards">{cards}</div><div class="section"><b>COMBINED PORTFOLIO — NON-USER WALLETS</b><div class="panel">{chart}</div><div class="small">TRACKED WALLETS ({wallet_count}) — model derived in app from engine SSOT only. {raw_boundary}</div><div class="table-wrap"><table><thead>{table_head}</thead><tbody>{table_rows}</tbody></table></div></div>
+.table-wrap{{border:1px solid #21262d;border-radius:6px;background:#0d1117}} table{{width:100%;border-collapse:separate;border-spacing:0;font-size:11px}} th{{position:sticky;top:0;background:#21262d;color:#8b949e;text-align:right;padding:7px;border-bottom:1px solid #30363d;z-index:2}} th:first-child,td:first-child{{text-align:left}} th.sort-active{{background:#303a49;color:#fff;box-shadow:inset 0 -2px 0 #58a6ff}} th.sort-active a{{color:#fff}} th a{{display:block;color:#8b949e}} td{{padding:6px;border-bottom:1px solid #21262d;text-align:right;white-space:nowrap}} tr:nth-child(even){{background:#111820}} tr.user{{background:#071527}} tr:hover{{background:#1b2330}} tr.excluded-row{{}}
+.sticky-wallet{{position:sticky;left:0;z-index:3;background:inherit;min-width:132px;border-right:1px solid #30363d}} th.sticky-wallet{{z-index:4;background:#21262d}} .pair-lead{{background:rgba(88,166,255,.045)}} .pair-copy{{background:rgba(46,160,67,.045)}} .ops-group{{background:rgba(210,153,34,.05)}} .group-divider{{border-right:2px solid #30363d!important}} .badge{{background:#0d419d;color:#fff;border-radius:3px;padding:1px 4px;font-size:9px}} .mode{{background:#063d1f;color:#2ea043;border-radius:3px;padding:2px 6px}} .wallet-cfg{{display:inline-flex;gap:3px;margin-left:4px;align-items:center}} .wallet-cfg input{{width:48px;padding:1px 3px}} .wallet-cfg select{{width:70px;padding:1px 3px}} .wallet-cfg button{{padding:1px 4px}} .inc-form{{display:inline-flex;align-items:center;gap:2px;margin-right:6px}} .inc-form input{{padding:0;width:14px;height:14px}} .inc-off{{opacity:1}} .controls-cell{{min-width:270px;text-align:left}} .small{{font-size:11px;color:#8b949e}} .missing{{color:#6e7681!important}} .selected-divider td{{background:#0d1117;border-top:2px solid #58a6ff;border-bottom:1px solid #30363d;color:#8b949e;text-align:left;font-size:10px;letter-spacing:.04em;text-transform:uppercase;padding:6px 8px}} .saving{{opacity:.65}} .saved-flash{{color:#2ea043}} .chart-empty{{height:230px;display:flex;align-items:center;justify-content:center;color:#8b949e}} @media(max-width:1300px){{.cards{{grid-template-columns:repeat(3,minmax(150px,1fr))}}}}
+</style></head><body><div class="top"><b>⚡ HL Copy Engine</b><span class="live">POLL</span><span class="muted">Updated: {updated}</span><form action="/api/ui-state" method="post" class="ajax-form" style="display:flex;gap:6px;align-items:center;margin:0"><span class="muted">Normalisation Base:</span><input name="norm_base" value="{norm}" size="8"><span class="muted">Mode:</span><select name="copy_mode"><option>proportional</option><option>fixed</option></select><span class="muted">Fixed $:</span><input name="fixed_notional" value="{fixed}" size="6"><span class="muted">Fee bps:</span><input name="fee_bps" value="{fee}" size="5"><span class="muted">Copy friction bps:</span><input name="copy_friction_bps" value="{friction}" size="5"><button>Set</button></form><span class="muted">Current: {mode}</span><span id="save-status" class="muted"></span><span style="margin-left:auto" class="muted">Auto refresh off</span></div><div class="cards">{cards}</div><div class="section"><b>COMBINED PORTFOLIO — NON-USER WALLETS</b><div class="panel">{chart}</div><div class="small">TRACKED WALLETS ({wallet_count}) — model derived in app from engine SSOT only. {raw_boundary}</div><div class="table-wrap"><table><thead>{table_head}</thead><tbody>{table_rows}</tbody></table></div></div>
 <script>(function(){{
 let busyUntil=0;
 const status=document.getElementById('save-status');
+function saveViewState(){{
+  const wrap=document.querySelector('.table-wrap');
+  try{{sessionStorage.setItem('hlViewState',JSON.stringify({{x:window.scrollX||0,y:window.scrollY||0,tableLeft:wrap?wrap.scrollLeft:0}}));}}catch(e){{}}
+}}
+function restoreViewState(){{
+  try{{
+    const raw=sessionStorage.getItem('hlViewState'); if(!raw)return;
+    const s=JSON.parse(raw); const wrap=document.querySelector('.table-wrap');
+    if(wrap&&typeof s.tableLeft==='number')wrap.scrollLeft=s.tableLeft;
+    if(typeof s.x==='number'&&typeof s.y==='number')window.scrollTo(s.x,s.y);
+  }}catch(e){{}}
+}}
+restoreViewState();
 function markBusy(ms){{busyUntil=Date.now()+(ms||12000);}}
 function isBusy(){{return Date.now()<busyUntil||document.activeElement&&['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName);}}
 function flash(msg,cls){{if(!status)return;status.textContent=msg;status.className=cls||'muted';setTimeout(()=>{{status.textContent='';status.className='muted';}},3500);}}
@@ -1938,8 +2574,9 @@ function sortTableByHeader(link, direction){{
   const idx=Array.from(th.parentElement.children).indexOf(th);
   const tbody=table.tBodies[0]; const rows=Array.from(tbody.rows);
   const userRows=rows.filter(r=>r.classList.contains('user'));
-  const includedRows=rows.filter(r=>!r.classList.contains('user')&&!r.classList.contains('excluded-row'));
-  const otherRows=rows.filter(r=>!r.classList.contains('user')&&r.classList.contains('excluded-row'));
+  const dividerRows=rows.filter(r=>r.classList.contains('selected-divider'));
+  const includedRows=rows.filter(r=>!r.classList.contains('user')&&!r.classList.contains('selected-divider')&&!r.classList.contains('excluded-row'));
+  const otherRows=rows.filter(r=>!r.classList.contains('user')&&!r.classList.contains('selected-divider')&&r.classList.contains('excluded-row'));
   const isWallet=(link.getAttribute('href')||'').endsWith('/wallet');
   const sorter=(a,b)=>{{
     const av=cellSortValue(a,idx,isWallet), bv=cellSortValue(b,idx,isWallet);
@@ -1948,7 +2585,7 @@ function sortTableByHeader(link, direction){{
   }};
   includedRows.sort(sorter);
   otherRows.sort(sorter);
-  tbody.replaceChildren(...userRows,...includedRows,...otherRows);
+  tbody.replaceChildren(...userRows,...includedRows,...dividerRows,...otherRows);
   table.querySelectorAll('th').forEach(h=>{{h.classList.remove('sort-active'); const a=h.querySelector('a'); if(a&&a.dataset.baseLabel){{a.textContent=a.dataset.baseLabel;}}}});
   th.classList.add('sort-active');
   if(!link.dataset.baseLabel) link.dataset.baseLabel=link.textContent.replace(/\\s*[▲▼]$/,'');
@@ -1960,10 +2597,10 @@ document.addEventListener('input',e=>{{if(e.target.matches('input,select,textare
 document.addEventListener('change',e=>{{if(e.target.matches('input,select,textarea'))markBusy(15000);}});
 document.addEventListener('submit',async e=>{{
   const form=e.target;if(!form.matches('.ajax-form,.wallet-cfg,.inc-form'))return;
-  e.preventDefault();markBusy(5000);form.classList.add('saving');
+  e.preventDefault();markBusy(5000);saveViewState();form.classList.add('saving');
   try{{const r=await fetch(form.action,{{method:'POST',body:new FormData(form),headers:{{'X-Requested-With':'fetch'}}}});if(!r.ok)throw new Error('HTTP '+r.status);flash('saved','saved-flash');}}
   catch(err){{console.warn('save failed',err);flash('save failed','neg');}}
-  finally{{form.classList.remove('saving');}}
+  finally{{form.classList.remove('saving');restoreViewState();}}
 }});
 
 document.addEventListener('click',async e=>{{
@@ -1973,7 +2610,7 @@ document.addEventListener('click',async e=>{{
     const th=sortLink.closest('th');
     const current=th.classList.contains('sort-active') && /▼\\s*$/.test(sortLink.textContent) ? 'desc' : th.classList.contains('sort-active') ? 'asc' : '';
     const next=current==='desc'?'asc':'desc';
-    sortTableByHeader(sortLink,next);
+    saveViewState();sortTableByHeader(sortLink,next);restoreViewState();
     try{{await fetch(sortLink.getAttribute('href')+'?direction='+encodeURIComponent(next),{{headers:{{'X-Requested-With':'fetch'}}}});}}catch(err){{console.warn('sort save failed',err);}}
     return;
   }}
@@ -1991,7 +2628,7 @@ document.addEventListener('mousemove',e=>{{
   if(dot){{dot.setAttribute('cx',hit.dataset.x); dot.setAttribute('cy',hit.dataset.y); dot.style.display='block';}}
 }});
 
-setInterval(()=>{{if(!isBusy())location.reload();}},15000);
+// Auto refresh off: use browser refresh when needed.
 }})();</script></body></html>
 """
 
@@ -2083,9 +2720,59 @@ def wallet_detail(wallet: str) -> str:
     if not row:
         return HTMLResponse(f"<h3>Wallet not found: {wallet}</h3>", status_code=404)
     trades = [t for t in state.get("copy_trades", []) if str(t.get("wallet", "")).lower() == wallet][-100:]
-    trade_rows = "".join(f"<tr><td>{t['trade_id']}</td><td>{t['coin']}</td><td>{t['entry_time_iso']}</td><td>{t['exit_time_iso']}</td><td>{money(t['copy_pnl'])}</td><td>{t['return_pct']}%</td></tr>" for t in trades)
-    html = render_home({**state, "wallet_rows": [row], "portfolio_history": row.get("curve", [])})
-    return html + f"<div class='section'><h3>{wallet}</h3><table><tr><th>TRADE</th><th>COIN</th><th>ENTRY</th><th>EXIT</th><th>PNL</th><th>RET%</th></tr>{trade_rows}</table></div>"
+    expected_fills = [f for f in state.get("expected_copy_fills", []) if str(f.get("wallet", "")).lower() == wallet][-100:]
+    def esc(v: Any) -> str:
+        return html.escape(str(v if v is not None else ""))
+    def px(v: Any) -> str:
+        return f"{fnum(v):,.6f}" if is_present_num(v) else '<span class="missing">—</span>'
+    def ms(v: Any) -> str:
+        return f"{int(fnum(v))}ms" if is_present_num(v) else '<span class="missing">—</span>'
+    trade_rows = "".join(
+        "<tr>"
+        f"<td>{esc(t.get('trade_id'))}</td><td>{esc(t.get('coin'))}</td><td>{esc(t.get('lead_side'))}</td>"
+        f"<td>{esc(t.get('entry_time_iso'))}</td><td>{esc(t.get('exit_time_iso'))}</td>"
+        f"<td>{px(t.get('entry_price_lead'))}</td><td>{px(t.get('entry_price_copy'))}</td>"
+        f"<td>{px(t.get('entry_price_diff'))}</td>"
+        f"<td>{px(t.get('exit_price_lead'))}</td><td>{px(t.get('exit_price_copy'))}</td><td>{px(t.get('exit_price_diff'))}</td>"
+        f"<td>{fmt_money_or_dash(t.get('wallet_pnl'))}</td><td>{fmt_money_or_dash(t.get('copy_pnl'))}</td><td>{fmt_money_or_dash(t.get('copy_error'))}</td>"
+        f"<td>{fmt_pct_or_dash(t.get('return_pct'), 3)}</td><td>{esc(t.get('duration', ''))}</td>"
+        "</tr>"
+        for t in trades
+    )
+    fill_rows = "".join(
+        "<tr>"
+        f"<td>{esc(f.get('timestamp_iso'))}</td><td>{esc(f.get('coin'))}</td><td>{esc(f.get('side'))}</td><td>{esc(f.get('model_action'))}</td><td>{esc(f.get('recording_method'))}</td>"
+        f"<td>{px(f.get('leader_price'))}</td><td>{px(f.get('copy_price'))}</td><td>{px(f.get('price_diff'))}</td>"
+        f"<td>{esc(f.get('leader_position_side_after'))}</td><td>{esc(f.get('copy_position_side_after'))}</td>"
+        f"<td>{esc(f.get('position_alignment_ok', f.get('side_alignment_ok', '')))}</td>"
+        "</tr>"
+        for f in expected_fills
+    )
+    lead = row.get("lead", {}) if isinstance(row.get("lead"), dict) else {}
+    copy = row.get("copy", {}) if isinstance(row.get("copy"), dict) else {}
+    curve = row.get("curve", []) if isinstance(row.get("curve", []), list) else []
+    lc_counts = wallet_lead_copy_counts(row, state)
+    summary = "".join([
+        f"<div class='metric-line'><span>FILLS L/C</span><b>{lc_counts['fills'][0]} / {lc_counts['fills'][1]}</b></div>",
+        f"<div class='metric-line'><span>EXITS L/C</span><b>{lc_counts['exits'][0]} / {lc_counts['exits'][1]}</b></div>",
+        f"<div class='metric-line'><span>POS L/C</span><b>{lc_counts['pos'][0]} / {lc_counts['pos'][1]}</b></div>",
+        f"<div class='metric-line'><span>LEAD EQ</span><b>{fmt_money_or_dash(lead.get('equity'))}</b></div>",
+        f"<div class='metric-line'><span>COPY EQ</span><b>{fmt_money_or_dash(copy.get('equity'))}</b></div>",
+        f"<div class='metric-line'><span>LEAD DD</span><b class='neg'>{format_dd(get_current_dd(lead, curve, 'lead'), fnum(row.get('alloc'), DEFAULT_NORM_BASE))}</b></div>",
+        f"<div class='metric-line'><span>COPY DD</span><b class='neg'>{format_dd(get_current_dd(copy, curve, 'copy'), fnum(row.get('alloc'), DEFAULT_NORM_BASE))}</b></div>",
+        f"<div class='metric-line'><span>LEAD MAXDD</span><b class='neg'>{format_dd(get_max_dd(lead, curve, 'lead'), fnum(row.get('alloc'), DEFAULT_NORM_BASE))}</b></div>",
+        f"<div class='metric-line'><span>COPY MAXDD</span><b class='neg'>{format_dd(get_max_dd(copy, curve, 'copy'), fnum(row.get('alloc'), DEFAULT_NORM_BASE))}</b></div>",
+        f"<div class='metric-line'><span>ALIGNMENT</span><b>{esc(row.get('position_alignment_ok', True))}</b></div>",
+    ])
+    page_html = render_home({**state, "wallet_rows": [row], "portfolio_history": row.get("curve", [])})
+    return page_html + f"""
+    <div class='section'>
+      <h3>{esc(wallet)}</h3>
+      <div class='panel'><div class='cards' style='padding:0;grid-template-columns:repeat(5,minmax(130px,1fr))'>{summary}</div></div>
+      <div class='table-wrap'><table><tr><th>TRADE</th><th>COIN</th><th>SIDE</th><th>ENTRY TIME</th><th>EXIT TIME</th><th>LEAD ENTRY</th><th>COPY ENTRY</th><th>ENTRY DIFF</th><th>LEAD EXIT</th><th>COPY EXIT</th><th>EXIT DIFF</th><th>LEAD PNL</th><th>COPY PNL</th><th>COPY ERROR</th><th>RET %</th><th>HOLD</th></tr>{trade_rows}</table></div>
+      <h3>Expected copy fills</h3>
+      <div class='table-wrap'><table><tr><th>TIME</th><th>COIN</th><th>SIDE</th><th>ACTION</th><th>LEADER PX</th><th>COPY PX</th><th>PRICE DIFF</th><th>LEAD POS AFTER</th><th>COPY POS AFTER</th><th>ALIGNMENT</th></tr>{fill_rows}</table></div>
+    </div>"""
 
 
 @app.get("/api/ui-state")
@@ -2172,17 +2859,16 @@ def snapshot() -> JSONResponse:
 @app.get("/sort/{column}", response_class=HTMLResponse)
 def sort_column(column: str, request: Request, direction: str = ""):
     allowed = {
-        "wallet", "lead_equity", "lead_real", "lead_realized", "lead_unreal", "lead_unrealized",
+        "wallet",
+        "lead_equity", "lead_real", "lead_realized", "lead_unreal", "lead_unrealized",
         "lead_dd", "lead_drawdown", "lead_maxdd", "lead_max_drawdown",
         "copy_equity", "copy_real", "copy_realized", "copy_unreal", "copy_unrealized",
         "copy_dd", "copy_drawdown", "copy_maxdd", "copy_max_drawdown",
-        "delta", "delta_pct", "copy_total_pnl", "lead_total_pnl", "copy_efficiency",
-        "pnl_per_hour", "pnl_per_trade", "avg_trade_pct", "win_rate", "ws", "ws_fill_count",
-        "fill_count", "exit_count", "rebuild_fill_count", "measured_delta_fill_count",
-        "avg_ws_latency_ms", "expected_price_coverage_pct",
-        "avg_entry_disadvantage_bps", "avg_exit_disadvantage_bps",
-        "open_position_count", "avg_position_usd", "max_position_usd",
-        "avg_entry_notional_usd", "max_entry_notional_usd", "pct_entries_ge10", "required_leverage",
+        "delta", "delta_pct",
+        "pnl_per_hour", "avg_trade_pct", "win_rate",
+        "fill_count", "exit_count", "open_position_count",
+        "avg_position_usd", "max_position_usd",
+        "avg_entry_notional_usd", "pct_entries_ge10", "required_leverage",
     }
     if column not in allowed:
         if wants_json_response(request):
@@ -2200,6 +2886,30 @@ def sort_column(column: str, request: Request, direction: str = ""):
     state = dict(state)
     state["ui_state"] = load_ui_state()
     return HTMLResponse(render_home(state))
+
+
+@app.get("/api/live-config")
+def get_live_config():
+    return load_live_config()
+
+
+@app.post("/api/live-config")
+async def post_live_config(req: Request):
+    body = await req.json()
+    cfg = load_live_config()
+
+    cfg = {**cfg, **body}
+    cfg = enforce_live_wallet_limit(cfg)
+
+    save_live_config(cfg)
+
+    return {
+        "status": "ok",
+        "live_wallets": sum(
+            1 for w in cfg.get("wallets", {}).values()
+            if w.get("mode") == "LIVE"
+        )
+    }
 
 
 if __name__ == "__main__":
