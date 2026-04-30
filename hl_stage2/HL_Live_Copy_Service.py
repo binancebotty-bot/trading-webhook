@@ -98,6 +98,9 @@ ORDER_INTENT_FIELDS = [
     "intent_type", "reason", "status", "leader_price", "target_price",
     "leader_size", "leader_notional", "copy_notional", "copy_size",
     "min_notional_policy", "diff_pct", "max_diff_pct", "daily_loss_limit", "notes",
+    "execution_decision", "decision_reason", "executable_price", "adverse_diff_pct",
+    "suggested_order_type", "suggested_limit_price", "manual_reconcile_required",
+    "market_data_source", "market_data_error",
 ]
 
 LIVE_FILL_FIELDS = [
@@ -207,8 +210,44 @@ def ensure_csv_header(path: Path, fieldnames: List[str]) -> None:
         csv.DictWriter(f, fieldnames=fieldnames).writeheader()
 
 
+def ensure_csv_schema(path: Path, fieldnames: List[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if not path.exists() or path.stat().st_size <= 0:
+            with path.open("w", newline="", encoding="utf-8") as f:
+                csv.DictWriter(f, fieldnames=fieldnames).writeheader()
+            return
+        with path.open("r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            current = list(reader.fieldnames or [])
+            if all(name in current for name in fieldnames):
+                return
+            rows = list(reader)
+        backup = path.with_name(f"{path.name}.schema_backup_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}")
+        backup.write_bytes(path.read_bytes())
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({name: row.get(name, "") for name in fieldnames})
+    except Exception as exc:
+        if path != ERRORS_CSV:
+            try:
+                ensure_csv_header(ERRORS_CSV, ERROR_FIELDS)
+                with ERRORS_CSV.open("a", newline="", encoding="utf-8") as f:
+                    csv.DictWriter(f, fieldnames=ERROR_FIELDS).writerow({
+                        "created_at": utc_now_iso(),
+                        "context": "CSV_SCHEMA_UPGRADE",
+                        "error_type": type(exc).__name__,
+                        "message": f"path={path} err={exc}",
+                        "traceback": traceback.format_exc(),
+                    })
+            except Exception:
+                pass
+
+
 def append_csv(path: Path, fieldnames: List[str], row: Dict[str, Any]) -> None:
-    ensure_csv_header(path, fieldnames)
+    ensure_csv_schema(path, fieldnames)
     with path.open("a", newline="", encoding="utf-8") as f:
         csv.DictWriter(f, fieldnames=fieldnames).writerow({k: row.get(k, "") for k in fieldnames})
 
@@ -565,6 +604,114 @@ def audit_notes_for_fill(fill: LeaderFill, replay_history: bool = False) -> str:
     return "dry-run simulated fill; source=source_csv_forward; no exchange order placed"
 
 
+def executable_price_from_fill_payload(fill: LeaderFill) -> float:
+    raw = fill.raw if isinstance(fill.raw, dict) else {}
+    if fill.side == "BUY":
+        return fnum(raw_get(raw, "ask", "bestAsk", "best_ask", "executable_ask", "current_ask"), 0.0)
+    return fnum(raw_get(raw, "bid", "bestBid", "best_bid", "executable_bid", "current_bid"), 0.0)
+
+
+def adverse_diff_pct(fill: LeaderFill, executable_price: float) -> float:
+    if fill.price <= 0 or executable_price <= 0:
+        return 0.0
+    if fill.side == "BUY":
+        return max(0.0, (executable_price - fill.price) / fill.price * 100.0)
+    return max(0.0, (fill.price - executable_price) / fill.price * 100.0)
+
+
+def dry_run_intent_audit_decision(cfg: LiveWalletConfig, fill: LeaderFill, intent_type: str, reducing: bool, replay_history: bool = False) -> Dict[str, Any]:
+    source = str(getattr(fill, "source", "") or "").lower()
+    target_price = fill.price
+    executable_price: Any = fill.price
+    diff_pct: Any = 0.0
+    reason = audit_reason_for_fill(fill, replay_history=replay_history)
+    status = "DRY_RUN_FILLED"
+    policy = "DIRECT_EXECUTABLE"
+    extra_note = ""
+    execution_decision = status
+    decision_reason = reason
+    suggested_order_type = ""
+    suggested_limit_price: Any = fill.price
+    manual_reconcile_required = False
+    market_data_source = ""
+    market_data_error = ""
+    if reducing:
+        status = "WOULD_REDUCE" if intent_type == "ENTRY" else "WOULD_EXIT"
+        execution_decision = "WOULD_REDUCE_OR_EXIT"
+        decision_reason = "RISK_REDUCING_EXIT"
+        suggested_order_type = "IOC_LIMIT"
+        market_data_source = "LEADER_FILL_PRICE"
+        extra_note = "; reducing/exit path; risk-reducing dry-run"
+    elif source in {"ws", "live_ws", "live_ws_snapshot"}:
+        status = "WOULD_PLACE_IOC_LIMIT"
+        policy = "IOC_LIMIT_AT_LEADER_OR_ADJUSTED_COPY_PRICE"
+        execution_decision = "WOULD_PLACE_IOC_LIMIT"
+        decision_reason = "LIVE_WS_SNAPSHOT_RECOVERY" if source == "live_ws_snapshot" else "LIVE_WS_FAST_PATH"
+        executable_price = fill.price
+        suggested_order_type = "IOC_LIMIT"
+        suggested_limit_price = fill.price
+        market_data_source = "LEADER_FILL_PRICE"
+        extra_note = "; target limit price=leader fill price"
+    elif source == "live_poll":
+        executable_price = executable_price_from_fill_payload(fill)
+        if executable_price > 0:
+            target_price = executable_price
+            diff_pct = adverse_diff_pct(fill, executable_price)
+            if diff_pct <= cfg.max_diff_pct:
+                status = "WOULD_LATE_COPY"
+                reason = "RECOVERED_WITHIN_DIFF_TOLERANCE"
+                execution_decision = "WOULD_LATE_COPY"
+                decision_reason = "RECOVERED_WITHIN_DIFF_TOLERANCE"
+                policy = "LATE_COPY_WITHIN_DIFF_TOLERANCE"
+                suggested_order_type = "IOC_LIMIT"
+                suggested_limit_price = executable_price
+                market_data_source = "FILL_PAYLOAD_QUOTE"
+                extra_note = f"; executable_price={executable_price:.8g}; adverse_diff_pct={diff_pct:.6g}"
+            else:
+                status = "DO_NOT_MARKET_COPY"
+                reason = "MISSED_FILL_DIFF_TOO_LARGE"
+                execution_decision = "DO_NOT_MARKET_COPY"
+                decision_reason = "MISSED_FILL_DIFF_TOO_LARGE"
+                target_price = fill.price
+                policy = "MANUAL_RECONCILE_OR_ORIGINAL_LIMIT"
+                suggested_order_type = "LIMIT_AT_ORIGINAL_COPY_PRICE"
+                suggested_limit_price = fill.price
+                manual_reconcile_required = True
+                market_data_source = "FILL_PAYLOAD_QUOTE"
+                extra_note = f"; executable_price={executable_price:.8g}; adverse_diff_pct={diff_pct:.6g}; suggested_limit_price={fill.price:.8g}; manual reconcile"
+        else:
+            status = "MANUAL_REVIEW"
+            reason = "RECOVERY_QUOTE_UNAVAILABLE"
+            execution_decision = "MANUAL_REVIEW"
+            decision_reason = "RECOVERY_QUOTE_UNAVAILABLE"
+            policy = "NO_EXECUTABLE_BID_ASK_AVAILABLE"
+            executable_price = ""
+            diff_pct = ""
+            suggested_order_type = "LIMIT_AT_ORIGINAL_COPY_PRICE"
+            suggested_limit_price = fill.price
+            manual_reconcile_required = True
+            market_data_source = ""
+            market_data_error = "EXECUTABLE_QUOTE_UNAVAILABLE"
+            extra_note = "; executable bid/ask unavailable; suggested_limit_price=original copy price; manual reconcile"
+    return {
+        "reason": reason,
+        "status": status,
+        "policy": policy,
+        "target_price": target_price,
+        "diff_pct": diff_pct,
+        "extra_note": extra_note,
+        "execution_decision": execution_decision,
+        "decision_reason": decision_reason,
+        "executable_price": executable_price,
+        "adverse_diff_pct": diff_pct,
+        "suggested_order_type": suggested_order_type,
+        "suggested_limit_price": suggested_limit_price,
+        "manual_reconcile_required": manual_reconcile_required,
+        "market_data_source": market_data_source,
+        "market_data_error": market_data_error,
+    }
+
+
 def ws_coverage_for_fill(fill: LeaderFill) -> str:
     health = load_json(LIVE_WS_HEALTH_FILE, {})
     wallets = health.get("wallets") if isinstance(health, dict) else {}
@@ -716,7 +863,7 @@ class DryRunLiveCopyService:
             (RECONCILIATION_CSV, RECONCILIATION_FIELDS),
             (ERRORS_CSV, ERROR_FIELDS),
         ]:
-            ensure_csv_header(path, fields)
+            ensure_csv_schema(path, fields)
 
     def bump(self, key: str, amount: int = 1) -> None:
         counters = self.state.setdefault("counters", {})
@@ -855,18 +1002,28 @@ class DryRunLiveCopyService:
             "action": action, "notes": notes,
         })
 
-    def append_order_intent(self, cfg: LiveWalletConfig, fill: LeaderFill, intent_id: str, linked_ids: List[str], intent_type: str, reason: str, status: str, copy_notional: float, copy_size: float, policy: str, notes: str = "") -> None:
+    def append_order_intent(self, cfg: LiveWalletConfig, fill: LeaderFill, intent_id: str, linked_ids: List[str], intent_type: str, reason: str, status: str, copy_notional: float, copy_size: float, policy: str, notes: str = "", target_price: Optional[float] = None, diff_pct: Any = 0.0, decision: Optional[Dict[str, Any]] = None) -> None:
+        decision = decision or {}
         append_csv(ORDER_INTENTS_CSV, ORDER_INTENT_FIELDS, {
             "created_at": utc_now_iso(), "intent_id": intent_id, "dry_run": True,
             "leader_wallet": cfg.wallet, "leader_fill_id": fill.fill_id,
             "linked_leader_fill_ids": "|".join(linked_ids), "mode": cfg.mode,
             "copy_mode": cfg.copy_mode, "coin": fill.coin, "side": fill.side,
             "intent_type": intent_type, "reason": reason, "status": status,
-            "leader_price": round(fill.price, 8), "target_price": round(fill.price, 8),
+            "leader_price": round(fill.price, 8), "target_price": round(fnum(target_price, fill.price), 8),
             "leader_size": round(fill.size, 12), "leader_notional": round(fill.notional, 8),
             "copy_notional": round(copy_notional, 8), "copy_size": round(copy_size, 12),
-            "min_notional_policy": policy, "diff_pct": 0.0, "max_diff_pct": cfg.max_diff_pct,
+            "min_notional_policy": policy, "diff_pct": round(fnum(diff_pct), 8) if diff_pct != "" else "", "max_diff_pct": cfg.max_diff_pct,
             "daily_loss_limit": cfg.daily_loss_limit, "notes": notes,
+            "execution_decision": decision.get("execution_decision", ""),
+            "decision_reason": decision.get("decision_reason", ""),
+            "executable_price": decision.get("executable_price", ""),
+            "adverse_diff_pct": decision.get("adverse_diff_pct", ""),
+            "suggested_order_type": decision.get("suggested_order_type", ""),
+            "suggested_limit_price": decision.get("suggested_limit_price", ""),
+            "manual_reconcile_required": decision.get("manual_reconcile_required", ""),
+            "market_data_source": decision.get("market_data_source", ""),
+            "market_data_error": decision.get("market_data_error", ""),
         })
 
     def append_live_fill(self, cfg: LiveWalletConfig, fill: LeaderFill, intent_id: str, status: str, copy_notional: float, copy_size: float, pos: Dict[str, Any], realized_pnl: float, notes: str = "") -> None:
@@ -963,12 +1120,28 @@ class DryRunLiveCopyService:
 
         copy_size = copy_notional / fill.price if fill.price > 0 else 0.0
         intent_id = f"DRYRUN-{utc_now_ms()}-{len(self.processed_ids)+1}"
-        audit_notes = audit_notes_for_fill(fill, replay_history=replay_history)
-        self.append_order_intent(cfg, fill, intent_id, linked_ids, intent_type, audit_reason_for_fill(fill, replay_history=replay_history), "DRY_RUN_FILLED", copy_notional, copy_size, policy, audit_notes)
+        decision = dry_run_intent_audit_decision(cfg, fill, intent_type, reducing, replay_history=replay_history)
+        policy = decision.get("policy") or policy
+        audit_notes = audit_notes_for_fill(fill, replay_history=replay_history) + str(decision.get("extra_note") or "")
+        self.append_order_intent(
+            cfg, fill, intent_id, linked_ids, intent_type,
+            str(decision.get("reason") or audit_reason_for_fill(fill, replay_history=replay_history)),
+            str(decision.get("status") or "DRY_RUN_FILLED"),
+            copy_notional, copy_size, policy, audit_notes,
+            target_price=fnum(decision.get("target_price"), fill.price),
+            diff_pct=decision.get("diff_pct", ""),
+            decision=decision,
+        )
+        if decision.get("status") in {"DO_NOT_MARKET_COPY", "MANUAL_REVIEW"}:
+            self.append_reconciliation(cfg, fill, "REVIEW", str(decision.get("reason") or "MANUAL_REVIEW"), "MANUAL_REVIEW", before_signed, before_signed, copy_notional, "manual reconcile required" + str(decision.get("extra_note") or ""))
+            self.processed_ids.add(fill.fill_id)
+            self.bump("late_copy_manual_review")
+            return
         updated_pos, before, realized_pnl = self.apply_dry_run_fill_to_position(cfg, fill, copy_notional)
         after = fnum(updated_pos.get("signed_size"))
         self.append_live_fill(cfg, fill, intent_id, "DRY_RUN_FILLED", copy_notional, copy_size, updated_pos, realized_pnl, audit_notes)
-        self.append_reconciliation(cfg, fill, "DRY_RUN_FILL", "MATCHED_SIMULATED", "DRY_RUN_FILL", before, after, copy_notional, "dry-run position updated")
+        recon_action = "MANUAL_REVIEW" if decision.get("status") in {"DO_NOT_MARKET_COPY", "MANUAL_REVIEW"} else "DRY_RUN_FILL"
+        self.append_reconciliation(cfg, fill, "DRY_RUN_FILL", str(decision.get("status") or "MATCHED_SIMULATED"), recon_action, before, after, copy_notional, "dry-run position updated" + str(decision.get("extra_note") or ""))
         self.update_equity(cfg, fill)
         self.processed_ids.add(fill.fill_id)
         self.state["last_processed_fill_ts"] = max(inum(self.state.get("last_processed_fill_ts")), fill.timestamp_ms)
@@ -1813,6 +1986,21 @@ def self_test() -> bool:
                 raise AssertionError("safe_atomic_write_json returned false for temp JSON")
             if load_json(safe_probe, {}).get("ok") is not True:
                 raise AssertionError("safe_atomic_write_json temp JSON did not round-trip")
+            old_order_fields = ORDER_INTENT_FIELDS[:ORDER_INTENT_FIELDS.index("execution_decision")]
+            ORDER_INTENTS_CSV.parent.mkdir(parents=True, exist_ok=True)
+            with ORDER_INTENTS_CSV.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=old_order_fields)
+                writer.writeheader()
+                writer.writerow({"created_at": "old", "intent_id": "old-1", "leader_fill_id": "old-fill", "notes": "preserve me"})
+            ensure_csv_schema(ORDER_INTENTS_CSV, ORDER_INTENT_FIELDS)
+            with ORDER_INTENTS_CSV.open("r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                schema_header = list(reader.fieldnames or [])
+                schema_rows = list(reader)
+            if "execution_decision" not in schema_header or "decision_reason" not in schema_header:
+                raise AssertionError(f"order intent schema upgrade missing decision columns: {schema_header}")
+            if not schema_rows or schema_rows[0].get("leader_fill_id") != "old-fill" or schema_rows[0].get("notes") != "preserve me":
+                raise AssertionError(f"order intent schema upgrade did not preserve old row: {schema_rows}")
             if not safe_atomic_write_json(APP_CONFIG_FILE, {
                 "wallets": {
                     wallet: {
@@ -1897,6 +2085,8 @@ def self_test() -> bool:
             ws_intent = last_csv_row(ORDER_INTENTS_CSV)
             if ws_intent.get("reason") != "LIVE_WS_DETECTED":
                 raise AssertionError(f"WS order intent reason mismatch: {ws_intent}")
+            if ws_intent.get("execution_decision") != "WOULD_PLACE_IOC_LIMIT" or ws_intent.get("decision_reason") != "LIVE_WS_FAST_PATH":
+                raise AssertionError(f"WS order intent decision columns mismatch: {ws_intent}")
             if "source=live_ws" not in ws_intent.get("notes", ""):
                 raise AssertionError(f"WS order intent notes missing source label: {ws_intent}")
 
