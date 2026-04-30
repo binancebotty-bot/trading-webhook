@@ -986,15 +986,37 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
             items = list(manager.wallet_status.items())
         for wallet, status_item in items:
             status = dict(status_item)
-            last_msg = int(status.get("last_msg_ms") or 0)
-            stale_ms = (now - last_msg) if last_msg else 10**12
-            effective_status = status.get("status", "UNKNOWN")
+            transport_ref = max(
+                int(status.get("last_msg_ms") or 0),
+                int(status.get("last_pong_ms") or 0),
+                int(status.get("last_ping_ms") or 0),
+                int(status.get("last_open_ms") or 0),
+            )
+            transport_stale_ms = (now - transport_ref) if transport_ref else 10**12
+            last_data_ms = int(status.get("last_data_ms") or 0)
+            data_stale_ms = (now - last_data_ms) if last_data_ms else 0
+            status_name = str(status.get("status", "UNKNOWN"))
+            effective_status = status_name
+            if status_name == "OPEN" and (LIVE_WS_STALE_MS <= 0 or transport_stale_ms <= LIVE_WS_STALE_MS):
+                effective_status = "OPEN"
+            elif status_name == "OPEN":
+                effective_status = "STALE"
+            if last_data_ms == 0:
+                data_status = "IDLE_NO_FILLS"
+            elif LIVE_WS_STALE_MS > 0 and data_stale_ms > LIVE_WS_STALE_MS:
+                data_status = "IDLE"
+            else:
+                data_status = "ACTIVE"
             if effective_status != "OPEN":
                 overall = "DEGRADED"
-            if LIVE_WS_STALE_MS > 0 and effective_status == "OPEN" and stale_ms > LIVE_WS_STALE_MS:
-                effective_status = "STALE"
-                overall = "DEGRADED"
-            wallets[wallet] = {**status, "effective_status": effective_status, "stale_ms": stale_ms}
+            wallets[wallet] = {
+                **status,
+                "effective_status": effective_status,
+                "data_status": data_status,
+                "stale_ms": transport_stale_ms,
+                "transport_stale_ms": transport_stale_ms,
+                "data_stale_ms": data_stale_ms,
+            }
     return {
         "enabled": bool(manager is not None),
         "updated_at": utc_now_iso(),
@@ -1026,12 +1048,19 @@ class DedicatedLiveWSManager:
                 "last_close_ms": 0,
                 "last_msg_ms": 0,
                 "last_data_ms": 0,
+                "last_ping_ms": 0,
+                "last_pong_ms": 0,
+                "last_heartbeat_ms": 0,
+                "last_close_status_code": "",
+                "last_close_msg": "",
                 "processed_count": 0,
                 "duplicate_count": 0,
                 "ignored_count": 0,
                 "error_count": 0,
                 "reconnect_count": 0,
                 "last_error": "",
+                "last_error_repr": "",
+                "data_status": "IDLE_NO_FILLS",
             }
             for wallet in self.wallets
         }
@@ -1094,16 +1123,26 @@ class DedicatedLiveWSManager:
 
             def on_open(app: Any) -> None:
                 now = utc_now_ms()
-                patch = {"status": "OPEN", "last_open_ms": now, "last_msg_ms": now}
+                patch = {"status": "OPEN", "last_open_ms": now, "last_msg_ms": now, "last_heartbeat_ms": now}
                 if attempt > 0:
                     patch["reconnect_count"] = self.wallet_status.get(wallet, {}).get("reconnect_count", 0) + 1
                 self.update_status(wallet, **patch)
                 app.send(json.dumps({"method": "subscribe", "subscription": {"type": "userFills", "user": wallet}}))
 
+            def on_ping(_app: Any, _message: Any) -> None:
+                now = utc_now_ms()
+                self.update_status(wallet, last_ping_ms=now, last_heartbeat_ms=now)
+
+            def on_pong(_app: Any, _message: Any) -> None:
+                now = utc_now_ms()
+                self.update_status(wallet, last_pong_ms=now, last_heartbeat_ms=now)
+
             def on_message(_app: Any, message: str) -> None:
                 now = utc_now_ms()
-                self.update_status(wallet, last_msg_ms=now)
+                self.update_status(wallet, last_msg_ms=now, last_heartbeat_ms=now)
                 extracted = extract_ws_fills(message)
+                if extracted:
+                    self.update_status(wallet, last_data_ms=now)
                 for msg_wallet, raw in extracted:
                     fill = parse_ws_leader_fill(msg_wallet or wallet, raw)
                     if fill is None:
@@ -1116,7 +1155,6 @@ class DedicatedLiveWSManager:
                         status = self.wallet_status[wallet]
                         if result.get("processed"):
                             status["processed_count"] += 1
-                            status["last_data_ms"] = utc_now_ms()
                         elif result.get("reason") == "DUPLICATE":
                             status["duplicate_count"] += 1
                         else:
@@ -1128,9 +1166,16 @@ class DedicatedLiveWSManager:
                     status["status"] = "ERROR"
                     status["error_count"] += 1
                     status["last_error"] = str(error)
+                    status["last_error_repr"] = repr(error)
 
-            def on_close(_app: Any, _code: Any, _reason: Any) -> None:
-                self.update_status(wallet, status="CLOSED", last_close_ms=utc_now_ms())
+            def on_close(_app: Any, close_status_code: Any, close_msg: Any) -> None:
+                self.update_status(
+                    wallet,
+                    status="CLOSED",
+                    last_close_ms=utc_now_ms(),
+                    last_close_status_code=close_status_code,
+                    last_close_msg=str(close_msg or ""),
+                )
 
             try:
                 app = websocket.WebSocketApp(
@@ -1139,6 +1184,8 @@ class DedicatedLiveWSManager:
                     on_message=on_message,
                     on_error=on_error,
                     on_close=on_close,
+                    on_ping=on_ping,
+                    on_pong=on_pong,
                 )
                 self.apps[wallet] = app
                 app.run_forever(
@@ -1151,6 +1198,7 @@ class DedicatedLiveWSManager:
                     status["status"] = "ERROR"
                     status["error_count"] += 1
                     status["last_error"] = str(exc)
+                    status["last_error_repr"] = repr(exc)
             finally:
                 self.apps.pop(wallet, None)
 
@@ -1297,6 +1345,15 @@ def self_test() -> bool:
                 raise AssertionError(f"WS order intent notes missing source label: {ws_intent}")
 
             manager = DedicatedLiveWSManager(service, [wallet])
+            manager.update_status(wallet, status="OPEN", last_open_ms=utc_now_ms(), last_data_ms=0)
+            health_snapshot = build_ws_health_snapshot(manager)
+            wallet_health = health_snapshot.get("wallets", {}).get(wallet, {})
+            if wallet_health.get("effective_status") != "OPEN":
+                raise AssertionError(f"quiet open WS should remain OPEN: {health_snapshot}")
+            if wallet_health.get("data_status") != "IDLE_NO_FILLS":
+                raise AssertionError(f"quiet open WS data status mismatch: {health_snapshot}")
+            if health_snapshot.get("overall") != "OK":
+                raise AssertionError(f"quiet open WS should not degrade overall: {health_snapshot}")
             write_ws_health(manager)
             health = load_json(LIVE_WS_HEALTH_FILE, {})
             if health.get("mode") != "DEDICATED_SOCKET_PER_WALLET":
