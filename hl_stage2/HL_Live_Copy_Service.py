@@ -87,6 +87,9 @@ LIVE_WS_INITIAL_BACKOFF_SEC = float(os.getenv("HL_LIVE_WS_INITIAL_BACKOFF_SEC", 
 LIVE_WS_BACKOFF_MULTIPLIER = float(os.getenv("HL_LIVE_WS_BACKOFF_MULTIPLIER", "1.5"))
 LIVE_WS_RECONNECT_GRACE_MS = int(os.getenv("HL_LIVE_WS_RECONNECT_GRACE_MS", "10000"))
 LIVE_WS_THREAD_WATCHDOG_SEC = float(os.getenv("HL_LIVE_WS_THREAD_WATCHDOG_SEC", "5"))
+LIVE_WS_PROACTIVE_RECYCLE_SEC = float(os.getenv("HL_LIVE_WS_PROACTIVE_RECYCLE_SEC", "50"))
+LIVE_WS_PROACTIVE_RECYCLE_ENABLED = os.getenv("HL_LIVE_WS_PROACTIVE_RECYCLE_ENABLED", "1") == "1"
+LIVE_JSON_WRITE_LOCK = threading.RLock()
 
 ORDER_INTENT_FIELDS = [
     "created_at", "intent_id", "dry_run", "leader_wallet", "leader_fill_id",
@@ -177,6 +180,22 @@ def atomic_write_json(path: Path, payload: Any) -> None:
     tmp = path.with_name(f"{path.name}.{os.getpid()}_{time.time_ns()}.tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def safe_atomic_write_json(path: Path, payload: Any, context: str = "JSON_WRITE") -> bool:
+    delays = [0.05, 0.15, 0.35]
+    with LIVE_JSON_WRITE_LOCK:
+        for attempt in range(4):
+            try:
+                atomic_write_json(path, payload)
+                return True
+            except (PermissionError, OSError):
+                if attempt >= 3:
+                    return False
+                time.sleep(delays[attempt])
+            except Exception:
+                return False
+    return False
 
 
 def ensure_csv_header(path: Path, fieldnames: List[str]) -> None:
@@ -387,10 +406,10 @@ def extract_ws_fills(message: str) -> List[Tuple[str, Dict[str, Any]]]:
     return out
 
 
-def is_benign_ws_error(err: Any) -> bool:
-    name = type(err).__name__
-    module = type(err).__module__
-    text = repr(err)
+def is_ws_abnf_frame(obj: Any) -> bool:
+    name = type(obj).__name__
+    module = type(obj).__module__
+    text = repr(obj)
     if "websocket._abnf" in module:
         return True
     if name == "ABNF":
@@ -398,6 +417,37 @@ def is_benign_ws_error(err: Any) -> bool:
     if text.startswith("<websocket._abnf.ABNF object"):
         return True
     return False
+
+
+def ws_abnf_details(frame: Any) -> Dict[str, Any]:
+    data = getattr(frame, "data", b"")
+    opcode = getattr(frame, "opcode", "")
+    details: Dict[str, Any] = {
+        "type_name": type(frame).__name__,
+        "module": type(frame).__module__,
+        "repr": repr(frame),
+        "opcode": opcode,
+        "fin": getattr(frame, "fin", ""),
+        "data_len": "",
+        "close_code": "",
+        "close_reason": "",
+    }
+    if isinstance(data, (bytes, bytearray, str)):
+        details["data_len"] = len(data)
+    try:
+        if opcode == 8 or (isinstance(data, (bytes, bytearray)) and len(data) >= 2):
+            if isinstance(data, (bytes, bytearray)) and len(data) >= 2:
+                details["close_code"] = int.from_bytes(data[:2], "big")
+                details["close_reason"] = bytes(data[2:]).decode("utf-8", errors="replace")
+            elif isinstance(data, str):
+                details["close_reason"] = data
+    except Exception:
+        pass
+    return details
+
+
+def is_benign_ws_error(err: Any) -> bool:
+    return is_ws_abnf_frame(err)
 
 
 def parse_ws_leader_fill(wallet: str, raw: Dict[str, Any]) -> Optional[LeaderFill]:
@@ -609,9 +659,25 @@ class DryRunLiveCopyService:
         self.processed_ids = set(self.processed_id_order)
         self.state["processed_leader_fill_ids"] = list(self.processed_id_order)
         self.state["audit_dir"] = str(AUDIT_DIR)
-        atomic_write_json(SERVICE_STATE_FILE, self.state)
-        atomic_write_json(LIVE_POSITIONS_FILE, self.positions)
-        atomic_write_json(LIVE_EQUITY_HISTORY_FILE, self.equity_history)
+        failures = []
+        if not safe_atomic_write_json(SERVICE_STATE_FILE, self.state, "SERVICE_STATE_WRITE"):
+            failures.append(str(SERVICE_STATE_FILE))
+        if not safe_atomic_write_json(LIVE_POSITIONS_FILE, self.positions, "LIVE_POSITIONS_WRITE"):
+            failures.append(str(LIVE_POSITIONS_FILE))
+        if not safe_atomic_write_json(LIVE_EQUITY_HISTORY_FILE, self.equity_history, "LIVE_EQUITY_HISTORY_WRITE"):
+            failures.append(str(LIVE_EQUITY_HISTORY_FILE))
+        if failures:
+            self.bump("json_write_errors")
+            try:
+                append_csv(ERRORS_CSV, ERROR_FIELDS, {
+                    "created_at": utc_now_iso(),
+                    "context": "PERSIST_JSON_WRITE",
+                    "error_type": "SafeAtomicWriteFailed",
+                    "message": "; ".join(failures),
+                    "traceback": "",
+                })
+            except Exception:
+                pass
 
     def log_error(self, context: str, exc: BaseException) -> None:
         append_csv(ERRORS_CSV, ERROR_FIELDS, {
@@ -1026,6 +1092,7 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
             last_data_ms = int(status.get("last_data_ms") or 0)
             data_stale_ms = (now - last_data_ms) if last_data_ms else 0
             next_reconnect_ms = int(status.get("next_reconnect_ms") or 0)
+            next_proactive_recycle_ms = int(status.get("next_proactive_recycle_ms") or 0)
             last_open_ms = int(status.get("last_open_ms") or 0)
             last_close_ms = int(status.get("last_close_ms") or 0)
             first_seen_ms = int(status.get("first_seen_ms") or now)
@@ -1054,6 +1121,7 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
             if effective_status != "OPEN":
                 overall = "DEGRADED"
             reconnect_in_ms = max(0, next_reconnect_ms - now) if next_reconnect_ms else 0
+            proactive_recycle_due_ms = max(0, next_proactive_recycle_ms - now) if next_proactive_recycle_ms else 0
             uptime_ms = (now - last_open_ms) if status_name == "OPEN" and last_open_ms else int(status.get("uptime_ms") or 0)
             downtime_ms = (now - last_close_ms) if status_name in {"CLOSED", "RECONNECTING"} and last_close_ms else 0
             observed_ms = max(0, now - first_seen_ms)
@@ -1092,6 +1160,7 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
                 "transport_stale_ms": transport_stale_ms,
                 "data_stale_ms": data_stale_ms,
                 "reconnect_in_ms": reconnect_in_ms,
+                "proactive_recycle_due_ms": proactive_recycle_due_ms,
                 "uptime_ms": uptime_ms,
                 "downtime_ms": downtime_ms,
                 "observed_ms": observed_ms,
@@ -1110,6 +1179,9 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
         "overall": overall,
         "ws_summary": summary,
         "wallets": wallets,
+        "health_write_error_count": int(getattr(manager, "health_write_error_count", 0) or 0) if manager is not None else 0,
+        "last_health_write_error": str(getattr(manager, "last_health_write_error", "") or "") if manager is not None else "",
+        "last_health_write_error_at": str(getattr(manager, "last_health_write_error_at", "") or "") if manager is not None else "",
         "max_wallets": LIVE_WS_MAX_WALLETS,
         "stale_ms_threshold": LIVE_WS_STALE_MS,
         "mode": "DEDICATED_SOCKET_PER_WALLET",
@@ -1118,7 +1190,18 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
 
 
 def write_ws_health(manager: Any) -> None:
-    atomic_write_json(LIVE_WS_HEALTH_FILE, build_ws_health_snapshot(manager))
+    try:
+        payload = build_ws_health_snapshot(manager)
+        ok = safe_atomic_write_json(LIVE_WS_HEALTH_FILE, payload, "WS_HEALTH_WRITE")
+    except Exception:
+        ok = False
+    if not ok and manager is not None:
+        try:
+            manager.health_write_error_count += 1
+            manager.last_health_write_error = "safe_atomic_write_json failed for live_ws_health.json"
+            manager.last_health_write_error_at = utc_now_iso()
+        except Exception:
+            pass
 
 
 class DedicatedLiveWSManager:
@@ -1128,6 +1211,9 @@ class DedicatedLiveWSManager:
         self.stop_event = threading.Event()
         self.threads: List[threading.Thread] = []
         self.apps: Dict[str, Any] = {}
+        self.health_write_error_count = 0
+        self.last_health_write_error = ""
+        self.last_health_write_error_at = ""
         self.wallet_status = {
             wallet: {
                 "wallet": wallet,
@@ -1149,6 +1235,7 @@ class DedicatedLiveWSManager:
                 "uptime_ms": 0,
                 "downtime_ms": 0,
                 "last_run_forever_return_ms": 0,
+                "last_run_forever_result": "",
                 "processed_count": 0,
                 "duplicate_count": 0,
                 "ignored_count": 0,
@@ -1158,6 +1245,12 @@ class DedicatedLiveWSManager:
                 "last_error_repr": "",
                 "benign_event_count": 0,
                 "last_benign_event_repr": "",
+                "control_frame_count": 0,
+                "close_frame_count": 0,
+                "last_control_frame": {},
+                "last_close_frame_code": "",
+                "last_close_frame_reason": "",
+                "last_close_frame_opcode": "",
                 "data_status": "IDLE_NO_FILLS",
                 "worker_thread_alive": False,
                 "worker_thread_name": "",
@@ -1166,6 +1259,10 @@ class DedicatedLiveWSManager:
                 "fatal_error_count": 0,
                 "last_fatal_error": "",
                 "last_fatal_error_repr": "",
+                "proactive_recycle_count": 0,
+                "last_proactive_recycle_ms": 0,
+                "next_proactive_recycle_ms": 0,
+                "proactive_recycle_enabled": bool(LIVE_WS_PROACTIVE_RECYCLE_ENABLED),
             }
             for wallet in self.wallets
         }
@@ -1303,10 +1400,42 @@ class DedicatedLiveWSManager:
                 worker_last_seen_ms=utc_now_ms(),
             )
 
+            def schedule_proactive_recycle(app: Any, open_ms: int) -> None:
+                if not LIVE_WS_PROACTIVE_RECYCLE_ENABLED or LIVE_WS_PROACTIVE_RECYCLE_SEC <= 0:
+                    return
+
+                def recycle_after_delay() -> None:
+                    if self.stop_event.wait(LIVE_WS_PROACTIVE_RECYCLE_SEC):
+                        return
+                    with self.status_lock:
+                        status = self.wallet_status[wallet]
+                        if int(status.get("last_open_ms") or 0) != open_ms:
+                            return
+                        if self.apps.get(wallet) is not app:
+                            return
+                        status["status"] = "PROACTIVE_RECYCLING"
+                        status["proactive_recycle_count"] += 1
+                        status["last_proactive_recycle_ms"] = utc_now_ms()
+                    try:
+                        app.close()
+                    except Exception as exc:
+                        with self.status_lock:
+                            status = self.wallet_status[wallet]
+                            status["last_error"] = str(exc)
+                            status["last_error_repr"] = repr(exc)
+
+                thread = threading.Thread(target=recycle_after_delay, name=f"live-ws-recycle-{wallet[-6:]}", daemon=True)
+                thread.start()
+
             def on_open(app: Any) -> None:
                 nonlocal backoff
                 now = utc_now_ms()
                 backoff = max(0.1, LIVE_WS_INITIAL_BACKOFF_SEC)
+                next_proactive_recycle_ms = (
+                    now + int(LIVE_WS_PROACTIVE_RECYCLE_SEC * 1000)
+                    if LIVE_WS_PROACTIVE_RECYCLE_ENABLED and LIVE_WS_PROACTIVE_RECYCLE_SEC > 0
+                    else 0
+                )
                 patch = {
                     "status": "OPEN",
                     "last_open_ms": now,
@@ -1314,8 +1443,11 @@ class DedicatedLiveWSManager:
                     "last_heartbeat_ms": now,
                     "reconnect_backoff_sec": backoff,
                     "next_reconnect_ms": 0,
+                    "next_proactive_recycle_ms": next_proactive_recycle_ms,
+                    "proactive_recycle_enabled": bool(LIVE_WS_PROACTIVE_RECYCLE_ENABLED),
                 }
                 self.update_status(wallet, **patch)
+                schedule_proactive_recycle(app, now)
                 app.send(json.dumps({"method": "subscribe", "subscription": {"type": "userFills", "user": wallet}}))
 
             def on_ping(_app: Any, _message: Any) -> None:
@@ -1352,10 +1484,18 @@ class DedicatedLiveWSManager:
             def on_error(_app: Any, error: Any) -> None:
                 with self.status_lock:
                     status = self.wallet_status[wallet]
-                    if is_benign_ws_error(error):
+                    if is_ws_abnf_frame(error):
+                        details = ws_abnf_details(error)
                         status["benign_event_count"] += 1
                         status["last_benign_event_repr"] = repr(error)
+                        status["control_frame_count"] += 1
+                        status["last_control_frame"] = details
                         status["last_heartbeat_ms"] = utc_now_ms()
+                        if details.get("opcode") == 8 or details.get("close_code") != "":
+                            status["close_frame_count"] += 1
+                            status["last_close_frame_code"] = details.get("close_code", "")
+                            status["last_close_frame_reason"] = details.get("close_reason", "")
+                            status["last_close_frame_opcode"] = details.get("opcode", "")
                         return
                     status["status"] = "ERROR"
                     status["error_count"] += 1
@@ -1385,10 +1525,11 @@ class DedicatedLiveWSManager:
                     on_pong=on_pong,
                 )
                 self.apps[wallet] = app
-                app.run_forever(
+                run_result = app.run_forever(
                     ping_interval=LIVE_WS_PING_INTERVAL_SEC,
                     ping_timeout=LIVE_WS_PING_TIMEOUT_SEC,
                 )
+                self.update_status(wallet, last_run_forever_result=repr(run_result))
             except Exception as exc:
                 with self.status_lock:
                     status = self.wallet_status[wallet]
@@ -1469,7 +1610,12 @@ def self_test() -> bool:
             audit_dir = root / "hl_live_copy_audit"
             source_fills = root / "raw_live_fills.csv"
             configure_paths(audit_dir, source_fills)
-            atomic_write_json(APP_CONFIG_FILE, {
+            safe_probe = root / "safe_write_probe.json"
+            if not safe_atomic_write_json(safe_probe, {"ok": True}, "SELF_TEST_SAFE_WRITE"):
+                raise AssertionError("safe_atomic_write_json returned false for temp JSON")
+            if load_json(safe_probe, {}).get("ok") is not True:
+                raise AssertionError("safe_atomic_write_json temp JSON did not round-trip")
+            if not safe_atomic_write_json(APP_CONFIG_FILE, {
                 "wallets": {
                     wallet: {
                         "mode": "LIVE",
@@ -1479,7 +1625,8 @@ def self_test() -> bool:
                         "norm_base": 100.0,
                     }
                 }
-            })
+            }, "SELF_TEST_CONFIG_WRITE"):
+                raise AssertionError("failed to write self-test config")
             write_self_test_fills(source_fills, rows)
             LIVE_POLL_ENABLED = True
 
@@ -1557,12 +1704,27 @@ def self_test() -> bool:
 
             class ABNF:
                 __module__ = "websocket._abnf"
+                opcode = 8
+                fin = 1
+                data = (1000).to_bytes(2, "big") + b"test close"
 
-            if not is_benign_ws_error(ABNF()):
+            fake_abnf = ABNF()
+            if not is_benign_ws_error(fake_abnf) or not is_ws_abnf_frame(fake_abnf):
                 raise AssertionError("ABNF websocket callback object was not classified as benign")
+            abnf_details = ws_abnf_details(fake_abnf)
+            if abnf_details.get("close_code") != 1000 or abnf_details.get("close_reason") != "test close":
+                raise AssertionError(f"ABNF close frame details mismatch: {abnf_details}")
 
             manager = DedicatedLiveWSManager(service, [wallet])
-            manager.update_status(wallet, status="OPEN", last_open_ms=utc_now_ms(), last_data_ms=0, benign_event_count=2)
+            manager.update_status(
+                wallet,
+                status="OPEN",
+                last_open_ms=utc_now_ms(),
+                last_data_ms=0,
+                benign_event_count=2,
+                next_proactive_recycle_ms=utc_now_ms() + 50000,
+                proactive_recycle_enabled=True,
+            )
             health_snapshot = build_ws_health_snapshot(manager)
             wallet_health = health_snapshot.get("wallets", {}).get(wallet, {})
             if wallet_health.get("effective_status") != "OPEN":
@@ -1577,6 +1739,8 @@ def self_test() -> bool:
                 raise AssertionError(f"WS summary missing from health: {health_snapshot}")
             if "reconnects_per_min" not in wallet_health or "health_grade" not in wallet_health:
                 raise AssertionError(f"WS stability metrics missing from wallet health: {health_snapshot}")
+            if wallet_health.get("proactive_recycle_due_ms", 0) <= 0 or not wallet_health.get("proactive_recycle_enabled"):
+                raise AssertionError(f"WS proactive recycle health fields missing: {health_snapshot}")
             reconnect_wallet = "0xreconnect"
             manager.update_status(
                 reconnect_wallet,
