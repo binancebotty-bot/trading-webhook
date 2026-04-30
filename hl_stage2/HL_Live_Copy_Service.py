@@ -24,7 +24,9 @@ import csv
 import json
 import math
 import os
+import signal
 import tempfile
+import threading
 import time
 import traceback
 from dataclasses import dataclass, asdict
@@ -77,6 +79,10 @@ LIVE_WS_ENABLED = os.getenv("HL_LIVE_WS_ENABLED", "0") == "1"
 LIVE_WS_URL = os.getenv("HL_LIVE_WS_URL", "wss://api.hyperliquid.xyz/ws")
 LIVE_WS_MAX_WALLETS = 10
 LIVE_WS_STALE_MS = int(os.getenv("HL_LIVE_WS_STALE_MS", "30000"))
+LIVE_WS_PING_INTERVAL_SEC = int(os.getenv("HL_LIVE_WS_PING_INTERVAL_SEC", "20"))
+LIVE_WS_PING_TIMEOUT_SEC = int(os.getenv("HL_LIVE_WS_PING_TIMEOUT_SEC", "10"))
+LIVE_WS_RECONNECT_BACKOFF_CAP_SEC = float(os.getenv("HL_LIVE_WS_RECONNECT_BACKOFF_CAP_SEC", "30"))
+LIVE_WS_HEALTH_WRITE_SEC = float(os.getenv("HL_LIVE_WS_HEALTH_WRITE_SEC", "2"))
 
 ORDER_INTENT_FIELDS = [
     "created_at", "intent_id", "dry_run", "leader_wallet", "leader_fill_id",
@@ -970,6 +976,191 @@ class DryRunLiveCopyService:
         }
 
 
+def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
+    now = utc_now_ms()
+    wallets = {}
+    overall = "DISABLED"
+    if manager is not None:
+        overall = "OK"
+        with manager.status_lock:
+            items = list(manager.wallet_status.items())
+        for wallet, status_item in items:
+            status = dict(status_item)
+            last_msg = int(status.get("last_msg_ms") or 0)
+            stale_ms = (now - last_msg) if last_msg else 10**12
+            effective_status = status.get("status", "UNKNOWN")
+            if effective_status != "OPEN":
+                overall = "DEGRADED"
+            if LIVE_WS_STALE_MS > 0 and effective_status == "OPEN" and stale_ms > LIVE_WS_STALE_MS:
+                effective_status = "STALE"
+                overall = "DEGRADED"
+            wallets[wallet] = {**status, "effective_status": effective_status, "stale_ms": stale_ms}
+    return {
+        "enabled": bool(manager is not None),
+        "updated_at": utc_now_iso(),
+        "overall": overall,
+        "wallets": wallets,
+        "max_wallets": LIVE_WS_MAX_WALLETS,
+        "stale_ms_threshold": LIVE_WS_STALE_MS,
+        "mode": "DEDICATED_SOCKET_PER_WALLET",
+        "dry_run": True,
+    }
+
+
+def write_ws_health(manager: Any) -> None:
+    atomic_write_json(LIVE_WS_HEALTH_FILE, build_ws_health_snapshot(manager))
+
+
+class DedicatedLiveWSManager:
+    def __init__(self, service: DryRunLiveCopyService, wallets: List[str]) -> None:
+        self.service = service
+        self.wallets = [str(wallet).lower() for wallet in wallets[:LIVE_WS_MAX_WALLETS]]
+        self.stop_event = threading.Event()
+        self.threads: List[threading.Thread] = []
+        self.apps: Dict[str, Any] = {}
+        self.wallet_status = {
+            wallet: {
+                "wallet": wallet,
+                "status": "INIT",
+                "last_open_ms": 0,
+                "last_close_ms": 0,
+                "last_msg_ms": 0,
+                "last_data_ms": 0,
+                "processed_count": 0,
+                "duplicate_count": 0,
+                "ignored_count": 0,
+                "error_count": 0,
+                "reconnect_count": 0,
+                "last_error": "",
+            }
+            for wallet in self.wallets
+        }
+        self.status_lock = threading.Lock()
+        self.service_lock = threading.Lock()
+
+    def update_status(self, wallet: str, **patch: Any) -> None:
+        wallet = str(wallet).lower()
+        with self.status_lock:
+            status = self.wallet_status.setdefault(wallet, {"wallet": wallet})
+            status.update(patch)
+
+    def health_loop(self) -> None:
+        write_ws_health(self)
+        while not self.stop_event.wait(max(0.2, LIVE_WS_HEALTH_WRITE_SEC)):
+            write_ws_health(self)
+        write_ws_health(self)
+
+    def start(self) -> None:
+        write_ws_health(self)
+        health_thread = threading.Thread(target=self.health_loop, name="live-ws-health", daemon=True)
+        health_thread.start()
+        self.threads.append(health_thread)
+        for wallet in self.wallets:
+            thread = threading.Thread(target=self.wallet_loop, args=(wallet,), name=f"live-ws-{wallet[:10]}", daemon=True)
+            thread.start()
+            self.threads.append(thread)
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        for app in list(self.apps.values()):
+            try:
+                app.close()
+            except Exception:
+                pass
+        write_ws_health(self)
+
+    def wait(self) -> None:
+        try:
+            while not self.stop_event.is_set():
+                alive = any(thread.is_alive() for thread in self.threads)
+                if not alive:
+                    break
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            self.stop()
+        finally:
+            for thread in self.threads:
+                thread.join(timeout=2.0)
+
+    def wallet_loop(self, wallet: str) -> None:
+        if websocket is None:
+            self.update_status(wallet, status="ERROR", error_count=1, last_error="websocket-client unavailable")
+            write_ws_health(self)
+            return
+
+        attempt = 0
+        while not self.stop_event.is_set():
+            self.update_status(wallet, status="CONNECTING", last_error="")
+
+            def on_open(app: Any) -> None:
+                now = utc_now_ms()
+                patch = {"status": "OPEN", "last_open_ms": now, "last_msg_ms": now}
+                if attempt > 0:
+                    patch["reconnect_count"] = self.wallet_status.get(wallet, {}).get("reconnect_count", 0) + 1
+                self.update_status(wallet, **patch)
+                app.send(json.dumps({"method": "subscribe", "subscription": {"type": "userFills", "user": wallet}}))
+
+            def on_message(_app: Any, message: str) -> None:
+                now = utc_now_ms()
+                self.update_status(wallet, last_msg_ms=now)
+                extracted = extract_ws_fills(message)
+                for msg_wallet, raw in extracted:
+                    fill = parse_ws_leader_fill(msg_wallet or wallet, raw)
+                    if fill is None:
+                        with self.status_lock:
+                            self.wallet_status[wallet]["ignored_count"] += 1
+                        continue
+                    with self.service_lock:
+                        result = self.service.process_ws_fill(fill)
+                    with self.status_lock:
+                        status = self.wallet_status[wallet]
+                        if result.get("processed"):
+                            status["processed_count"] += 1
+                            status["last_data_ms"] = utc_now_ms()
+                        elif result.get("reason") == "DUPLICATE":
+                            status["duplicate_count"] += 1
+                        else:
+                            status["ignored_count"] += 1
+
+            def on_error(_app: Any, error: Any) -> None:
+                with self.status_lock:
+                    status = self.wallet_status[wallet]
+                    status["status"] = "ERROR"
+                    status["error_count"] += 1
+                    status["last_error"] = str(error)
+
+            def on_close(_app: Any, _code: Any, _reason: Any) -> None:
+                self.update_status(wallet, status="CLOSED", last_close_ms=utc_now_ms())
+
+            try:
+                app = websocket.WebSocketApp(
+                    LIVE_WS_URL,
+                    on_open=on_open,
+                    on_message=on_message,
+                    on_error=on_error,
+                    on_close=on_close,
+                )
+                self.apps[wallet] = app
+                app.run_forever(
+                    ping_interval=LIVE_WS_PING_INTERVAL_SEC,
+                    ping_timeout=LIVE_WS_PING_TIMEOUT_SEC,
+                )
+            except Exception as exc:
+                with self.status_lock:
+                    status = self.wallet_status[wallet]
+                    status["status"] = "ERROR"
+                    status["error_count"] += 1
+                    status["last_error"] = str(exc)
+            finally:
+                self.apps.pop(wallet, None)
+
+            if self.stop_event.is_set():
+                break
+            attempt += 1
+            backoff = min(LIVE_WS_RECONNECT_BACKOFF_CAP_SEC, max(1.0, 2 ** min(attempt, 5)))
+            self.stop_event.wait(backoff)
+
+
 def write_self_test_fills(path: Path, rows: List[Dict[str, Any]]) -> None:
     fieldnames = [
         "fill_id", "wallet", "coin", "side", "price", "size", "signed_size_delta",
@@ -1104,6 +1295,14 @@ def self_test() -> bool:
                 raise AssertionError(f"WS order intent reason mismatch: {ws_intent}")
             if "source=live_ws" not in ws_intent.get("notes", ""):
                 raise AssertionError(f"WS order intent notes missing source label: {ws_intent}")
+
+            manager = DedicatedLiveWSManager(service, [wallet])
+            write_ws_health(manager)
+            health = load_json(LIVE_WS_HEALTH_FILE, {})
+            if health.get("mode") != "DEDICATED_SOCKET_PER_WALLET":
+                raise AssertionError(f"WS health mode mismatch: {health}")
+            if wallet not in health.get("wallets", {}):
+                raise AssertionError(f"WS health missing wallet: {health}")
         print("RESULT::LIVE_COPY_SERVICE_SELF_TEST_PASS")
         return True
     except Exception as exc:
@@ -1122,14 +1321,50 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=5.0, help="Loop interval seconds.")
     parser.add_argument("--replay-history", action="store_true", help="Replay historical source fills instead of creating/using live-copy baselines.")
     parser.add_argument("--self-test", action="store_true", help="Run a compact temp-file live-forward self-test.")
+    parser.add_argument("--ws", action="store_true", help="Run dedicated dry-run live websocket sockets for active wallets.")
     args = parser.parse_args()
     if args.self_test:
         raise SystemExit(0 if self_test() else 1)
-    if not args.once and not args.loop:
+    run_ws = bool(args.ws or LIVE_WS_ENABLED)
+    if args.replay_history and run_ws:
+        print(json.dumps({"ok": False, "error": "--ws cannot be combined with --replay-history"}, sort_keys=True))
+        raise SystemExit(2)
+    if not args.once and not args.loop and not run_ws:
         args.once = True
     if args.replay_history and not AUDIT_DIR_OVERRIDE:
         configure_paths(REPLAY_AUDIT_DIR, RAW_LEADER_FILLS_CSV)
     service = DryRunLiveCopyService()
+    if run_ws:
+        config = service.load_config()
+        active_wallets = [
+            wallet for wallet, cfg in sorted(config.items())
+            if cfg.enabled and cfg.mode in {"LIVE", "CLO"}
+        ][:LIVE_WS_MAX_WALLETS]
+        service.run_once(replay_history=False)
+        manager = DedicatedLiveWSManager(service, active_wallets)
+
+        def handle_stop(_signum: int, _frame: Any) -> None:
+            manager.stop()
+
+        signal.signal(signal.SIGINT, handle_stop)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, handle_stop)
+        print(json.dumps({
+            "ok": True,
+            "dry_run": True,
+            "ws": True,
+            "wallets": active_wallets,
+            "wallet_count": len(active_wallets),
+            "max_wallets": LIVE_WS_MAX_WALLETS,
+            "audit_dir": str(AUDIT_DIR),
+        }, indent=2, sort_keys=True), flush=True)
+        manager.start()
+        try:
+            manager.wait()
+        finally:
+            manager.stop()
+            service.persist()
+        return
     if args.once:
         print(json.dumps(service.run_once(replay_history=args.replay_history), indent=2, sort_keys=True))
         return
