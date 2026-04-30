@@ -89,6 +89,7 @@ LIVE_WS_RECONNECT_GRACE_MS = int(os.getenv("HL_LIVE_WS_RECONNECT_GRACE_MS", "100
 LIVE_WS_THREAD_WATCHDOG_SEC = float(os.getenv("HL_LIVE_WS_THREAD_WATCHDOG_SEC", "5"))
 LIVE_WS_PROACTIVE_RECYCLE_SEC = float(os.getenv("HL_LIVE_WS_PROACTIVE_RECYCLE_SEC", "50"))
 LIVE_WS_PROACTIVE_RECYCLE_ENABLED = os.getenv("HL_LIVE_WS_PROACTIVE_RECYCLE_ENABLED", "1") == "1"
+LIVE_WS_SNAPSHOT_RECOVERY_GRACE_MS = int(os.getenv("HL_LIVE_WS_SNAPSHOT_RECOVERY_GRACE_MS", "120000"))
 LIVE_JSON_WRITE_LOCK = threading.RLock()
 
 ORDER_INTENT_FIELDS = [
@@ -378,32 +379,64 @@ def parse_api_leader_fill(wallet: str, raw: Dict[str, Any]) -> Optional[LeaderFi
     )
 
 
-def extract_ws_fills(message: str) -> List[Tuple[str, Dict[str, Any]]]:
+def extract_ws_fills_with_meta(message: str) -> List[Tuple[str, Dict[str, Any], bool]]:
     try:
         msg = json.loads(message)
     except Exception:
         return []
 
     data = msg.get("data", msg) if isinstance(msg, dict) else msg
-    out: List[Tuple[str, Dict[str, Any]]] = []
+    out: List[Tuple[str, Dict[str, Any], bool]] = []
 
     if isinstance(data, dict):
-        if bool(data.get("isSnapshot")):
-            return []
+        is_snapshot = bool(data.get("isSnapshot"))
         wallet = str(data.get("user") or data.get("wallet") or "").lower()
         fills = data.get("fills") or data.get("userFills") or []
         if isinstance(fills, list):
             for item in fills:
                 if isinstance(item, dict):
-                    out.append((wallet or str(item.get("user") or item.get("wallet") or "").lower(), item))
+                    out.append((wallet or str(item.get("user") or item.get("wallet") or "").lower(), item, is_snapshot))
         return out
 
     if isinstance(data, list):
         for item in data:
             if isinstance(item, dict):
                 wallet = str(item.get("user") or item.get("wallet") or "").lower()
-                out.append((wallet, item))
+                out.append((wallet, item, False))
     return out
+
+
+def extract_ws_fills(message: str) -> List[Tuple[str, Dict[str, Any]]]:
+    return [(wallet, raw) for wallet, raw, _is_snapshot in extract_ws_fills_with_meta(message)]
+
+
+def classify_ignored_ws_message(message: str) -> str:
+    try:
+        msg = json.loads(message)
+    except Exception:
+        return "JSON_ERROR"
+    data = msg.get("data", msg) if isinstance(msg, dict) else msg
+    if isinstance(data, dict):
+        if bool(data.get("isSnapshot")):
+            return "SNAPSHOT"
+        if any(k in data for k in ("fills", "userFills")):
+            fills = data.get("fills") if "fills" in data else data.get("userFills")
+            if isinstance(fills, list) and not fills:
+                return "EMPTY_FILLS"
+        channel = str(msg.get("channel") or data.get("channel") or "").lower() if isinstance(msg, dict) else ""
+        if "subscription" in msg or "subscription" in data or "userfills" in channel:
+            return "SUBSCRIPTION_ACK"
+        return "PARSE_EMPTY"
+    if isinstance(data, list) and not data:
+        return "EMPTY_FILLS"
+    return "PARSE_EMPTY"
+
+
+def ws_message_preview(message: Any, limit: int = 300) -> str:
+    try:
+        return str(message)[:limit]
+    except Exception:
+        return "<unprintable>"
 
 
 def is_ws_abnf_frame(obj: Any) -> bool:
@@ -470,12 +503,50 @@ def parse_ws_leader_fill(wallet: str, raw: Dict[str, Any]) -> Optional[LeaderFil
     )
 
 
+def parse_ws_snapshot_leader_fill(wallet: str, raw: Dict[str, Any]) -> Optional[LeaderFill]:
+    fill = parse_ws_leader_fill(wallet, raw)
+    if fill is None:
+        return None
+    return LeaderFill(
+        fill_id=fill.fill_id,
+        wallet=fill.wallet,
+        coin=fill.coin,
+        side=fill.side,
+        price=fill.price,
+        size=fill.size,
+        signed_size_delta=fill.signed_size_delta,
+        timestamp_ms=fill.timestamp_ms,
+        timestamp_iso=fill.timestamp_iso,
+        source="live_ws_snapshot",
+        recording_method="WS_SNAPSHOT_RECOVERY",
+        raw=fill.raw,
+    )
+
+
+def should_recover_ws_snapshot_fill(service: Any, wallet_status: Dict[str, Any], wallet: str, fill: LeaderFill) -> str:
+    wallet = str(wallet or fill.wallet or "").lower()
+    baselines = getattr(service, "state", {}).get("baselines", {})
+    baseline = baselines.get(wallet) if isinstance(baselines, dict) else None
+    if not isinstance(baseline, dict):
+        return "PREBASELINE"
+    if fill.timestamp_ms <= inum(baseline.get("baseline_ts_ms")):
+        return "PREBASELINE"
+    if fill.fill_id in getattr(service, "processed_ids", set()):
+        return "DUPLICATE"
+    last_open_ms = inum((wallet_status or {}).get("last_open_ms"))
+    if last_open_ms and fill.timestamp_ms < last_open_ms - LIVE_WS_SNAPSHOT_RECOVERY_GRACE_MS:
+        return "OLD"
+    return "RECOVER"
+
+
 def audit_reason_for_fill(fill: LeaderFill, replay_history: bool = False) -> str:
     if replay_history:
         return "REPLAY_HISTORY"
     source = str(getattr(fill, "source", "") or "").lower()
     if source == "live_poll":
         return "LIVE_POLL_DETECTED"
+    if source == "live_ws_snapshot":
+        return "LIVE_WS_SNAPSHOT_RECOVERY"
     if source in {"ws", "live_ws"}:
         return "LIVE_WS_DETECTED"
     return "SOURCE_CSV_FORWARD"
@@ -486,10 +557,31 @@ def audit_notes_for_fill(fill: LeaderFill, replay_history: bool = False) -> str:
         return "dry-run replay; source=replay_history; no exchange order placed"
     source = str(getattr(fill, "source", "") or "").lower()
     if source == "live_poll":
-        return "dry-run simulated fill; source=live_poll; no exchange order placed"
+        return f"dry-run simulated fill; source=live_poll; no exchange order placed; ws_coverage={ws_coverage_for_fill(fill)}"
+    if source == "live_ws_snapshot":
+        return "dry-run simulated fill; source=live_ws_snapshot; guarded snapshot recovery; no exchange order placed"
     if source in {"ws", "live_ws"}:
         return "dry-run simulated fill; source=live_ws; no exchange order placed"
     return "dry-run simulated fill; source=source_csv_forward; no exchange order placed"
+
+
+def ws_coverage_for_fill(fill: LeaderFill) -> str:
+    health = load_json(LIVE_WS_HEALTH_FILE, {})
+    wallets = health.get("wallets") if isinstance(health, dict) else {}
+    wallet_health = wallets.get(fill.wallet) if isinstance(wallets, dict) else None
+    windows = wallet_health.get("ws_session_open_windows") if isinstance(wallet_health, dict) else None
+    if not isinstance(windows, list):
+        return "UNKNOWN"
+    for window in windows:
+        if not isinstance(window, dict):
+            continue
+        open_ms = inum(window.get("open_ms"))
+        close_ms = inum(window.get("close_ms"))
+        if open_ms <= 0:
+            continue
+        if fill.timestamp_ms >= open_ms and (close_ms <= 0 or fill.timestamp_ms <= close_ms):
+            return "INSIDE_WS_SESSION"
+    return "OUTSIDE_WS_SESSION"
 
 
 def load_leader_fills(path: Optional[Path] = None) -> List[LeaderFill]:
@@ -1263,6 +1355,23 @@ class DedicatedLiveWSManager:
                 "last_proactive_recycle_ms": 0,
                 "next_proactive_recycle_ms": 0,
                 "proactive_recycle_enabled": bool(LIVE_WS_PROACTIVE_RECYCLE_ENABLED),
+                "raw_message_count": 0,
+                "parsed_fill_message_count": 0,
+                "ignored_message_count": 0,
+                "ignored_snapshot_count": 0,
+                "ignored_empty_message_count": 0,
+                "ignored_parse_error_count": 0,
+                "last_raw_message_at_ms": 0,
+                "last_raw_message_preview": "",
+                "last_ignored_message_reason": "",
+                "last_ignored_message_preview": "",
+                "last_parsed_fill_ids": [],
+                "ws_session_open_windows": [],
+                "snapshot_fill_seen_count": 0,
+                "snapshot_fill_recovered_count": 0,
+                "snapshot_fill_skipped_old_count": 0,
+                "snapshot_fill_skipped_duplicate_count": 0,
+                "snapshot_fill_skipped_prebaseline_count": 0,
             }
             for wallet in self.wallets
         }
@@ -1275,6 +1384,31 @@ class DedicatedLiveWSManager:
         with self.status_lock:
             status = self.wallet_status.setdefault(wallet, {"wallet": wallet})
             status.update(patch)
+
+    def record_session_open(self, wallet: str, open_ms: int) -> None:
+        wallet = str(wallet).lower()
+        with self.status_lock:
+            status = self.wallet_status.setdefault(wallet, {"wallet": wallet})
+            windows = status.setdefault("ws_session_open_windows", [])
+            if not isinstance(windows, list):
+                windows = []
+                status["ws_session_open_windows"] = windows
+            windows.append({"open_ms": int(open_ms), "close_ms": 0})
+            del windows[:-50]
+
+    def record_session_close(self, wallet: str, close_ms: int) -> None:
+        wallet = str(wallet).lower()
+        with self.status_lock:
+            status = self.wallet_status.setdefault(wallet, {"wallet": wallet})
+            windows = status.setdefault("ws_session_open_windows", [])
+            if not isinstance(windows, list):
+                windows = []
+                status["ws_session_open_windows"] = windows
+            for window in reversed(windows):
+                if isinstance(window, dict) and inum(window.get("close_ms")) <= 0:
+                    window["close_ms"] = int(close_ms)
+                    break
+            del windows[:-50]
 
     def health_loop(self) -> None:
         write_ws_health(self)
@@ -1447,6 +1581,7 @@ class DedicatedLiveWSManager:
                     "proactive_recycle_enabled": bool(LIVE_WS_PROACTIVE_RECYCLE_ENABLED),
                 }
                 self.update_status(wallet, **patch)
+                self.record_session_open(wallet, now)
                 schedule_proactive_recycle(app, now)
                 app.send(json.dumps({"method": "subscribe", "subscription": {"type": "userFills", "user": wallet}}))
 
@@ -1460,26 +1595,86 @@ class DedicatedLiveWSManager:
 
             def on_message(_app: Any, message: str) -> None:
                 now = utc_now_ms()
-                self.update_status(wallet, last_msg_ms=now, last_heartbeat_ms=now)
-                extracted = extract_ws_fills(message)
+                preview = ws_message_preview(message)
+                self.update_status(
+                    wallet,
+                    last_msg_ms=now,
+                    last_heartbeat_ms=now,
+                    last_raw_message_at_ms=now,
+                    last_raw_message_preview=preview,
+                )
+                with self.status_lock:
+                    self.wallet_status[wallet]["raw_message_count"] += 1
+                extracted = extract_ws_fills_with_meta(message)
                 if extracted:
-                    self.update_status(wallet, last_data_ms=now)
-                for msg_wallet, raw in extracted:
-                    fill = parse_ws_leader_fill(msg_wallet or wallet, raw)
+                    with self.status_lock:
+                        status = self.wallet_status[wallet]
+                        status["last_data_ms"] = now
+                else:
+                    reason = classify_ignored_ws_message(message)
+                    with self.status_lock:
+                        status = self.wallet_status[wallet]
+                        status["ignored_message_count"] += 1
+                        status["last_ignored_message_reason"] = reason
+                        status["last_ignored_message_preview"] = preview
+                        if reason == "SNAPSHOT":
+                            status["ignored_snapshot_count"] += 1
+                        elif reason == "EMPTY_FILLS":
+                            status["ignored_empty_message_count"] += 1
+                        elif reason == "JSON_ERROR":
+                            status["ignored_parse_error_count"] += 1
+                    return
+                recovered_or_live_count = 0
+                snapshot_seen = 0
+                for msg_wallet, raw, is_snapshot in extracted:
+                    fill = parse_ws_snapshot_leader_fill(msg_wallet or wallet, raw) if is_snapshot else parse_ws_leader_fill(msg_wallet or wallet, raw)
                     if fill is None:
                         with self.status_lock:
                             self.wallet_status[wallet]["ignored_count"] += 1
                         continue
+                    if is_snapshot:
+                        snapshot_seen += 1
+                        with self.status_lock:
+                            snapshot_status = dict(self.wallet_status[wallet])
+                        guard = should_recover_ws_snapshot_fill(self.service, snapshot_status, fill.wallet, fill)
+                        with self.status_lock:
+                            status = self.wallet_status[wallet]
+                            status["snapshot_fill_seen_count"] += 1
+                            if guard == "DUPLICATE":
+                                status["snapshot_fill_skipped_duplicate_count"] += 1
+                            elif guard == "PREBASELINE":
+                                status["snapshot_fill_skipped_prebaseline_count"] += 1
+                            elif guard == "OLD":
+                                status["snapshot_fill_skipped_old_count"] += 1
+                        if guard != "RECOVER":
+                            continue
                     with self.service_lock:
                         result = self.service.process_ws_fill(fill)
                     with self.status_lock:
                         status = self.wallet_status[wallet]
+                        ids = status.setdefault("last_parsed_fill_ids", [])
+                        if isinstance(ids, list):
+                            ids.append(fill.fill_id)
+                            del ids[:-20]
                         if result.get("processed"):
                             status["processed_count"] += 1
                         elif result.get("reason") == "DUPLICATE":
                             status["duplicate_count"] += 1
                         else:
                             status["ignored_count"] += 1
+                        if is_snapshot and result.get("processed"):
+                            status["snapshot_fill_recovered_count"] += 1
+                        if (not is_snapshot) or result.get("processed"):
+                            recovered_or_live_count += 1
+                with self.status_lock:
+                    status = self.wallet_status[wallet]
+                    if recovered_or_live_count:
+                        status["parsed_fill_message_count"] += 1
+                    elif snapshot_seen:
+                        status["ignored_message_count"] += 1
+                        status["ignored_snapshot_count"] += 1
+                        status["last_ignored_message_reason"] = "SNAPSHOT_NO_RECOVERABLE_FILLS"
+                        status["last_ignored_message_preview"] = preview
 
             def on_error(_app: Any, error: Any) -> None:
                 with self.status_lock:
@@ -1510,9 +1705,11 @@ class DedicatedLiveWSManager:
                     status = self.wallet_status[wallet]
                     status["status"] = "CLOSED"
                     status["close_count"] += 1
-                    status["last_close_ms"] = utc_now_ms()
+                    close_ms = utc_now_ms()
+                    status["last_close_ms"] = close_ms
                     status["last_close_status_code"] = close_status_code
                     status["last_close_msg"] = message
+                self.record_session_close(wallet, close_ms)
 
             try:
                 app = websocket.WebSocketApp(
@@ -1530,6 +1727,7 @@ class DedicatedLiveWSManager:
                     ping_timeout=LIVE_WS_PING_TIMEOUT_SEC,
                 )
                 self.update_status(wallet, last_run_forever_result=repr(run_result))
+                self.record_session_close(wallet, utc_now_ms())
             except Exception as exc:
                 with self.status_lock:
                     status = self.wallet_status[wallet]
@@ -1714,6 +1912,53 @@ def self_test() -> bool:
             abnf_details = ws_abnf_details(fake_abnf)
             if abnf_details.get("close_code") != 1000 or abnf_details.get("close_reason") != "test close":
                 raise AssertionError(f"ABNF close frame details mismatch: {abnf_details}")
+            snapshot_reason = classify_ignored_ws_message(json.dumps({"channel": "userFills", "data": {"isSnapshot": True, "fills": []}}))
+            if snapshot_reason != "SNAPSHOT":
+                raise AssertionError(f"snapshot WS message classification mismatch: {snapshot_reason}")
+            empty_reason = classify_ignored_ws_message(json.dumps({"channel": "userFills", "data": {"user": wallet, "fills": []}}))
+            if empty_reason != "EMPTY_FILLS":
+                raise AssertionError(f"empty WS message classification mismatch: {empty_reason}")
+            snapshot_message = json.dumps({
+                "channel": "userFills",
+                "data": {
+                    "isSnapshot": True,
+                    "user": wallet,
+                    "fills": [{
+                        "fill_id": "snap-1",
+                        "coin": "BTC",
+                        "side": "BUY",
+                        "px": "104",
+                        "sz": "1",
+                        "time": 2000,
+                    }],
+                },
+            })
+            snapshot_extracted = extract_ws_fills_with_meta(snapshot_message)
+            if len(snapshot_extracted) != 1 or snapshot_extracted[0][2] is not True:
+                raise AssertionError(f"snapshot fill was not extracted with metadata: {snapshot_extracted}")
+            snapshot_fill = parse_ws_snapshot_leader_fill(snapshot_extracted[0][0], snapshot_extracted[0][1])
+            if snapshot_fill is None or snapshot_fill.source != "live_ws_snapshot":
+                raise AssertionError(f"snapshot fill parse/source mismatch: {snapshot_fill}")
+            if audit_reason_for_fill(snapshot_fill) != "LIVE_WS_SNAPSHOT_RECOVERY":
+                raise AssertionError(f"snapshot audit reason mismatch: {audit_reason_for_fill(snapshot_fill)}")
+            if "guarded snapshot recovery" not in audit_notes_for_fill(snapshot_fill):
+                raise AssertionError(f"snapshot audit notes mismatch: {audit_notes_for_fill(snapshot_fill)}")
+            guard_service = DryRunLiveCopyService()
+            guard_service.state["baselines"] = {wallet: {"baseline_ts_ms": 1000, "baseline_fill_id": "base"}}
+            guard_service.processed_ids = set()
+            guard_status = {"last_open_ms": 3000}
+            if should_recover_ws_snapshot_fill(guard_service, guard_status, wallet, snapshot_fill) != "RECOVER":
+                raise AssertionError("snapshot recovery guard rejected valid forward fill")
+            old_snapshot = parse_ws_snapshot_leader_fill(wallet, {"fill_id": "snap-old", "coin": "BTC", "side": "BUY", "px": "104", "sz": "1", "time": 500})
+            if old_snapshot is None or should_recover_ws_snapshot_fill(guard_service, guard_status, wallet, old_snapshot) != "PREBASELINE":
+                raise AssertionError("snapshot recovery guard did not block prebaseline fill")
+            duplicate_snapshot = parse_ws_snapshot_leader_fill(wallet, {"fill_id": "snap-dup", "coin": "BTC", "side": "BUY", "px": "104", "sz": "1", "time": 2500})
+            guard_service.processed_ids.add("snap-dup")
+            if duplicate_snapshot is None or should_recover_ws_snapshot_fill(guard_service, guard_status, wallet, duplicate_snapshot) != "DUPLICATE":
+                raise AssertionError("snapshot recovery guard did not block duplicate fill")
+            too_old_snapshot = parse_ws_snapshot_leader_fill(wallet, {"fill_id": "snap-too-old", "coin": "BTC", "side": "BUY", "px": "104", "sz": "1", "time": 2001})
+            if too_old_snapshot is None or should_recover_ws_snapshot_fill(guard_service, {"last_open_ms": utc_now_ms() + LIVE_WS_SNAPSHOT_RECOVERY_GRACE_MS + 10000}, wallet, too_old_snapshot) != "OLD":
+                raise AssertionError("snapshot recovery guard did not block outside-grace fill")
 
             manager = DedicatedLiveWSManager(service, [wallet])
             manager.update_status(
@@ -1722,6 +1967,14 @@ def self_test() -> bool:
                 last_open_ms=utc_now_ms(),
                 last_data_ms=0,
                 benign_event_count=2,
+                raw_message_count=3,
+                ignored_empty_message_count=1,
+                last_parsed_fill_ids=["ws-1"],
+                ws_session_open_windows=[{"open_ms": 3500, "close_ms": 4500}],
+                snapshot_fill_seen_count=3,
+                snapshot_fill_recovered_count=1,
+                snapshot_fill_skipped_duplicate_count=1,
+                snapshot_fill_skipped_prebaseline_count=1,
                 next_proactive_recycle_ms=utc_now_ms() + 50000,
                 proactive_recycle_enabled=True,
             )
@@ -1741,6 +1994,14 @@ def self_test() -> bool:
                 raise AssertionError(f"WS stability metrics missing from wallet health: {health_snapshot}")
             if wallet_health.get("proactive_recycle_due_ms", 0) <= 0 or not wallet_health.get("proactive_recycle_enabled"):
                 raise AssertionError(f"WS proactive recycle health fields missing: {health_snapshot}")
+            if wallet_health.get("raw_message_count") != 3 or wallet_health.get("ignored_empty_message_count") != 1:
+                raise AssertionError(f"WS completeness counters missing from health: {health_snapshot}")
+            if wallet_health.get("last_parsed_fill_ids") != ["ws-1"]:
+                raise AssertionError(f"WS parsed fill id window missing from health: {health_snapshot}")
+            if wallet_health.get("snapshot_fill_seen_count") != 3 or wallet_health.get("snapshot_fill_recovered_count") != 1:
+                raise AssertionError(f"WS snapshot recovery counters missing from health: {health_snapshot}")
+            if ws_coverage_for_fill(ws_fill) != "UNKNOWN":
+                raise AssertionError("WS coverage should be unknown before health file is written")
             reconnect_wallet = "0xreconnect"
             manager.update_status(
                 reconnect_wallet,
@@ -1776,6 +2037,8 @@ def self_test() -> bool:
                 raise AssertionError(f"WS health mode mismatch: {health}")
             if wallet not in health.get("wallets", {}):
                 raise AssertionError(f"WS health missing wallet: {health}")
+            if ws_coverage_for_fill(ws_fill) != "INSIDE_WS_SESSION":
+                raise AssertionError(f"WS coverage did not detect session window: {health}")
         print("RESULT::LIVE_COPY_SERVICE_SELF_TEST_PASS")
         return True
     except Exception as exc:
