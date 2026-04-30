@@ -54,6 +54,8 @@ PORTFOLIO_HISTORY_FILE = DATA_DIR / "portfolio_history.json"
 EQUITY_HISTORY_FILE = DATA_DIR / "equity_history.json"
 UI_STATE_FILE = BASE_DIR / "ui_state.json"
 WALLET_GATE_FILE = BASE_DIR / "wallet_gate.json"
+LIVE_COPY_AUDIT_DIR = BASE_DIR / "hl_live_copy_audit"
+LIVE_COPY_CONFIG_FILE = LIVE_COPY_AUDIT_DIR / "live_config.json"
 LIVE_CONFIG_DIR = BASE_DIR / "hl_live_copy_audit"
 LIVE_CONFIG_FILE = LIVE_CONFIG_DIR / "live_config.json"
 SNAP_DIR = DATA_DIR / "snapshots"
@@ -376,14 +378,101 @@ def load_wallet_gate() -> Dict[str, Any]:
     return g if isinstance(g, dict) else {}
 
 
+def _load_live_copy_config() -> Dict[str, Any]:
+    try:
+        if LIVE_COPY_CONFIG_FILE.exists():
+            cfg = json.loads(LIVE_COPY_CONFIG_FILE.read_text(encoding="utf-8-sig"))
+        else:
+            cfg = {}
+    except Exception:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    wallets = cfg.get("wallets")
+    archived = cfg.get("archived_wallets")
+    cfg["wallets"] = wallets if isinstance(wallets, dict) else {}
+    cfg["archived_wallets"] = archived if isinstance(archived, dict) else {}
+    return cfg
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    atomic_write_json(path, payload)
+
+
+def _save_live_copy_config(config: Dict[str, Any]) -> None:
+    LIVE_COPY_AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(LIVE_COPY_CONFIG_FILE, config)
+
+
+def _normalise_wallet_address(wallet: Any) -> str:
+    value = str(wallet or "").strip().lower()
+    if not value.startswith("0x") or len(value) != 42:
+        raise ValueError("BAD_WALLET")
+    return value
+
+
+def _normalise_live_wallet_payload(payload: Dict[str, Any], existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    base = dict(existing or {})
+    mode = str(payload.get("mode", base.get("mode", "OFF"))).upper()
+    if mode not in {"LIVE", "CLO", "OFF"}:
+        raise ValueError("BAD_MODE")
+    copy_mode = str(payload.get("copy_mode", base.get("copy_mode", "proportional"))).lower()
+    if copy_mode not in {"proportional", "fixed"}:
+        raise ValueError("BAD_COPY_MODE")
+    enabled_default = bool(base.get("enabled", True))
+    enabled = parse_bool(payload["enabled"]) if "enabled" in payload else enabled_default
+    if mode == "OFF":
+        enabled = False
+    out = {
+        "mode": mode,
+        "copy_mode": copy_mode,
+        "norm_base": max(1.0, fnum(payload.get("norm_base", base.get("norm_base", 100)), 100)),
+        "fixed_notional": max(0.01, fnum(payload.get("fixed_notional", base.get("fixed_notional", 10)), 10)),
+        "leader_equity_base": max(1.0, fnum(payload.get("leader_equity_base", base.get("leader_equity_base", 10000)), 10000)),
+        "max_diff_pct": max(0.0, fnum(payload.get("max_diff_pct", base.get("max_diff_pct", 0.1)), 0.1)),
+        "daily_loss_limit": max(0.0, fnum(payload.get("daily_loss_limit", base.get("daily_loss_limit", 0)), 0)),
+        "enabled": enabled,
+    }
+    for key, value in base.items():
+        if key not in out:
+            out[key] = value
+    return out
+
+
+def _active_live_copy_wallet_count(config: Dict[str, Any]) -> int:
+    wallets = config.get("wallets", {}) if isinstance(config, dict) else {}
+    return sum(
+        1 for cfg in wallets.values()
+        if isinstance(cfg, dict) and cfg.get("enabled", True) and str(cfg.get("mode", "")).upper() in {"LIVE", "CLO"}
+    )
+
+
+def _live_copy_config_response(config: Dict[str, Any]) -> Dict[str, Any]:
+    wallets = config.get("wallets", {}) if isinstance(config.get("wallets"), dict) else {}
+    return {
+        "ok": True,
+        "config": config,
+        "wallet_count": len(wallets),
+        "active_wallets": _active_live_copy_wallet_count(config),
+        "max_wallets": 10,
+    }
+
+
+def _live_config_error(error: str, status_code: int = 400) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": error}, status_code=status_code)
+
+
+def _enforce_live_copy_cap(config: Dict[str, Any]) -> None:
+    if _active_live_copy_wallet_count(config) > 10:
+        raise ValueError("MAX_WALLETS_EXCEEDED")
+
+
 def load_live_config() -> Dict[str, Any]:
-    cfg = load_json(LIVE_CONFIG_FILE, {})
-    return cfg if isinstance(cfg, dict) else {}
+    return _load_live_copy_config()
 
 
 def save_live_config(cfg: Dict[str, Any]) -> None:
-    LIVE_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(LIVE_CONFIG_FILE, cfg)
+    _save_live_copy_config(cfg)
 
 
 def enforce_live_wallet_limit(cfg: Dict[str, Any], max_live: int = 10) -> Dict[str, Any]:
@@ -2544,7 +2633,7 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
     inc_cell = ""
     cfg_cell = ""
     if r.get("is_user_wallet"):
-        cfg_cell = '<span class="small muted">aggregate · base from global</span>'
+        cfg_cell = f'<form action="/api/ui-state" method="post" class="ajax-form user-base-form"><span class="small muted">aggregate base</span><input name="norm_base" value="{base:g}" size="5" title="aggregate normalisation base"><button title="set aggregate base">Set</button></form>'
     else:
         inc_cell = f"""<form action="/api/wallet-include" method="post" class="inc-form" title="Include/exclude this wallet from combined graph and header cards only"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><input type="checkbox" name="included" value="1" {'checked' if included else ''} onchange="this.form.requestSubmit()"><span class="small">INC</span></form>"""
         cfg_cell = f"""<form action="/api/wallet-config" method="post" class="wallet-cfg"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><select name="copy_mode"><option value="" {'selected' if not r.get('wallet_config') else ''}>global</option><option value="proportional" {'selected' if eff_mode == 'proportional' and r.get('wallet_config') else ''}>prop</option><option value="fixed" {'selected' if eff_mode == 'fixed' and r.get('wallet_config') else ''}>fixed</option></select><input name="norm_base" value="{eff_base:g}" size="5" title="wallet normalisation base"><input name="fixed_notional" value="{eff_fixed:g}" size="4" title="wallet fixed $"><button title="save wallet override">Set</button></form>"""
@@ -2926,26 +3015,102 @@ def sort_column(column: str, request: Request, direction: str = ""):
 
 @app.get("/api/live-config")
 def get_live_config():
-    return load_live_config()
+    return JSONResponse(_live_copy_config_response(_load_live_copy_config()))
 
 
-@app.post("/api/live-config")
-async def post_live_config(req: Request):
-    body = await req.json()
-    cfg = load_live_config()
+@app.post("/api/live-config/add-wallet")
+async def add_live_config_wallet(req: Request):
+    try:
+        body = await req.json()
+        wallet = _normalise_wallet_address(body.get("wallet"))
+        config = _load_live_copy_config()
+        archived = config["archived_wallets"]
+        existing = config["wallets"].get(wallet) or archived.pop(wallet, {})
+        config["wallets"][wallet] = _normalise_live_wallet_payload(body, existing)
+        _enforce_live_copy_cap(config)
+        _save_live_copy_config(config)
+        return JSONResponse(_live_copy_config_response(config))
+    except ValueError as exc:
+        return _live_config_error(str(exc))
+    except Exception as exc:
+        return _live_config_error(type(exc).__name__)
 
-    cfg = {**cfg, **body}
-    cfg = enforce_live_wallet_limit(cfg)
 
-    save_live_config(cfg)
+@app.post("/api/live-config/set-wallet")
+async def set_live_config_wallet(req: Request):
+    try:
+        body = await req.json()
+        wallet = _normalise_wallet_address(body.get("wallet"))
+        config = _load_live_copy_config()
+        wallets = config["wallets"]
+        archived = config["archived_wallets"]
+        if wallet in wallets:
+            wallets[wallet] = _normalise_live_wallet_payload(body, wallets[wallet])
+        elif wallet in archived:
+            wallets[wallet] = _normalise_live_wallet_payload(body, archived.pop(wallet))
+        else:
+            raise ValueError("WALLET_NOT_FOUND")
+        _enforce_live_copy_cap(config)
+        _save_live_copy_config(config)
+        return JSONResponse(_live_copy_config_response(config))
+    except ValueError as exc:
+        return _live_config_error(str(exc))
+    except Exception as exc:
+        return _live_config_error(type(exc).__name__)
 
-    return {
-        "status": "ok",
-        "live_wallets": sum(
-            1 for w in cfg.get("wallets", {}).values()
-            if w.get("mode") == "LIVE"
-        )
-    }
+
+@app.post("/api/live-config/remove-wallet")
+async def remove_live_config_wallet(req: Request):
+    try:
+        body = await req.json()
+        wallet = _normalise_wallet_address(body.get("wallet"))
+        archive = parse_bool(body.get("archive", True))
+        config = _load_live_copy_config()
+        wallets = config["wallets"]
+        archived = config["archived_wallets"]
+        existing = wallets.pop(wallet, archived.get(wallet, {}))
+        if not isinstance(existing, dict):
+            existing = {}
+        existing = _normalise_live_wallet_payload({"mode": "OFF", "enabled": False}, existing)
+        if archive:
+            existing["archived_at"] = utc_now_iso()
+            archived[wallet] = existing
+        else:
+            wallets[wallet] = existing
+        _save_live_copy_config(config)
+        return JSONResponse(_live_copy_config_response(config))
+    except ValueError as exc:
+        return _live_config_error(str(exc))
+    except Exception as exc:
+        return _live_config_error(type(exc).__name__)
+
+
+@app.post("/api/live-config/set-mode")
+async def set_live_config_mode(req: Request):
+    try:
+        body = await req.json()
+        wallet = _normalise_wallet_address(body.get("wallet"))
+        mode = str(body.get("mode", "OFF")).upper()
+        if mode not in {"LIVE", "CLO", "OFF"}:
+            raise ValueError("BAD_MODE")
+        config = _load_live_copy_config()
+        wallets = config["wallets"]
+        archived = config["archived_wallets"]
+        if wallet in wallets:
+            existing = wallets[wallet]
+        elif wallet in archived:
+            existing = archived.pop(wallet)
+            wallets[wallet] = existing
+        else:
+            raise ValueError("WALLET_NOT_FOUND")
+        wallets[wallet] = _normalise_live_wallet_payload({"mode": mode, "enabled": mode != "OFF"}, existing)
+        _enforce_live_copy_cap(config)
+        _save_live_copy_config(config)
+        return JSONResponse(_live_copy_config_response(config))
+    except ValueError as exc:
+        return _live_config_error(str(exc))
+    except Exception as exc:
+        return _live_config_error(type(exc).__name__)
 
 
 if __name__ == "__main__":
