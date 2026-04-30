@@ -27,6 +27,7 @@ import json
 import math
 import os
 import html
+import shutil
 import time
 import threading
 from dataclasses import asdict, dataclass, field, replace
@@ -50,10 +51,14 @@ RAW_FILLS_CSV = DATA_DIR / "raw_live_fills.csv"
 APP_MODEL_STATE_JSON = DATA_DIR / "app_model_state.json"
 COPY_TRADES_CSV = DATA_DIR / "copy_trades.csv"
 EXPECTED_COPY_FILLS_CSV = DATA_DIR / "expected_copy_fills.csv"
+LIVE_WALLET_METRICS_CSV = DATA_DIR / "live_wallet_metrics.csv"
+EXCHANGE_BASELINES_JSON = DATA_DIR / "exchange_baselines.json"
 PORTFOLIO_HISTORY_FILE = DATA_DIR / "portfolio_history.json"
 EQUITY_HISTORY_FILE = DATA_DIR / "equity_history.json"
 UI_STATE_FILE = BASE_DIR / "ui_state.json"
 WALLET_GATE_FILE = BASE_DIR / "wallet_gate.json"
+MANUAL_WALLETS_FILE = BASE_DIR / "manual_wallets.txt"
+PURGED_WALLETS_FILE = BASE_DIR / "purged_wallets.txt"
 LIVE_COPY_AUDIT_DIR = BASE_DIR / "hl_live_copy_audit"
 LIVE_COPY_CONFIG_FILE = LIVE_COPY_AUDIT_DIR / "live_config.json"
 LIVE_COPY_WS_HEALTH_FILE = LIVE_COPY_AUDIT_DIR / "live_ws_health.json"
@@ -155,6 +160,204 @@ def atomic_write_csv(path: Path, fieldnames: List[str], rows: Iterable[Dict[str,
             for row in rows:
                 w.writerow({k: row.get(k, "") for k in fieldnames})
         _replace_with_retries(tmp, path)
+
+
+def normalise_wallet_for_purge(wallet: Any) -> str:
+    value = str(wallet or "").strip().lower()
+    if not value.startswith("0x") or len(value) != 42:
+        raise ValueError("BAD_WALLET")
+    if any(c not in "0123456789abcdef" for c in value[2:]):
+        raise ValueError("BAD_WALLET")
+    return value
+
+
+def load_purged_wallets() -> set[str]:
+    if not PURGED_WALLETS_FILE.exists():
+        return set()
+    wallets: set[str] = set()
+    for line in PURGED_WALLETS_FILE.read_text(encoding="utf-8").splitlines():
+        try:
+            wallets.add(normalise_wallet_for_purge(line))
+        except ValueError:
+            continue
+    return wallets
+
+
+def save_purged_wallets(wallets: set[str]) -> None:
+    PURGED_WALLETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _unique_tmp_path(PURGED_WALLETS_FILE)
+    valid = sorted(normalise_wallet_for_purge(w) for w in wallets)
+    with _FILE_WRITE_LOCK:
+        tmp.write_text("".join(f"{w}\n" for w in valid), encoding="utf-8")
+        _replace_with_retries(tmp, PURGED_WALLETS_FILE)
+
+
+def backup_purge_files(wallet: str, files: List[Path]) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir = DATA_DIR / "purge_backups" / f"{stamp}_{wallet[2:10]}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    seen: set[Path] = set()
+    for path in files:
+        p = Path(path)
+        if p in seen or not p.exists() or not p.is_file():
+            continue
+        seen.add(p)
+        try:
+            rel = p.resolve().relative_to(BASE_DIR.resolve())
+            dest = backup_dir / rel
+        except Exception:
+            dest = backup_dir / p.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(p, dest)
+    return backup_dir
+
+
+def remove_wallet_from_text_file(path: Path, wallet: str) -> int:
+    wallet = normalise_wallet_for_purge(wallet)
+    if not path.exists():
+        return 0
+    lines = path.read_text(encoding="utf-8").splitlines()
+    kept = [line for line in lines if line.strip().lower() != wallet]
+    removed = len(lines) - len(kept)
+    if removed:
+        tmp = _unique_tmp_path(path)
+        with _FILE_WRITE_LOCK:
+            tmp.write_text("".join(f"{line}\n" for line in kept), encoding="utf-8")
+            _replace_with_retries(tmp, path)
+    return removed
+
+
+def remove_wallet_rows_from_csv(path: Path, wallet: str) -> int:
+    wallet = normalise_wallet_for_purge(wallet)
+    if not path.exists():
+        return 0
+    with path.open("r", newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    if "wallet" not in fieldnames:
+        return 0
+    kept = [row for row in rows if str(row.get("wallet", "")).strip().lower() != wallet]
+    removed = len(rows) - len(kept)
+    if removed:
+        atomic_write_csv(path, fieldnames, kept)
+    return removed
+
+
+def _remove_wallet_from_json_obj(obj: Any, wallet: str) -> Tuple[Any, int]:
+    removed = 0
+    if isinstance(obj, dict):
+        if wallet in obj:
+            obj.pop(wallet, None)
+            removed += 1
+        for key in list(obj.keys()):
+            child, child_removed = _remove_wallet_from_json_obj(obj[key], wallet)
+            obj[key] = child
+            removed += child_removed
+        return obj, removed
+    if isinstance(obj, list):
+        kept: List[Any] = []
+        for item in obj:
+            if isinstance(item, dict) and str(item.get("wallet", "")).strip().lower() == wallet:
+                removed += 1
+                continue
+            child, child_removed = _remove_wallet_from_json_obj(item, wallet)
+            kept.append(child)
+            removed += child_removed
+        return kept, removed
+    return obj, 0
+
+
+def remove_wallet_from_json(path: Path, wallet: str) -> int:
+    wallet = normalise_wallet_for_purge(wallet)
+    if not path.exists():
+        return 0
+    payload = load_json(path, None)
+    payload, removed = _remove_wallet_from_json_obj(payload, wallet)
+    if removed:
+        atomic_write_json(path, payload)
+    return removed
+
+
+def purge_wallet_everywhere(wallet: str) -> Dict[str, Any]:
+    """ADMIN MAINTENANCE ONLY: purge a wallet from active app/engine-loaded files."""
+    wallet = normalise_wallet_for_purge(wallet)
+    if wallet == USER_WALLET:
+        raise ValueError("CANNOT_PURGE_USER_WALLET")
+
+    csv_files = [RAW_FILLS_CSV, EXPECTED_COPY_FILLS_CSV, COPY_TRADES_CSV, LIVE_WALLET_METRICS_CSV]
+    json_files = [
+        UI_STATE_FILE,
+        WALLET_GATE_FILE,
+        LIVE_COPY_CONFIG_FILE,
+        EXCHANGE_BASELINES_JSON,
+        ENGINE_TRUTH_JSON,
+        LEGACY_LIVE_STATE_JSON,
+    ]
+    text_files = [PURGED_WALLETS_FILE, MANUAL_WALLETS_FILE]
+    derived_files = [APP_MODEL_STATE_JSON, PORTFOLIO_HISTORY_FILE, EQUITY_HISTORY_FILE]
+    backup_dir = backup_purge_files(wallet, text_files + json_files + csv_files + derived_files)
+
+    purged = load_purged_wallets()
+    purged.add(wallet)
+    save_purged_wallets(purged)
+
+    text_removed = {
+        "manual_wallets.txt": remove_wallet_from_text_file(MANUAL_WALLETS_FILE, wallet),
+    }
+
+    json_removed: Dict[str, int] = {}
+    ui = load_json(UI_STATE_FILE, {})
+    ui_removed = 0
+    if isinstance(ui, dict):
+        for key in ("wallet_config", "wallet_include"):
+            section = ui.get(key)
+            if isinstance(section, dict) and wallet in section:
+                section.pop(wallet, None)
+                ui_removed += 1
+        if ui_removed:
+            atomic_write_json(UI_STATE_FILE, ui)
+    json_removed["ui_state.json"] = ui_removed
+
+    wallet_gate = load_json(WALLET_GATE_FILE, {})
+    gate_removed = 0
+    if isinstance(wallet_gate, dict) and wallet in wallet_gate:
+        wallet_gate.pop(wallet, None)
+        gate_removed = 1
+        atomic_write_json(WALLET_GATE_FILE, wallet_gate)
+    json_removed["wallet_gate.json"] = gate_removed
+
+    live_config = load_json(LIVE_COPY_CONFIG_FILE, {})
+    live_removed = 0
+    if isinstance(live_config, dict):
+        wallets = live_config.get("wallets")
+        if isinstance(wallets, dict) and wallet in wallets:
+            wallets.pop(wallet, None)
+            live_removed = 1
+            atomic_write_json(LIVE_COPY_CONFIG_FILE, live_config)
+    json_removed["hl_live_copy_audit/live_config.json"] = live_removed
+
+    for path in (EXCHANGE_BASELINES_JSON, ENGINE_TRUTH_JSON, LEGACY_LIVE_STATE_JSON):
+        json_removed[str(path.relative_to(BASE_DIR) if path.is_relative_to(BASE_DIR) else path)] = remove_wallet_from_json(path, wallet)
+
+    csv_rows_removed = {str(path.relative_to(DATA_DIR) if path.is_relative_to(DATA_DIR) else path): remove_wallet_rows_from_csv(path, wallet) for path in csv_files}
+
+    deleted: List[str] = []
+    for path in derived_files:
+        if path.exists():
+            path.unlink()
+            deleted.append(str(path.relative_to(BASE_DIR) if path.is_relative_to(BASE_DIR) else path))
+
+    invalidate_model_cache()
+    return {
+        "ok": True,
+        "wallet": wallet,
+        "backup_dir": str(backup_dir),
+        "text_removed": text_removed,
+        "csv_rows_removed": csv_rows_removed,
+        "json_removed": json_removed,
+        "derived_deleted": deleted,
+    }
 
 @dataclass(frozen=True)
 class RawFill:
@@ -2684,11 +2887,13 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
     win_rate_cell = dash_td(css_class(r.get('win_rate')), "win_rate") if no_closed_trades else core_td(r, 'win_rate' in r, r.get('win_rate'), pct(r.get('win_rate')), css_class(r.get('win_rate')), "win_rate")
     inc_cell = ""
     cfg_cell = ""
+    purge_cell = ""
     if r.get("is_user_wallet"):
         cfg_cell = f'<form action="/api/ui-state" method="post" class="ajax-form user-base-form"><span class="small muted">aggregate base</span><input name="norm_base" value="{base:g}" size="5" title="aggregate normalisation base"><button title="set aggregate base">Set</button></form>'
     else:
         inc_cell = f"""<form action="/api/wallet-include" method="post" class="inc-form" title="Include/exclude this wallet from combined graph and header cards only"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><input type="checkbox" name="included" value="1" {'checked' if included else ''} onchange="this.form.requestSubmit()"><span class="small">INC</span></form>"""
         cfg_cell = f"""<form action="/api/wallet-config" method="post" class="wallet-cfg"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><select name="copy_mode"><option value="" {'selected' if not r.get('wallet_config') else ''}>global</option><option value="proportional" {'selected' if eff_mode == 'proportional' and r.get('wallet_config') else ''}>prop</option><option value="fixed" {'selected' if eff_mode == 'fixed' and r.get('wallet_config') else ''}>fixed</option></select><input name="norm_base" value="{eff_base:g}" size="5" title="wallet normalisation base"><input name="fixed_notional" value="{eff_fixed:g}" size="4" title="wallet fixed $"><button title="save wallet override">Set</button></form>"""
+        purge_cell = f"""<form action="/api/admin/purge-wallet" method="post" class="purge-form" title="ADMIN MAINTENANCE ONLY: permanently purge wallet"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><button class="purge-btn" title="purge wallet">PURGE</button></form>"""
     row_cls = 'user' if r.get('is_user_wallet') else ''
     if not r.get('is_user_wallet') and not included: row_cls += ' excluded-row'
     wallet_sort = html.escape(wallet)
@@ -2705,7 +2910,7 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
       {core_td(r, 'avg_position_usd' in r, r.get('avg_position_usd'), money(r.get('avg_position_usd')), css_class(r.get('avg_position_usd')), "avg_position_usd")}{core_td(r, 'max_position_usd' in r, r.get('max_position_usd'), money(r.get('max_position_usd')), css_class(r.get('max_position_usd')), "max_position_usd")}
       {core_td(r, 'avg_entry_notional_usd' in r, r.get('avg_entry_notional_usd'), money(r.get('avg_entry_notional_usd')), css_class(r.get('avg_entry_notional_usd')), "avg_entry_notional_usd")}{core_td(r, 'pct_entries_ge10' in r, r.get('pct_entries_ge10'), pct(r.get('pct_entries_ge10')), css_class(r.get('pct_entries_ge10')), "pct_entries_ge10")}{core_td(r, 'required_leverage' in r, r.get('required_leverage'), f"{fnum(r.get('required_leverage')):.2f}x", css_class(r.get('required_leverage')), "required_leverage")}
       {lc_cell(r, lc_counts['fills'], "ops-group")}{lc_cell(r, lc_counts['exits'], "ops-group")}{lc_cell(r, lc_counts['pos'], "ops-group group-divider")}
-      <td class="controls-cell {'inc-off' if (not r.get('is_user_wallet') and not included) else ''}">{inc_cell}{cfg_cell}</td>
+      <td class="controls-cell {'inc-off' if (not r.get('is_user_wallet') and not included) else ''}">{inc_cell}{cfg_cell}{purge_cell}</td>
     </tr>"""
 
 HTML_TEMPLATE = """
@@ -2715,7 +2920,7 @@ body{{margin:0;background:#0d1117;color:#c9d1d9;font:12px Arial,Helvetica,sans-s
 .cards{{display:grid;grid-template-columns:repeat(9,minmax(130px,1fr));gap:8px;padding:10px 14px}} .card{{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:9px;min-height:72px}} .group-card .label{{font-size:10px;color:#8b949e;margin-bottom:6px;border-bottom:1px solid #21262d;padding-bottom:4px}} .metric-line{{display:flex;justify-content:space-between;gap:8px;line-height:1.55}} .metric-line span{{color:#8b949e}} .metric-line b{{font-weight:700}} .pos{{color:#2ea043}} .neg{{color:#ff4d4f}} .zero{{color:#c9d1d9}}
 .section{{padding:0 14px 10px}} .panel{{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:10px;margin-bottom:12px}} .chart-wrap{{position:relative;cursor:zoom-in}} .chart-wrap.expanded{{position:relative;z-index:20}} .chart-wrap.expanded .chart{{height:76vh}} .chart{{width:100%;height:260px;background:#151a21}} .chart *{{vector-effect:non-scaling-stroke}} .pnl-line{{fill:none;stroke:#2ea043;stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}} .realized-line{{fill:none;stroke:#58a6ff;stroke-width:1.4;stroke-linejoin:round;stroke-linecap:round}} .dd-line{{fill:none;stroke:#ff4d4f;stroke-width:1.4;stroke-linejoin:round;stroke-linecap:round}} .zero-line{{stroke:#8b949e;stroke-width:1}} .grid-line,.grid-vert{{stroke:#21262d;stroke-width:1}} .axis-label{{fill:#8b949e;font-size:10px}} .hit{{fill:transparent;stroke:none;pointer-events:all}} .crosshair{{stroke:#8b949e;stroke-width:1;stroke-dasharray:3 3;pointer-events:none}} .chart-dot{{fill:#c9d1d9;stroke:#0d1117;stroke-width:1.2;pointer-events:none}} .chart-tip{{position:absolute;left:10px;top:10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:5px 7px;color:#c9d1d9;font-size:11px;pointer-events:none;box-shadow:0 4px 12px rgba(0,0,0,.35)}} .chart-legend{{display:flex;gap:10px;align-items:center;margin-top:6px}} .legend-pnl{{color:#2ea043}} .legend-realized{{color:#58a6ff}} .legend-dd{{color:#ff4d4f}}
 .table-wrap{{border:1px solid #21262d;border-radius:6px;background:#0d1117}} table{{width:100%;border-collapse:separate;border-spacing:0;font-size:11px}} th{{position:sticky;top:0;background:#21262d;color:#8b949e;text-align:right;padding:7px;border-bottom:1px solid #30363d;z-index:2}} th:first-child,td:first-child{{text-align:left}} th.sort-active{{background:#303a49;color:#fff;box-shadow:inset 0 -2px 0 #58a6ff}} th.sort-active a{{color:#fff}} th a{{display:block;color:#8b949e}} td{{padding:6px;border-bottom:1px solid #21262d;text-align:right;white-space:nowrap}} tr:nth-child(even){{background:#111820}} tr.user{{background:#071527}} tr:hover{{background:#1b2330}} tr.excluded-row{{}}
-.sticky-wallet{{position:sticky;left:0;z-index:3;background:inherit;min-width:132px;border-right:1px solid #30363d}} th.sticky-wallet{{z-index:4;background:#21262d}} .pair-lead{{background:rgba(88,166,255,.045)}} .pair-copy{{background:rgba(46,160,67,.045)}} .ops-group{{background:rgba(210,153,34,.05)}} .group-divider{{border-right:2px solid #30363d!important}} .badge{{background:#0d419d;color:#fff;border-radius:3px;padding:1px 4px;font-size:9px}} .mode{{background:#063d1f;color:#2ea043;border-radius:3px;padding:2px 6px}} .wallet-cfg{{display:inline-flex;gap:3px;margin-left:4px;align-items:center}} .wallet-cfg input{{width:48px;padding:1px 3px}} .wallet-cfg select{{width:70px;padding:1px 3px}} .wallet-cfg button{{padding:1px 4px}} .inc-form{{display:inline-flex;align-items:center;gap:2px;margin-right:6px}} .inc-form input{{padding:0;width:14px;height:14px}} .inc-off{{opacity:1}} .controls-cell{{min-width:270px;text-align:left}} .small{{font-size:11px;color:#8b949e}} .missing{{color:#6e7681!important}} .selected-divider td{{background:#0d1117;border-top:2px solid #58a6ff;border-bottom:1px solid #30363d;color:#8b949e;text-align:left;font-size:10px;letter-spacing:.04em;text-transform:uppercase;padding:6px 8px}} .saving{{opacity:.65}} .saved-flash{{color:#2ea043}} .chart-empty{{height:230px;display:flex;align-items:center;justify-content:center;color:#8b949e}} @media(max-width:1300px){{.cards{{grid-template-columns:repeat(3,minmax(150px,1fr))}}}}
+.sticky-wallet{{position:sticky;left:0;z-index:3;background:inherit;min-width:132px;border-right:1px solid #30363d}} th.sticky-wallet{{z-index:4;background:#21262d}} .pair-lead{{background:rgba(88,166,255,.045)}} .pair-copy{{background:rgba(46,160,67,.045)}} .ops-group{{background:rgba(210,153,34,.05)}} .group-divider{{border-right:2px solid #30363d!important}} .badge{{background:#0d419d;color:#fff;border-radius:3px;padding:1px 4px;font-size:9px}} .mode{{background:#063d1f;color:#2ea043;border-radius:3px;padding:2px 6px}} .wallet-cfg{{display:inline-flex;gap:3px;margin-left:4px;align-items:center}} .wallet-cfg input{{width:48px;padding:1px 3px}} .wallet-cfg select{{width:70px;padding:1px 3px}} .wallet-cfg button{{padding:1px 4px}} .inc-form{{display:inline-flex;align-items:center;gap:2px;margin-right:6px}} .inc-form input{{padding:0;width:14px;height:14px}} .purge-form{{display:inline-flex;margin-left:4px;align-items:center}} .purge-btn{{border-color:#8b1d1d;background:#3a1111;color:#ff7b72;padding:1px 5px;font-size:10px}} .inc-off{{opacity:1}} .controls-cell{{min-width:315px;text-align:left}} .small{{font-size:11px;color:#8b949e}} .missing{{color:#6e7681!important}} .selected-divider td{{background:#0d1117;border-top:2px solid #58a6ff;border-bottom:1px solid #30363d;color:#8b949e;text-align:left;font-size:10px;letter-spacing:.04em;text-transform:uppercase;padding:6px 8px}} .saving{{opacity:.65}} .saved-flash{{color:#2ea043}} .chart-empty{{height:230px;display:flex;align-items:center;justify-content:center;color:#8b949e}} @media(max-width:1300px){{.cards{{grid-template-columns:repeat(3,minmax(150px,1fr))}}}}
 </style></head><body><div class="top"><b>⚡ HL Copy Engine</b><span class="live">POLL</span><span class="muted">Updated: {updated}</span><form action="/api/ui-state" method="post" class="ajax-form" style="display:flex;gap:6px;align-items:center;margin:0"><span class="muted">Normalisation Base:</span><input name="norm_base" value="{norm}" size="8"><span class="muted">Mode:</span><select name="copy_mode"><option>proportional</option><option>fixed</option></select><span class="muted">Fixed $:</span><input name="fixed_notional" value="{fixed}" size="6"><span class="muted">Fee bps:</span><input name="fee_bps" value="{fee}" size="5"><span class="muted">Copy friction bps:</span><input name="copy_friction_bps" value="{friction}" size="5"><button>Set</button></form><span class="muted">Current: {mode}</span><span id="save-status" class="muted"></span><span style="margin-left:auto" class="muted">Auto refresh off</span></div><div class="cards">{cards}</div><div class="section"><b>COMBINED PORTFOLIO — NON-USER WALLETS</b><div class="panel">{chart}</div><div class="small">TRACKED WALLETS ({wallet_count}) — model derived in app from engine SSOT only. {raw_boundary}</div><div class="table-wrap"><table><thead>{table_head}</thead><tbody>{table_rows}</tbody></table></div></div>
 <script>(function(){{
 let busyUntil=0;
@@ -2891,54 +3096,136 @@ async def set_wallet_config(request: Request):
 
 def render_live_copy_control_panel() -> str:
     return """
-<div class="section live-copy-panel" id="liveCopyPanel">
-  <h3>Live Copy Control Centre</h3>
-  <div class="live-safety-strip">
-    <span><b>COPY STATE:</b> <em class="lc-pill lc-blue">DRY RUN</em></span>
-    <span><b>NEW ENTRIES:</b> <em class="lc-pill lc-green">ALLOWED</em></span>
-    <span><b>EXITS:</b> <em class="lc-pill lc-green">ALLOWED</em></span>
-    <span><b>REAL ORDERS:</b> <em class="lc-pill lc-red">DISABLED</em></span>
-    <span><b>AUDIT:</b> <em class="lc-pill lc-green">ON</em></span>
-    <span><b>Active LIVE/CLO:</b> <em id="lcWalletCount">0 / 10</em></span>
-    <span><b>WS:</b> <em id="lcWsOverall">OFFLINE</em></span>
-    <span><b>REST:</b> <em>fallback ready</em></span>
-    <button id="lcRefresh" type="button">Refresh</button>
-    <span id="lcStatus" class="small"></span>
+<div class="section live-copy-centre" id="liveCopyPanel">
+  <header class="lc-header">
+    <div class="lc-title">Live Copy Control Centre</div>
+    <div class="lc-header-pills">
+      <span class="lc-pill lc-blue">Mode: DRY RUN</span>
+      <span class="lc-pill lc-green">WS Fast Path</span>
+      <span class="lc-pill lc-amber">REST Fallback</span>
+      <span class="lc-pill">Active LIVE/CLO: <b id="lcWalletCount">0 / 10</b></span>
+      <span class="lc-pill">WS: <b id="lcWsOverall">OFFLINE</b></span>
+    </div>
+    <div class="lc-header-actions">
+      <button type="button" id="lcRefresh">Refresh</button>
+      <button type="button" data-lc-modal="lcWalletModal">Add wallet</button>
+      <button type="button" data-lc-modal="lcGlobalModal" class="lc-soft">Global controls</button>
+    </div>
+  </header>
+  <div class="lc-safety-strip">
+    <span class="lc-pill lc-blue">COPY STATE: DRY RUN</span>
+    <span class="lc-pill lc-green">NEW ENTRIES: ALLOWED</span>
+    <span class="lc-pill lc-green">EXITS: ALLOWED</span>
+    <span class="lc-pill lc-red">REAL ORDERS: DISABLED</span>
+    <span class="lc-pill lc-green">AUDIT: ON</span>
+    <span id="lcStatus" class="lc-status"></span>
   </div>
-  <div class="panel live-copy-grid">
-    <form id="lcAddForm" class="live-copy-add">
-      <b>Add / Update Wallet</b>
-      <input name="wallet" placeholder="0x wallet address" autocomplete="off">
-      <select name="mode"><option>LIVE</option><option>CLO</option><option>OFF</option></select>
-      <select name="copy_mode"><option value="proportional">proportional</option><option value="fixed">fixed</option></select>
-      <input name="norm_base" value="100" title="norm base">
-      <input name="fixed_notional" value="10" title="fixed notional">
-      <input name="leader_equity_base" value="10000" title="leader equity base">
-      <input name="max_diff_pct" value="0.1" title="max diff pct">
-      <input name="daily_loss_limit" value="0" title="daily loss limit">
-      <button type="submit">Add / update</button>
-    </form>
-    <div class="small">Archive disables/removes config only. Permanent audit/history is preserved.</div>
-  </div>
-  <div class="panel">
-    <b>Live Wallets</b>
-    <div class="table-wrap live-copy-table-wrap">
-      <table class="live-copy-table">
-        <thead><tr><th>Wallet</th><th>Mode</th><th>Model</th><th>Norm</th><th>Fixed</th><th>Leader base</th><th>Max diff</th><th>Daily loss</th><th>WS status</th><th>Health</th><th>Processed</th><th>Reconnect/min</th><th title="Include this wallet in the live performance graph only. Does not affect copy execution.">GRAPH</th><th>Actions</th></tr></thead>
-        <tbody id="lcWalletRows"><tr><td colspan="14" class="small">Loading live-copy config...</td></tr></tbody>
+
+  <section class="lc-panel lc-graph-panel">
+    <div class="lc-graph-top">
+      <div>
+        <h3>Exchange-backed user equity</h3>
+        <p>Dry-run preview values shown. Live mode will use exchange-backed equity with real friction measured, not modelled.</p>
+      </div>
+      <div class="lc-chart-controls">
+        <button type="button" class="active">Equity</button><button type="button">PnL</button><button type="button">Exposure</button>
+        <button type="button">Drawdown</button><button type="button">Fees</button><button type="button">Realised</button>
+        <input type="date" value="2026-04-30"><input type="time" value="09:00"><input type="time" value="16:30">
+        <button type="button" class="active">1D</button><button type="button">7D</button><button type="button">All</button>
+      </div>
+    </div>
+    <div class="lc-stat-strip" id="lcEquityCards"></div>
+    <div class="lc-chart-wrap">
+      <svg viewBox="0 0 1000 320" preserveAspectRatio="none" aria-label="Exchange-backed user equity graph">
+        <polyline points="40,232 140,220 240,205 340,214 440,182 540,166 640,146 740,124 840,132 960,96" fill="none" stroke="#21c16b" stroke-width="4"/>
+        <polyline points="40,256 140,248 240,236 340,240 440,226 540,214 640,218 740,202 840,196 960,188" fill="none" stroke="#58a6ff" stroke-width="2" opacity=".72"/>
+        <path d="M40 232 L140 220 L240 205 L340 214 L440 182 L540 166 L640 146 L740 124 L840 132 L960 96 L960 300 L40 300 Z" fill="rgba(33,193,107,.12)"/>
+        <text x="42" y="34" class="lc-axis">$12.5k</text><text x="42" y="155" class="lc-axis">$12.2k</text><text x="42" y="296" class="lc-axis">$11.9k</text>
+        <text x="760" y="52" class="lc-axis">exchange-backed user equity</text><text x="810" y="78" class="lc-axis">dry-run preview values</text>
+      </svg>
+    </div>
+  </section>
+
+  <section class="lc-panel lc-wallet-panel">
+    <h3>Live Wallets</h3>
+    <p>Command surface mirrors the main dashboard where practical. PnL/equity fields show pending until exchange-backed live data is wired.</p>
+    <div class="lc-table-wrap">
+      <table class="lc-wallet-table">
+        <thead><tr><th>Wallet</th><th>Equity L/C</th><th>Real L/C</th><th>Unreal L/C</th><th>DD L/C</th><th>MaxDD L/C</th><th>Real diff</th><th>Efficiency</th><th>Sizing</th><th>BL</th><th>Stream</th><th title="Include this wallet in the live performance graph only. Does not affect copy execution.">Graph</th><th>Activity L/C</th><th>Controls</th></tr></thead>
+        <tbody id="lcWalletRows"><tr><td colspan="14">Loading live-copy config...</td></tr></tbody>
       </table>
     </div>
-  </div>
-  <div class="panel live-copy-audit">
-    <b>Execution / Audit Summary</b>
-    <div class="live-copy-counts"><span id="lcReasonCounts"></span><span id="lcStatusCounts"></span><span id="lcSourceCounts"></span></div>
-    <div class="table-wrap">
-      <table><thead><tr><th>Time</th><th>Wallet</th><th>Coin</th><th>Side</th><th>Reason</th><th>Status</th><th>Diff</th><th>Notes</th></tr></thead><tbody id="lcAuditRows"><tr><td colspan="8" class="small">Loading audit summary...</td></tr></tbody></table>
+  </section>
+
+  <section class="lc-tabs">
+    <div class="lc-tabbar">
+      <button type="button" class="active" data-lc-tab="audit">Health & Audit</button>
+      <button type="button" data-lc-tab="recon">Manual Reconciliation</button>
+      <button type="button" data-lc-tab="ws">WS Detail</button>
     </div>
+    <div class="lc-tab-panel active" data-lc-panel="audit">
+      <section class="lc-panel">
+        <h3>Execution / Audit</h3>
+        <div class="lc-source-strip" id="lcSourceChips"></div>
+        <div class="lc-table-wrap">
+          <table><thead><tr><th>Time</th><th>Source</th><th>Wallet</th><th>Coin</th><th>Side</th><th>Reason</th><th>Status</th><th>Diff %</th><th>Notes</th></tr></thead><tbody id="lcAuditRows"><tr><td colspan="9">Loading audit summary...</td></tr></tbody></table>
+        </div>
+      </section>
+    </div>
+    <div class="lc-tab-panel" data-lc-panel="recon">
+      <section class="lc-panel">
+        <h3>Manual Reconciliation Queue</h3>
+        <div class="lc-table-wrap">
+          <table><thead><tr><th>Severity</th><th>Wallet</th><th>Coin</th><th>Issue</th><th>Leader</th><th>Copy</th><th>Action</th><th>Buttons</th></tr></thead><tbody id="lcReconRows"></tbody></table>
+        </div>
+      </section>
+    </div>
+    <div class="lc-tab-panel" data-lc-panel="ws">
+      <section class="lc-panel">
+        <h3>WS Health Detail</h3>
+        <div class="lc-table-wrap">
+          <table><thead><tr><th>Wallet</th><th>Socket status</th><th>Last open</th><th>Last close</th><th>Last msg age</th><th>Last data age</th><th>Reconnects</th><th>Duplicates</th><th>Ignored</th><th>Last error</th></tr></thead><tbody id="lcHealthRows"></tbody></table>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <div class="lc-modal-backdrop" id="lcWalletModal" aria-hidden="true">
+    <form class="lc-modal" id="lcAddForm">
+      <div class="lc-modal-head"><h3>Add Wallet</h3><button type="button" data-lc-close>close</button></div>
+      <div class="lc-form-grid">
+        <label class="wide">Wallet address<input name="wallet" placeholder="0x wallet address" autocomplete="off"></label>
+        <label>Initial mode<select name="mode"><option>LIVE</option><option>CLO</option><option>OFF</option></select></label>
+        <label>Copy model<select name="copy_mode"><option value="proportional">proportional</option><option value="fixed">fixed</option></select></label>
+        <label>Norm base<input name="norm_base" value="100"></label>
+        <label>Fixed notional<input name="fixed_notional" value="10"></label>
+        <label>Leader equity base<input name="leader_equity_base" value="10000"></label>
+        <label>Max diff %<input name="max_diff_pct" value="0.1"></label>
+        <label>Daily loss<input name="daily_loss_limit" value="0"></label>
+      </div>
+      <p>Add wallet only introduces it to the live table. Row controls manage sizing, safety limits and graph inclusion.</p>
+      <div class="lc-modal-actions"><button type="button" data-lc-close>Cancel</button><button type="submit">Add wallet to live table</button></div>
+    </form>
+  </div>
+
+  <div class="lc-modal-backdrop" id="lcGlobalModal" aria-hidden="true">
+    <section class="lc-modal">
+      <div class="lc-modal-head"><h3>Global Controls</h3><button type="button" data-lc-close>close</button></div>
+      <div class="lc-form-grid">
+        <label>Mode<select><option>DRY RUN</option><option disabled>LIVE gated</option></select></label>
+        <label>Global exposure %<input value="22"></label>
+        <label>Daily loss limit<input value="50"></label>
+        <label>WS fast path<select><option>armed</option><option>off</option></select></label>
+        <label>REST fallback<select><option>armed</option><option>off</option></select></label>
+        <label>Confirmation guard<select><option>required</option><option>two-person future</option></select></label>
+      </div>
+      <p>Preview only. No backend effect and no order path is connected.</p>
+      <div class="lc-modal-actions"><button type="button" class="lc-soft">Soft kill preview</button><button type="button" class="lc-danger" disabled>Hard kill disabled</button><button type="button" data-lc-close>Close</button></div>
+    </section>
   </div>
 </div>
 <style>
-.live-copy-panel{border-top:1px solid #30363d;margin-top:12px}.live-safety-strip{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px;margin-bottom:10px}.live-safety-strip span{background:#161b22;border:1px solid #21262d;border-radius:4px;padding:4px 7px}.lc-pill{font-style:normal;border-radius:3px;padding:1px 5px}.lc-blue{color:#58a6ff}.lc-green{color:#2ea043}.lc-red{color:#ff4d4f}.lc-amber{color:#d29922}.live-copy-grid{display:grid;gap:8px}.live-copy-add{display:grid;grid-template-columns:minmax(260px,2fr) repeat(7,minmax(82px,1fr)) minmax(110px,.8fr);gap:6px;align-items:end}.live-copy-add b{grid-column:1/-1}.live-copy-panel input,.live-copy-panel select{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px}.live-copy-panel button{background:#1f6feb;color:#fff;border:1px solid #388bfd;border-radius:4px;padding:5px 8px}.live-copy-panel button.lc-danger{background:#3b1118;border-color:#da3633}.live-copy-table-wrap{overflow:auto}.live-copy-table input{width:72px}.live-copy-table select{min-width:84px}.live-copy-actions{display:flex;gap:4px}.live-copy-counts{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}.live-copy-counts span{background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:5px 7px}.lc-health-GOOD{color:#2ea043}.lc-health-WATCH,.lc-mode-CLO{color:#d29922}.lc-health-DEGRADED{color:#ff4d4f}.lc-row-OFF{opacity:.58}.lc-mode-pill{border:1px solid #30363d;border-radius:3px;padding:1px 4px;margin-left:4px;font-size:10px}.lc-ok{color:#2ea043}.lc-bad{color:#ff4d4f}@media(max-width:1400px){.live-copy-add{grid-template-columns:repeat(3,minmax(140px,1fr))}}
+.live-copy-centre{--lc-bg:#070c11;--lc-panel:#0f171f;--lc-line:#223342;--lc-text:#e6edf5;--lc-muted:#8fa3b7;--lc-green:#21c16b;--lc-red:#ff5263;--lc-amber:#f5b84b;--lc-blue:#58a6ff;border-top:1px solid #30363d;margin-top:12px;color:var(--lc-text);font-size:12px}.live-copy-centre *{box-sizing:border-box}.lc-header{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:10px 12px;border:1px solid var(--lc-line);background:#0c131a;border-radius:8px;margin-bottom:10px}.lc-title{font-size:20px;font-weight:760}.lc-header-pills,.lc-header-actions,.lc-safety-strip,.lc-source-strip{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.lc-header-pills{justify-content:flex-end}.lc-header-actions{justify-content:flex-end}.lc-pill{display:inline-flex;align-items:center;min-height:24px;padding:0 8px;border:1px solid var(--lc-line);border-radius:999px;background:#131f2b;color:var(--lc-muted);font-weight:720;white-space:nowrap}.lc-blue{color:var(--lc-blue);border-color:rgba(88,166,255,.45)}.lc-green{color:var(--lc-green);border-color:rgba(33,193,107,.45)}.lc-red{color:var(--lc-red);border-color:rgba(255,82,99,.45)}.lc-amber,.lc-mode-CLO{color:var(--lc-amber);border-color:rgba(245,184,75,.45)}.live-copy-centre button{min-height:28px;border:1px solid var(--lc-line);border-radius:6px;background:#172437;color:var(--lc-text);padding:0 8px;font-weight:700}.live-copy-centre button.lc-soft{color:var(--lc-amber);border-color:rgba(245,184,75,.55)}.live-copy-centre button.lc-danger{color:var(--lc-red);border-color:rgba(255,82,99,.6);background:#2a1218}.live-copy-centre button[disabled]{opacity:.5}.lc-safety-strip{margin-bottom:10px}.lc-status{font-weight:720}.lc-ok{color:var(--lc-green)}.lc-bad{color:var(--lc-red)}.lc-panel{border:1px solid var(--lc-line);border-radius:8px;background:var(--lc-panel);padding:12px;margin-bottom:10px;min-width:0}.lc-panel h3{margin:0 0 5px 0;font-size:15px}.lc-panel p,.lc-modal p{margin:0 0 10px 0;color:var(--lc-muted);font-size:12px}.lc-graph-panel{min-height:430px}.lc-graph-top{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start}.lc-chart-controls{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}.lc-chart-controls button,.lc-chart-controls input{min-height:26px;border:1px solid var(--lc-line);border-radius:6px;background:#0a1118;color:var(--lc-muted);padding:0 7px}.lc-chart-controls .active{color:var(--lc-text);border-color:rgba(88,166,255,.55);background:#142337}.lc-stat-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin:8px 0 10px}.lc-stat{border:1px solid var(--lc-line);background:#0a1118;border-radius:7px;padding:8px;min-height:55px}.lc-stat .label{color:var(--lc-muted);font-size:10px;font-weight:720;text-transform:uppercase}.lc-stat .value{margin-top:6px;font-size:16px;font-weight:780}.lc-chart-wrap{position:relative;min-height:300px;border:1px solid var(--lc-line);border-radius:8px;background:linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px) 0 0/100% 20%,linear-gradient(90deg,rgba(255,255,255,.028) 1px,transparent 1px) 0 0/10% 100%,#091017;overflow:hidden}.lc-chart-wrap svg{display:block;width:100%;height:100%;min-height:300px}.lc-axis{fill:var(--lc-muted);font-size:11px}.lc-table-wrap{overflow-x:auto;border:1px solid var(--lc-line);border-radius:8px}.live-copy-centre table{width:100%;border-collapse:collapse;min-width:1320px}.live-copy-centre th,.live-copy-centre td{border-bottom:1px solid var(--lc-line);padding:6px 7px;text-align:left;vertical-align:middle;white-space:nowrap}.live-copy-centre th{color:var(--lc-muted);font-size:10px;font-weight:780;text-transform:uppercase;background:#0a1118}.lc-wallet{font-family:Consolas,Monaco,monospace;color:#d9ebff}.lc-cell-stack{display:grid;gap:4px}.lc-pair{display:grid;grid-template-columns:34px minmax(52px,auto);gap:5px;align-items:baseline}.lc-pair span:first-child{color:var(--lc-muted);font-size:10px;font-weight:780}.lc-pos{color:var(--lc-green);font-weight:760}.lc-neg{color:var(--lc-red);font-weight:760}.lc-muted{color:var(--lc-muted)}.lc-row-OFF{opacity:.58}.lc-mini-actions,.lc-inline-controls{display:flex;gap:4px;align-items:center;flex-wrap:wrap}.lc-wallet-table input,.lc-wallet-table select{width:76px;min-height:26px;background:#0a1118;color:var(--lc-text);border:1px solid var(--lc-line);border-radius:5px;padding:0 6px}.lc-wallet-table select{width:92px}.lc-graph-toggle{display:inline-flex;gap:5px;align-items:center}.lc-graph-toggle input{width:14px;min-height:14px}.lc-tabs{display:grid;gap:8px}.lc-tabbar{display:flex;gap:6px;border-bottom:1px solid var(--lc-line)}.lc-tabbar button{border-bottom:0;border-radius:7px 7px 0 0;color:var(--lc-muted)}.lc-tabbar button.active{color:var(--lc-text);background:var(--lc-panel)}.lc-tab-panel{display:none}.lc-tab-panel.active{display:block}.lc-source-strip{margin-bottom:10px}.lc-modal-backdrop{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.62);z-index:2000;padding:18px}.lc-modal-backdrop.active{display:flex}.lc-modal{width:min(660px,100%);border:1px solid var(--lc-line);border-radius:8px;background:var(--lc-panel);padding:14px;box-shadow:0 20px 60px rgba(0,0,0,.45)}.lc-modal-head{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:10px}.lc-modal-head h3{margin:0}.lc-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.lc-form-grid .wide{grid-column:1/-1}.lc-form-grid label{display:grid;gap:5px;color:var(--lc-muted);font-size:10px;font-weight:760;text-transform:uppercase}.lc-form-grid input,.lc-form-grid select{width:100%;min-height:32px;border:1px solid var(--lc-line);border-radius:6px;color:var(--lc-text);background:#0a1118;padding:0 8px}.lc-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}@media(max-width:1300px){.lc-header,.lc-graph-top{grid-template-columns:1fr}.lc-header-pills,.lc-header-actions,.lc-chart-controls{justify-content:flex-start}.lc-stat-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:800px){.lc-stat-strip,.lc-form-grid{grid-template-columns:1fr}}
 </style>
 <script>
 (function(){
@@ -2946,26 +3233,82 @@ const root=document.getElementById('liveCopyPanel'); if(!root) return;
 const status=root.querySelector('#lcStatus');
 let lcConfig={wallets:{},archived_wallets:{}}, lcHealth={wallets:{}}, lcAudit={last_rows:[]};
 function h(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-function msg(t, bad){if(status){status.textContent=t||'';status.className=bad?'small lc-bad':'small lc-ok';}}
+function msg(t,bad){if(status){status.textContent=t||'';status.className='lc-status '+(bad?'lc-bad':'lc-ok');}}
 async function jget(url){const r=await fetch(url,{headers:{'x-requested-with':'fetch'}});return await r.json();}
 async function jpost(url,payload){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','x-requested-with':'fetch'},body:JSON.stringify(payload)});const j=await r.json();if(!r.ok||j.ok===false)throw new Error(j.error||r.statusText);return j;}
 function num(v,d){const n=parseFloat(v);return Number.isFinite(n)?n:d;}
-function countText(obj){return Object.entries(obj||{}).map(([k,v])=>h(k)+': '+h(v)).join(' | ')||'none';}
+function first(row,keys){for(const k of keys){if(row&&row[k]!=null&&row[k]!=='')return row[k];}return '';}
+function shortWallet(w){return String(w||'').length>18?String(w).slice(0,10)+'...'+String(w).slice(-6):String(w||'');}
+function pill(text,kind){const t=String(text||'pending');const token=String(kind||t).split(' ')[0].toUpperCase();const cls=['OPEN','LIVE','OK','GOOD','DRY_RUN_FILLED','ALLOWED','ACTIVE'].includes(token)?'lc-green':['STALE','CLO','WATCH','QUEUED','RECONNECTING','PENDING'].includes(token)?'lc-amber':['OFF','OFFLINE','CLOSED','MISSING','DEGRADED','DISABLED','ERROR','RECONNECT_OVERDUE'].includes(token)?'lc-red':'';
+ return `<span class="lc-pill ${cls}">${h(t)}</span>`;}
+function pair(a,b,cls){return `<div class="lc-pair"><span>${h(a)}</span><b class="${cls||''}">${h(b||'—')}</b></div>`;}
+function signed(v){const s=String(v||'—');return s.trim().startsWith('-')?'lc-neg':(s.trim().startsWith('+')?'lc-pos':'');}
+function count(obj,key){return Number((obj||{})[key]||0);}
+function sourceOf(r){return first(r,['source','fill_source'])||String(first(r,['reason'])).replace('LIVE_','').replace('_DETECTED','')||'—';}
 function rowPayload(tr){return {wallet:tr.dataset.wallet,mode:tr.querySelector('[name=mode]').value,copy_mode:tr.querySelector('[name=copy_mode]').value,norm_base:num(tr.querySelector('[name=norm_base]').value,100),fixed_notional:num(tr.querySelector('[name=fixed_notional]').value,10),leader_equity_base:num(tr.querySelector('[name=leader_equity_base]').value,10000),max_diff_pct:num(tr.querySelector('[name=max_diff_pct]').value,0.1),daily_loss_limit:num(tr.querySelector('[name=daily_loss_limit]').value,0)};}
+function renderEquity(){
+ const cards=[['real equity','pending exchange wiring'],['realised PnL','dry-run'],['unrealised PnL','dry-run'],['fees paid','pending'],['open exposure','pending'],['drawdown','pending']];
+ root.querySelector('#lcEquityCards').innerHTML=cards.map(([label,value])=>`<div class="lc-stat"><div class="label">${h(label)}</div><div class="value">${h(value)}</div></div>`).join('');
+}
+function renderWallets(){
+ const wallets=lcConfig.wallets||{}, healthWallets=lcHealth.wallets||{};
+ const rows=Object.entries(wallets).sort().map(([wallet,cfg])=>{
+  const wh=healthWallets[wallet]||{}, mode=String(cfg.mode||'OFF').toUpperCase(), model=cfg.copy_mode==='fixed'?'fixed':'proportional';
+  const stream=wh.effective_status||wh.status||'OFFLINE', grade=wh.health_grade||'pending';
+  const bl=wh.last_data_ms||wh.last_msg_ms||wh.last_open_ms?'OK':'pending';
+  return `<tr class="lc-row-${h(mode)}" data-wallet="${h(wallet)}">
+    <td><div class="lc-cell-stack"><span class="lc-wallet">${h(shortWallet(wallet))}</span><span>${pill(mode,mode)} ${h(model)}</span></div></td>
+    <td>${pair('L','pending','lc-muted')}${pair('C','pending','lc-muted')}</td>
+    <td>${pair('L','pending','lc-muted')}${pair('C','pending','lc-muted')}</td>
+    <td>${pair('L','pending','lc-muted')}${pair('C','pending','lc-muted')}</td>
+    <td>${pair('L','—')}${pair('C','—')}</td>
+    <td>${pair('L','—')}${pair('C','—')}</td>
+    <td>pending</td>
+    <td>${pair('hr','—')}${pair('avg','—')}${pair('win','—')}</td>
+    <td>${pair('norm',cfg.norm_base??100)}${pair('fixed',cfg.fixed_notional??10)}${pair('base',cfg.leader_equity_base??10000)}${pair('diff',cfg.max_diff_pct??0.1)}${pair('loss',cfg.daily_loss_limit??0)}</td>
+    <td>${pill(bl,bl)}</td>
+    <td><div class="lc-cell-stack">${pill(stream,stream)}<span class="lc-muted">grade ${h(grade)}</span><span class="lc-muted">poll fallback ready</span></div></td>
+    <td><label class="lc-graph-toggle" title="Include this wallet in the live performance graph only. Does not affect copy execution."><input type="checkbox" checked>SHOW</label></td>
+    <td>${pair('fills',wh.processed_count??0)}${pair('dup',wh.duplicate_count??0)}${pair('recon/min',Number(wh.reconnects_per_min||0).toFixed(2))}</td>
+    <td><div class="lc-cell-stack"><div class="lc-inline-controls"><select name="mode"><option ${mode==='LIVE'?'selected':''}>LIVE</option><option ${mode==='CLO'?'selected':''}>CLO</option><option ${mode==='OFF'?'selected':''}>OFF</option></select><select name="copy_mode"><option value="proportional" ${model!=='fixed'?'selected':''}>proportion</option><option value="fixed" ${model==='fixed'?'selected':''}>fixed</option></select></div><div class="lc-inline-controls"><span class="lc-muted">N</span><input name="norm_base" value="${h(cfg.norm_base??100)}"><span class="lc-muted">F</span><input name="fixed_notional" value="${h(cfg.fixed_notional??10)}"><span class="lc-muted">B</span><input name="leader_equity_base" value="${h(cfg.leader_equity_base??10000)}"></div><div class="lc-inline-controls"><span class="lc-muted">diff</span><input name="max_diff_pct" value="${h(cfg.max_diff_pct??0.1)}"><span class="lc-muted">loss</span><input name="daily_loss_limit" value="${h(cfg.daily_loss_limit??0)}"></div><div class="lc-mini-actions"><button data-act="save" type="button">Save</button><button data-act="clo" type="button">CLO</button><button data-act="off" type="button">OFF</button><button data-act="archive" class="lc-danger" type="button" title="Removes wallet from active config only; does not delete audit/history.">Archive config</button></div></div></td>
+  </tr>`;
+ }).join('');
+ root.querySelector('#lcWalletRows').innerHTML=rows||'<tr><td colspan="14">No live-copy wallets configured.</td></tr>';
+}
+function renderAudit(){
+ const rows=(lcAudit.last_rows||[]).slice(-10).reverse();
+ const reason=lcAudit.reason_counts||{}, statusCounts=lcAudit.status_counts||{}, sourceCounts=lcAudit.source_counts||{};
+ root.querySelector('#lcSourceChips').innerHTML=[
+  ['WS fills',count(sourceCounts,'WS')+count(sourceCounts,'live_ws')+count(reason,'LIVE_WS_DETECTED'),'lc-green'],
+  ['REST recovered',count(sourceCounts,'REST_POLL')+count(sourceCounts,'live_poll')+count(reason,'LIVE_POLL_DETECTED'),'lc-amber'],
+  ['Manual review',count(reason,'MANUAL_REVIEW'),'lc-blue'],
+  ['Duplicates skipped',count(statusCounts,'DUPLICATE')+count(statusCounts,'SKIPPED_DUPLICATE'),''],
+  ['Risk rejected',count(statusCounts,'RISK_REJECTED')+count(reason,'RISK_REJECTED'),'lc-red']
+ ].map(([k,v,cls])=>`<span class="lc-pill ${cls}">${h(k)}: <b>${h(v)}</b></span>`).join('');
+ root.querySelector('#lcAuditRows').innerHTML=rows.map(r=>`<tr><td>${h(first(r,['created_at','timestamp_iso','time']))}</td><td>${h(sourceOf(r))}</td><td class="lc-wallet">${h(shortWallet(first(r,['leader_wallet','wallet'])))}</td><td>${h(first(r,['coin','asset']))}</td><td>${h(first(r,['side']))}</td><td>${h(first(r,['reason']))}</td><td>${pill(first(r,['status'])||'—')}</td><td>${h(first(r,['diff_pct','real_diff_pct','price_diff_pct']))}</td><td>${h(first(r,['notes','message']))}</td></tr>`).join('')||'<tr><td colspan="9">No audit rows found.</td></tr>';
+ const manual=rows.filter(r=>String(first(r,['reason','status'])).toUpperCase().includes('MANUAL')).slice(0,5);
+ root.querySelector('#lcReconRows').innerHTML=(manual.length?manual:[{}]).map((r,i)=>{const sev=i===0&&manual.length?'WARN':'INFO';return `<tr><td>${pill(sev,sev)}</td><td class="lc-wallet">${h(shortWallet(first(r,['leader_wallet','wallet'])||'pending'))}</td><td>${h(first(r,['coin'])||'—')}</td><td>${h(first(r,['reason'])||'pending manual review feed')}</td><td>pending</td><td>pending</td><td>${h(first(r,['action'])||'review')}</td><td><div class="lc-mini-actions"><button type="button">review</button><button type="button">ignore</button><button type="button">close</button><button type="button">align</button></div></td></tr>`;}).join('');
+}
+function age(ms){const n=Number(ms||0);if(!n)return '—';const d=Math.max(0,Date.now()-n);return d<60000?Math.round(d/1000)+'s':Math.round(d/60000)+'m';}
+function time(ms){const n=Number(ms||0);return n?new Date(n).toLocaleTimeString():'—';}
+function renderHealth(){
+ const rows=Object.entries(lcHealth.wallets||{}).sort().map(([wallet,wh])=>`<tr><td class="lc-wallet">${h(shortWallet(wallet))}</td><td>${pill(wh.effective_status||wh.status||'OFFLINE')}</td><td>${h(time(wh.last_open_ms))}</td><td>${h(time(wh.last_close_ms))}</td><td>${h(age(wh.last_msg_ms))}</td><td>${h(age(wh.last_data_ms))}</td><td>${h(wh.reconnect_count??0)}</td><td>${h(wh.duplicate_count??0)}</td><td>${h(wh.ignored_count??0)}</td><td>${h(wh.last_error||wh.last_close_msg||'')}</td></tr>`).join('');
+ root.querySelector('#lcHealthRows').innerHTML=rows||'<tr><td colspan="10">WS service not running or no wallet health file found.</td></tr>';
+}
 function render(){
- const wallets=lcConfig.wallets||{}, healthWallets=(lcHealth.wallets||{}), active=Object.values(wallets).filter(w=>w&&w.enabled!==false&&['LIVE','CLO'].includes(String(w.mode||'').toUpperCase())).length;
- root.querySelector('#lcWalletCount').textContent=active+' / 10'; const wsOverall=lcHealth.overall||'OFFLINE'; root.querySelector('#lcWsOverall').textContent=(['CLOSED','DEGRADED','DISABLED','OFFLINE'].includes(String(wsOverall).toUpperCase()))?'OFFLINE / service not running':wsOverall;
- const rows=Object.entries(wallets).sort().map(([wallet,cfg])=>{const wh=healthWallets[wallet]||{};const grade=wh.health_grade||'-';const mode=String(cfg.mode||'OFF').toUpperCase();return `<tr class="lc-row-${h(mode)}" data-wallet="${h(wallet)}"><td><code>${h(wallet.slice(0,10)+'...'+wallet.slice(-6))}</code><span class="lc-mode-pill lc-mode-${h(mode)}">${h(mode)}</span></td><td><select name="mode"><option ${mode==='LIVE'?'selected':''}>LIVE</option><option ${mode==='CLO'?'selected':''}>CLO</option><option ${mode==='OFF'?'selected':''}>OFF</option></select></td><td><select name="copy_mode"><option value="proportional" ${cfg.copy_mode!=='fixed'?'selected':''}>proportional</option><option value="fixed" ${cfg.copy_mode==='fixed'?'selected':''}>fixed</option></select></td><td><input name="norm_base" value="${h(cfg.norm_base??100)}"></td><td><input name="fixed_notional" value="${h(cfg.fixed_notional??10)}"></td><td><input name="leader_equity_base" value="${h(cfg.leader_equity_base??10000)}"></td><td><input name="max_diff_pct" value="${h(cfg.max_diff_pct??0.1)}"></td><td><input name="daily_loss_limit" value="${h(cfg.daily_loss_limit??0)}"></td><td>${h(wh.effective_status||wh.status||'-')}</td><td class="lc-health-${h(grade)}">${h(grade)}</td><td>${h(wh.processed_count??0)}</td><td>${Number(wh.reconnects_per_min||0).toFixed(2)}</td><td><label title="Include this wallet in the live performance graph only. Does not affect copy execution."><input type="checkbox" checked> SHOW</label></td><td><div class="live-copy-actions"><button data-act="save" type="button">Save</button><button data-act="clo" type="button">CLO</button><button data-act="off" type="button">OFF</button><button data-act="archive" class="lc-danger" type="button">Archive</button></div></td></tr>`;}).join('');
- root.querySelector('#lcWalletRows').innerHTML=rows||'<tr><td colspan="14" class="small">No live-copy wallets configured.</td></tr>';
- root.querySelector('#lcReasonCounts').textContent='Reasons: '+countText(lcAudit.reason_counts);
- root.querySelector('#lcStatusCounts').textContent='Statuses: '+countText(lcAudit.status_counts);
- root.querySelector('#lcSourceCounts').textContent='Sources: '+countText(lcAudit.source_counts);
- root.querySelector('#lcAuditRows').innerHTML=(lcAudit.last_rows||[]).slice(-10).reverse().map(r=>`<tr><td>${h(r.created_at||r.timestamp_iso||'')}</td><td>${h(r.leader_wallet||r.wallet||'')}</td><td>${h(r.coin||'')}</td><td>${h(r.side||'')}</td><td>${h(r.reason||'')}</td><td>${h(r.status||'')}</td><td>${h(r.diff_pct||'')}</td><td>${h(r.notes||'')}</td></tr>`).join('')||'<tr><td colspan="8" class="small">No audit rows found.</td></tr>';
+ const wallets=lcConfig.wallets||{}, active=Object.values(wallets).filter(w=>w&&w.enabled!==false&&['LIVE','CLO'].includes(String(w.mode||'').toUpperCase())).length;
+ root.querySelector('#lcWalletCount').textContent=active+' / 10';
+ const wsOverall=String(lcHealth.overall||'OFFLINE').toUpperCase();
+ root.querySelector('#lcWsOverall').textContent=(['CLOSED','DEGRADED','DISABLED','OFFLINE'].includes(wsOverall))?'OFFLINE / service not running':wsOverall;
+ renderEquity(); renderWallets(); renderAudit(); renderHealth();
 }
 async function refresh(quiet){try{if(!quiet)msg('Loading...');const [cfg,health,audit]=await Promise.all([jget('/api/live-config'),jget('/api/live-ws-health'),jget('/api/live-audit-summary')]);lcConfig=cfg.config||{wallets:{}};lcHealth=health.health||{};lcAudit=audit||{};render();if(!quiet)msg('Loaded');}catch(e){msg(e.message||String(e),true);}}
-root.querySelector('#lcRefresh').addEventListener('click',refresh);
-root.querySelector('#lcAddForm').addEventListener('submit',async e=>{e.preventDefault();const fd=new FormData(e.currentTarget);const payload=Object.fromEntries(fd.entries());try{msg('Updating...');await jpost('/api/live-config/add-wallet',payload);e.currentTarget.reset();await refresh(true);msg('Updated: '+String(payload.wallet||'wallet').slice(0,10)+' -> SAVED');}catch(err){msg(err.message,true);}});
-root.querySelector('#lcWalletRows').addEventListener('click',async e=>{const btn=e.target.closest('button[data-act]');if(!btn)return;const tr=btn.closest('tr');const wallet=tr.dataset.wallet;const short=wallet.slice(0,10)+'...'+wallet.slice(-6);try{msg('Updating...');if(btn.dataset.act==='save'){await jpost('/api/live-config/set-wallet',rowPayload(tr));await refresh(true);msg('Updated: '+short+' -> SAVED');}if(btn.dataset.act==='clo'){await jpost('/api/live-config/set-mode',{wallet,mode:'CLO'});await refresh(true);msg('Updated: '+short+' -> CLO');}if(btn.dataset.act==='off'){await jpost('/api/live-config/set-mode',{wallet,mode:'OFF'});await refresh(true);msg('Updated: '+short+' -> OFF');}if(btn.dataset.act==='archive'){await jpost('/api/live-config/remove-wallet',{wallet,archive:true});await refresh(true);msg('Updated: '+short+' -> ARCHIVED');}}catch(err){msg(err.message,true);}});
+root.querySelector('#lcRefresh').addEventListener('click',()=>refresh());
+root.querySelectorAll('[data-lc-modal]').forEach(btn=>btn.addEventListener('click',()=>{const m=root.querySelector('#'+btn.dataset.lcModal);if(m){m.classList.add('active');m.setAttribute('aria-hidden','false');}}));
+root.querySelectorAll('[data-lc-close]').forEach(btn=>btn.addEventListener('click',()=>{const m=btn.closest('.lc-modal-backdrop');if(m){m.classList.remove('active');m.setAttribute('aria-hidden','true');}}));
+root.querySelectorAll('[data-lc-tab]').forEach(btn=>btn.addEventListener('click',()=>{root.querySelectorAll('[data-lc-tab]').forEach(b=>b.classList.remove('active'));root.querySelectorAll('[data-lc-panel]').forEach(p=>p.classList.remove('active'));btn.classList.add('active');root.querySelector(`[data-lc-panel="${btn.dataset.lcTab}"]`).classList.add('active');}));
+root.querySelector('#lcAddForm').addEventListener('submit',async e=>{e.preventDefault();const fd=new FormData(e.currentTarget);const payload=Object.fromEntries(fd.entries());try{msg('Updating...');await jpost('/api/live-config/add-wallet',payload);e.currentTarget.reset();const m=e.currentTarget.closest('.lc-modal-backdrop');if(m)m.classList.remove('active');await refresh(true);msg('Updated: '+shortWallet(payload.wallet)+' -> SAVED');}catch(err){msg(err.message,true);}});
+root.querySelector('#lcWalletRows').addEventListener('click',async e=>{const btn=e.target.closest('button[data-act]');if(!btn)return;const tr=btn.closest('tr');const wallet=tr.dataset.wallet;const short=shortWallet(wallet);try{if(btn.dataset.act==='archive'&&!window.confirm('Archive disables/removes config only. Permanent audit/history is preserved.')){msg('Archive cancelled');return;}msg('Updating...');if(btn.dataset.act==='save'){await jpost('/api/live-config/set-wallet',rowPayload(tr));await refresh(true);msg('Updated: '+short+' -> SAVED');}if(btn.dataset.act==='clo'){await jpost('/api/live-config/set-mode',{wallet,mode:'CLO'});await refresh(true);msg('Updated: '+short+' -> CLO');}if(btn.dataset.act==='off'){await jpost('/api/live-config/set-mode',{wallet,mode:'OFF'});await refresh(true);msg('Updated: '+short+' -> OFF');}if(btn.dataset.act==='archive'){await jpost('/api/live-config/remove-wallet',{wallet,archive:true});await refresh(true);msg('Updated: '+short+' -> ARCHIVED');}}catch(err){msg(err.message,true);}});
 refresh();
 })();
 </script>
@@ -2979,6 +3322,19 @@ def wallet_detail(wallet: str) -> str:
     row = (state.get("wallets") or {}).get(wallet)
     if not row:
         return HTMLResponse(f"<h3>Wallet not found: {wallet}</h3>", status_code=404)
+    if wallet == USER_WALLET:
+        updated = html.escape(str(state.get("updated_at", "")))
+        return f"""<!doctype html><html><head><meta charset="utf-8"><title>Live Copy Control Centre</title>
+<style>
+body{{margin:0;background:#0d1117;color:#c9d1d9;font:12px Arial,Helvetica,sans-serif}}
+a{{color:#58a6ff;text-decoration:none}}
+.top{{display:flex;align-items:center;gap:12px;padding:8px 14px;border-bottom:1px solid #222;background:#090d12;position:sticky;top:0;z-index:4;box-shadow:0 2px 8px rgba(0,0,0,.25)}}
+.top .muted{{color:#8b949e}} .top-spacer{{margin-left:auto}}
+.section{{padding:10px 10px 12px}}
+</style></head><body>
+<div class="top"><b>HL Copy Engine</b><a href="/">Main dashboard</a><span class="muted">Updated: {updated}</span><span class="top-spacer muted">Live copy command centre</span></div>
+{render_live_copy_control_panel()}
+</body></html>"""
     trades = [t for t in state.get("copy_trades", []) if str(t.get("wallet", "")).lower() == wallet][-100:]
     expected_fills = [f for f in state.get("expected_copy_fills", []) if str(f.get("wallet", "")).lower() == wallet][-100:]
     def esc(v: Any) -> str:
