@@ -85,6 +85,8 @@ LIVE_WS_RECONNECT_BACKOFF_CAP_SEC = float(os.getenv("HL_LIVE_WS_RECONNECT_BACKOF
 LIVE_WS_HEALTH_WRITE_SEC = float(os.getenv("HL_LIVE_WS_HEALTH_WRITE_SEC", "2"))
 LIVE_WS_INITIAL_BACKOFF_SEC = float(os.getenv("HL_LIVE_WS_INITIAL_BACKOFF_SEC", "1"))
 LIVE_WS_BACKOFF_MULTIPLIER = float(os.getenv("HL_LIVE_WS_BACKOFF_MULTIPLIER", "1.5"))
+LIVE_WS_RECONNECT_GRACE_MS = int(os.getenv("HL_LIVE_WS_RECONNECT_GRACE_MS", "10000"))
+LIVE_WS_THREAD_WATCHDOG_SEC = float(os.getenv("HL_LIVE_WS_THREAD_WATCHDOG_SEC", "5"))
 
 ORDER_INTENT_FIELDS = [
     "created_at", "intent_id", "dry_run", "leader_wallet", "leader_fill_id",
@@ -994,11 +996,24 @@ class DryRunLiveCopyService:
 def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
     now = utc_now_ms()
     wallets = {}
+    summary = {
+        "wallet_count": 0,
+        "open_count": 0,
+        "reconnecting_count": 0,
+        "closed_count": 0,
+        "stale_count": 0,
+        "total_processed_count": 0,
+        "total_reconnect_count": 0,
+        "avg_reconnects_per_min": 0.0,
+        "worst_health_grade": "GOOD",
+    }
     overall = "DISABLED"
     if manager is not None:
         overall = "OK"
         with manager.status_lock:
             items = list(manager.wallet_status.items())
+        total_reconnects_per_min = 0.0
+        worst_grade_score = 0
         for wallet, status_item in items:
             status = dict(status_item)
             transport_ref = max(
@@ -1013,13 +1028,22 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
             next_reconnect_ms = int(status.get("next_reconnect_ms") or 0)
             last_open_ms = int(status.get("last_open_ms") or 0)
             last_close_ms = int(status.get("last_close_ms") or 0)
+            first_seen_ms = int(status.get("first_seen_ms") or now)
+            thread_alive = bool(status.get("worker_thread_alive"))
+            reconnect_overdue = bool(
+                status.get("status") == "RECONNECTING"
+                and next_reconnect_ms > 0
+                and now > next_reconnect_ms + LIVE_WS_RECONNECT_GRACE_MS
+            )
             status_name = str(status.get("status", "UNKNOWN"))
             effective_status = status_name
-            if status_name == "OPEN" and (LIVE_WS_STALE_MS <= 0 or transport_stale_ms <= LIVE_WS_STALE_MS):
+            if reconnect_overdue:
+                effective_status = "RECONNECT_OVERDUE"
+            elif status_name == "OPEN" and (LIVE_WS_STALE_MS <= 0 or transport_stale_ms <= LIVE_WS_STALE_MS):
                 effective_status = "OPEN"
             elif status_name == "OPEN":
                 effective_status = "STALE"
-            elif status_name in {"CONNECTING", "RECONNECTING"}:
+            elif status_name in {"CONNECTING", "RECONNECTING", "THREAD_ERROR", "THREAD_EXITED", "RESTARTING"}:
                 effective_status = status_name
             if last_data_ms == 0:
                 data_status = "IDLE_NO_FILLS"
@@ -1032,6 +1056,34 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
             reconnect_in_ms = max(0, next_reconnect_ms - now) if next_reconnect_ms else 0
             uptime_ms = (now - last_open_ms) if status_name == "OPEN" and last_open_ms else int(status.get("uptime_ms") or 0)
             downtime_ms = (now - last_close_ms) if status_name in {"CLOSED", "RECONNECTING"} and last_close_ms else 0
+            observed_ms = max(0, now - first_seen_ms)
+            observed_min = max(observed_ms / 60000, 1)
+            reconnect_count = int(status.get("reconnect_count") or 0)
+            close_count = int(status.get("close_count") or 0)
+            error_count = int(status.get("error_count") or 0)
+            processed_count = int(status.get("processed_count") or 0)
+            reconnects_per_min = reconnect_count / observed_min
+            closes_per_min = close_count / observed_min
+            if effective_status == "OPEN" and reconnects_per_min <= 2 and error_count == 0:
+                health_grade = "GOOD"
+            elif effective_status == "OPEN" and reconnects_per_min <= 5 and error_count == 0:
+                health_grade = "WATCH"
+            else:
+                health_grade = "DEGRADED"
+            grade_score = {"GOOD": 0, "WATCH": 1, "DEGRADED": 2}[health_grade]
+            worst_grade_score = max(worst_grade_score, grade_score)
+            total_reconnects_per_min += reconnects_per_min
+            summary["wallet_count"] += 1
+            if effective_status == "OPEN":
+                summary["open_count"] += 1
+            elif effective_status == "RECONNECTING":
+                summary["reconnecting_count"] += 1
+            elif effective_status == "CLOSED":
+                summary["closed_count"] += 1
+            elif effective_status == "STALE":
+                summary["stale_count"] += 1
+            summary["total_processed_count"] += processed_count
+            summary["total_reconnect_count"] += reconnect_count
             wallets[wallet] = {
                 **status,
                 "effective_status": effective_status,
@@ -1042,11 +1094,21 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
                 "reconnect_in_ms": reconnect_in_ms,
                 "uptime_ms": uptime_ms,
                 "downtime_ms": downtime_ms,
+                "observed_ms": observed_ms,
+                "reconnects_per_min": reconnects_per_min,
+                "closes_per_min": closes_per_min,
+                "health_grade": health_grade,
+                "thread_alive": thread_alive,
+                "reconnect_overdue": reconnect_overdue,
             }
+        if summary["wallet_count"]:
+            summary["avg_reconnects_per_min"] = total_reconnects_per_min / summary["wallet_count"]
+        summary["worst_health_grade"] = {0: "GOOD", 1: "WATCH", 2: "DEGRADED"}[worst_grade_score]
     return {
         "enabled": bool(manager is not None),
         "updated_at": utc_now_iso(),
         "overall": overall,
+        "ws_summary": summary,
         "wallets": wallets,
         "max_wallets": LIVE_WS_MAX_WALLETS,
         "stale_ms_threshold": LIVE_WS_STALE_MS,
@@ -1070,6 +1132,7 @@ class DedicatedLiveWSManager:
             wallet: {
                 "wallet": wallet,
                 "status": "INIT",
+                "first_seen_ms": utc_now_ms(),
                 "last_open_ms": 0,
                 "last_close_ms": 0,
                 "last_msg_ms": 0,
@@ -1096,9 +1159,17 @@ class DedicatedLiveWSManager:
                 "benign_event_count": 0,
                 "last_benign_event_repr": "",
                 "data_status": "IDLE_NO_FILLS",
+                "worker_thread_alive": False,
+                "worker_thread_name": "",
+                "worker_last_seen_ms": 0,
+                "worker_restart_count": 0,
+                "fatal_error_count": 0,
+                "last_fatal_error": "",
+                "last_fatal_error_repr": "",
             }
             for wallet in self.wallets
         }
+        self.wallet_threads: Dict[str, threading.Thread] = {}
         self.status_lock = threading.Lock()
         self.service_lock = threading.Lock()
 
@@ -1114,15 +1185,53 @@ class DedicatedLiveWSManager:
             write_ws_health(self)
         write_ws_health(self)
 
+    def start_wallet_thread(self, wallet: str) -> None:
+        wallet = str(wallet).lower()
+        existing = self.wallet_threads.get(wallet)
+        if existing is not None and existing.is_alive():
+            return
+        thread = threading.Thread(target=self.wallet_loop, args=(wallet,), name=f"live-ws-{wallet[-6:]}", daemon=True)
+        self.wallet_threads[wallet] = thread
+        self.threads.append(thread)
+        thread.start()
+
+    def watchdog_loop(self) -> None:
+        while not self.stop_event.wait(max(0.5, LIVE_WS_THREAD_WATCHDOG_SEC)):
+            now = utc_now_ms()
+            for wallet in self.wallets:
+                thread = self.wallet_threads.get(wallet)
+                thread_alive = bool(thread and thread.is_alive())
+                should_restart = False
+                with self.status_lock:
+                    status = self.wallet_status[wallet]
+                    status["worker_thread_alive"] = thread_alive
+                    next_reconnect_ms = int(status.get("next_reconnect_ms") or 0)
+                    if not thread_alive:
+                        should_restart = True
+                    elif (
+                        status.get("status") == "RECONNECTING"
+                        and next_reconnect_ms > 0
+                        and now > next_reconnect_ms + LIVE_WS_RECONNECT_GRACE_MS
+                        and not thread_alive
+                    ):
+                        should_restart = True
+                    if should_restart and not self.stop_event.is_set():
+                        status["worker_restart_count"] += 1
+                        status["status"] = "RESTARTING"
+                if should_restart and not self.stop_event.is_set():
+                    self.start_wallet_thread(wallet)
+            write_ws_health(self)
+
     def start(self) -> None:
         write_ws_health(self)
         health_thread = threading.Thread(target=self.health_loop, name="live-ws-health", daemon=True)
         health_thread.start()
         self.threads.append(health_thread)
+        watchdog_thread = threading.Thread(target=self.watchdog_loop, name="live-ws-watchdog", daemon=True)
+        watchdog_thread.start()
+        self.threads.append(watchdog_thread)
         for wallet in self.wallets:
-            thread = threading.Thread(target=self.wallet_loop, args=(wallet,), name=f"live-ws-{wallet[:10]}", daemon=True)
-            thread.start()
-            self.threads.append(thread)
+            self.start_wallet_thread(wallet)
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -1147,6 +1256,35 @@ class DedicatedLiveWSManager:
                 thread.join(timeout=2.0)
 
     def wallet_loop(self, wallet: str) -> None:
+        thread_name = threading.current_thread().name
+        self.update_status(
+            wallet,
+            worker_thread_alive=True,
+            worker_thread_name=thread_name,
+            worker_last_seen_ms=utc_now_ms(),
+        )
+        try:
+            self.wallet_loop_body(wallet)
+        except Exception as exc:
+            with self.status_lock:
+                status = self.wallet_status[wallet]
+                status["status"] = "THREAD_ERROR"
+                status["fatal_error_count"] += 1
+                status["last_fatal_error"] = str(exc)
+                status["last_fatal_error_repr"] = repr(exc)
+                status["worker_thread_alive"] = False
+            write_ws_health(self)
+            return
+        finally:
+            with self.status_lock:
+                status = self.wallet_status[wallet]
+                status["worker_thread_alive"] = False
+                status["worker_last_seen_ms"] = utc_now_ms()
+                if not self.stop_event.is_set() and status.get("status") not in {"THREAD_ERROR", "ERROR"}:
+                    status["status"] = "THREAD_EXITED"
+            write_ws_health(self)
+
+    def wallet_loop_body(self, wallet: str) -> None:
         if websocket is None:
             self.update_status(wallet, status="ERROR", error_count=1, last_error="websocket-client unavailable")
             write_ws_health(self)
@@ -1155,7 +1293,15 @@ class DedicatedLiveWSManager:
         attempt = 0
         backoff = max(0.1, LIVE_WS_INITIAL_BACKOFF_SEC)
         while not self.stop_event.is_set():
-            self.update_status(wallet, status="CONNECTING", last_error="", last_reconnect_attempt_ms=utc_now_ms())
+            self.update_status(
+                wallet,
+                status="CONNECTING",
+                last_error="",
+                last_reconnect_attempt_ms=utc_now_ms(),
+                worker_thread_alive=True,
+                worker_thread_name=threading.current_thread().name,
+                worker_last_seen_ms=utc_now_ms(),
+            )
 
             def on_open(app: Any) -> None:
                 nonlocal backoff
@@ -1268,6 +1414,7 @@ class DedicatedLiveWSManager:
                     status["last_close_msg"] = "run_forever returned/connection closed without close frame"
             write_ws_health(self)
             while not self.stop_event.is_set() and utc_now_ms() < next_reconnect_ms:
+                self.update_status(wallet, worker_thread_alive=True, worker_last_seen_ms=utc_now_ms())
                 self.stop_event.wait(min(0.5, max(0.0, (next_reconnect_ms - utc_now_ms()) / 1000)))
             attempt += 1
             backoff = min(LIVE_WS_RECONNECT_BACKOFF_CAP_SEC, max(0.1, backoff * LIVE_WS_BACKOFF_MULTIPLIER))
@@ -1426,6 +1573,10 @@ def self_test() -> bool:
                 raise AssertionError(f"quiet open WS should not degrade overall: {health_snapshot}")
             if wallet_health.get("benign_event_count") != 2:
                 raise AssertionError(f"WS benign event count missing from health: {health_snapshot}")
+            if "ws_summary" not in health_snapshot:
+                raise AssertionError(f"WS summary missing from health: {health_snapshot}")
+            if "reconnects_per_min" not in wallet_health or "health_grade" not in wallet_health:
+                raise AssertionError(f"WS stability metrics missing from wallet health: {health_snapshot}")
             reconnect_wallet = "0xreconnect"
             manager.update_status(
                 reconnect_wallet,
@@ -1442,6 +1593,19 @@ def self_test() -> bool:
                 raise AssertionError(f"reconnect countdown missing: {reconnect_snapshot}")
             if reconnect_snapshot.get("overall") != "DEGRADED":
                 raise AssertionError(f"reconnecting wallet should degrade overall: {reconnect_snapshot}")
+            overdue_wallet = "0xoverdue"
+            manager.update_status(
+                overdue_wallet,
+                status="RECONNECTING",
+                next_reconnect_ms=utc_now_ms() - LIVE_WS_RECONNECT_GRACE_MS - 1000,
+                worker_thread_alive=False,
+            )
+            overdue_snapshot = build_ws_health_snapshot(manager)
+            overdue_health = overdue_snapshot.get("wallets", {}).get(overdue_wallet, {})
+            if overdue_health.get("effective_status") not in {"RECONNECT_OVERDUE", "RESTARTING", "THREAD_EXITED"}:
+                raise AssertionError(f"overdue reconnect status mismatch: {overdue_snapshot}")
+            if "ws_summary" not in overdue_snapshot:
+                raise AssertionError(f"WS summary missing from overdue snapshot: {overdue_snapshot}")
             write_ws_health(manager)
             health = load_json(LIVE_WS_HEALTH_FILE, {})
             if health.get("mode") != "DEDICATED_SOCKET_PER_WALLET":
