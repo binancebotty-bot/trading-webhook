@@ -56,6 +56,8 @@ UI_STATE_FILE = BASE_DIR / "ui_state.json"
 WALLET_GATE_FILE = BASE_DIR / "wallet_gate.json"
 LIVE_COPY_AUDIT_DIR = BASE_DIR / "hl_live_copy_audit"
 LIVE_COPY_CONFIG_FILE = LIVE_COPY_AUDIT_DIR / "live_config.json"
+LIVE_COPY_WS_HEALTH_FILE = LIVE_COPY_AUDIT_DIR / "live_ws_health.json"
+LIVE_COPY_ORDER_INTENTS_CSV = LIVE_COPY_AUDIT_DIR / "append_only" / "order_intents.csv"
 LIVE_CONFIG_DIR = BASE_DIR / "hl_live_copy_audit"
 LIVE_CONFIG_FILE = LIVE_CONFIG_DIR / "live_config.json"
 SNAP_DIR = DATA_DIR / "snapshots"
@@ -465,6 +467,56 @@ def _live_config_error(error: str, status_code: int = 400) -> JSONResponse:
 def _enforce_live_copy_cap(config: Dict[str, Any]) -> None:
     if _active_live_copy_wallet_count(config) > 10:
         raise ValueError("MAX_WALLETS_EXCEEDED")
+
+
+def _load_live_ws_health() -> Dict[str, Any]:
+    data = load_json(LIVE_COPY_WS_HEALTH_FILE, None)
+    if isinstance(data, dict):
+        return data
+    return {"enabled": False, "overall": "OFFLINE", "wallets": {}}
+
+
+def _live_order_intents_path() -> Path:
+    if LIVE_COPY_ORDER_INTENTS_CSV.exists():
+        return LIVE_COPY_ORDER_INTENTS_CSV
+    return LIVE_COPY_AUDIT_DIR / "order_intents.csv"
+
+
+def _live_audit_summary() -> Dict[str, Any]:
+    path = _live_order_intents_path()
+    reason_counts: Dict[str, int] = {}
+    status_counts: Dict[str, int] = {}
+    source_counts: Dict[str, int] = {}
+    last_rows: List[Dict[str, Any]] = []
+    rows = 0
+    if path.exists():
+        try:
+            with path.open("r", newline="", encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    rows += 1
+                    reason = str(row.get("reason", "") or "UNKNOWN")
+                    status = str(row.get("status", "") or "UNKNOWN")
+                    notes = str(row.get("notes", "") or "")
+                    source = str(row.get("source", "") or "")
+                    if not source and "source=" in notes:
+                        source = notes.split("source=", 1)[1].split(";", 1)[0].split()[0]
+                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                    status_counts[status] = status_counts.get(status, 0) + 1
+                    if source:
+                        source_counts[source] = source_counts.get(source, 0) + 1
+                    last_rows.append(row)
+                    if len(last_rows) > 20:
+                        last_rows.pop(0)
+        except Exception:
+            pass
+    return {
+        "ok": True,
+        "rows": rows,
+        "reason_counts": reason_counts,
+        "status_counts": status_counts,
+        "source_counts": source_counts,
+        "last_rows": last_rows,
+    }
 
 
 def load_live_config() -> Dict[str, Any]:
@@ -2837,6 +2889,89 @@ async def set_wallet_config(request: Request):
     return HTMLResponse('<meta http-equiv="refresh" content="0; url=/">')
 
 
+def render_live_copy_control_panel() -> str:
+    return """
+<div class="section live-copy-panel" id="liveCopyPanel">
+  <h3>Live Copy Control Centre</h3>
+  <div class="live-safety-strip">
+    <span><b>COPY STATE:</b> <em class="lc-pill lc-blue">DRY RUN</em></span>
+    <span><b>NEW ENTRIES:</b> <em class="lc-pill lc-green">ALLOWED</em></span>
+    <span><b>EXITS:</b> <em class="lc-pill lc-green">ALLOWED</em></span>
+    <span><b>REAL ORDERS:</b> <em class="lc-pill lc-red">DISABLED</em></span>
+    <span><b>AUDIT:</b> <em class="lc-pill lc-green">ON</em></span>
+    <span><b>Active LIVE/CLO:</b> <em id="lcWalletCount">0 / 10</em></span>
+    <span><b>WS:</b> <em id="lcWsOverall">OFFLINE</em></span>
+    <span><b>REST:</b> <em>fallback ready</em></span>
+    <button id="lcRefresh" type="button">Refresh</button>
+    <span id="lcStatus" class="small"></span>
+  </div>
+  <div class="panel live-copy-grid">
+    <form id="lcAddForm" class="live-copy-add">
+      <b>Add / Update Wallet</b>
+      <input name="wallet" placeholder="0x wallet address" autocomplete="off">
+      <select name="mode"><option>LIVE</option><option>CLO</option><option>OFF</option></select>
+      <select name="copy_mode"><option value="proportional">proportional</option><option value="fixed">fixed</option></select>
+      <input name="norm_base" value="100" title="norm base">
+      <input name="fixed_notional" value="10" title="fixed notional">
+      <input name="leader_equity_base" value="10000" title="leader equity base">
+      <input name="max_diff_pct" value="0.1" title="max diff pct">
+      <input name="daily_loss_limit" value="0" title="daily loss limit">
+      <button type="submit">Add / update</button>
+    </form>
+    <div class="small">Archive disables/removes config only. Permanent audit/history is preserved.</div>
+  </div>
+  <div class="panel">
+    <b>Live Wallets</b>
+    <div class="table-wrap live-copy-table-wrap">
+      <table class="live-copy-table">
+        <thead><tr><th>Wallet</th><th>Mode</th><th>Model</th><th>Norm</th><th>Fixed</th><th>Leader base</th><th>Max diff</th><th>Daily loss</th><th>WS status</th><th>Health</th><th>Processed</th><th>Reconnect/min</th><th title="Include this wallet in the live performance graph only. Does not affect copy execution.">GRAPH</th><th>Actions</th></tr></thead>
+        <tbody id="lcWalletRows"><tr><td colspan="14" class="small">Loading live-copy config...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="panel live-copy-audit">
+    <b>Execution / Audit Summary</b>
+    <div class="live-copy-counts"><span id="lcReasonCounts"></span><span id="lcStatusCounts"></span><span id="lcSourceCounts"></span></div>
+    <div class="table-wrap">
+      <table><thead><tr><th>Time</th><th>Wallet</th><th>Coin</th><th>Side</th><th>Reason</th><th>Status</th><th>Diff</th><th>Notes</th></tr></thead><tbody id="lcAuditRows"><tr><td colspan="8" class="small">Loading audit summary...</td></tr></tbody></table>
+    </div>
+  </div>
+</div>
+<style>
+.live-copy-panel{border-top:1px solid #30363d;margin-top:12px}.live-safety-strip{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px;margin-bottom:10px}.live-safety-strip span{background:#161b22;border:1px solid #21262d;border-radius:4px;padding:4px 7px}.lc-pill{font-style:normal;border-radius:3px;padding:1px 5px}.lc-blue{color:#58a6ff}.lc-green{color:#2ea043}.lc-red{color:#ff4d4f}.lc-amber{color:#d29922}.live-copy-grid{display:grid;gap:8px}.live-copy-add{display:grid;grid-template-columns:minmax(260px,2fr) repeat(7,minmax(82px,1fr)) minmax(110px,.8fr);gap:6px;align-items:end}.live-copy-add b{grid-column:1/-1}.live-copy-panel input,.live-copy-panel select{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px}.live-copy-panel button{background:#1f6feb;color:#fff;border:1px solid #388bfd;border-radius:4px;padding:5px 8px}.live-copy-panel button.lc-danger{background:#3b1118;border-color:#da3633}.live-copy-table-wrap{overflow:auto}.live-copy-table input{width:72px}.live-copy-table select{min-width:84px}.live-copy-actions{display:flex;gap:4px}.live-copy-counts{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}.live-copy-counts span{background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:5px 7px}.lc-health-GOOD{color:#2ea043}.lc-health-WATCH,.lc-mode-CLO{color:#d29922}.lc-health-DEGRADED{color:#ff4d4f}.lc-row-OFF{opacity:.58}.lc-mode-pill{border:1px solid #30363d;border-radius:3px;padding:1px 4px;margin-left:4px;font-size:10px}.lc-ok{color:#2ea043}.lc-bad{color:#ff4d4f}@media(max-width:1400px){.live-copy-add{grid-template-columns:repeat(3,minmax(140px,1fr))}}
+</style>
+<script>
+(function(){
+const root=document.getElementById('liveCopyPanel'); if(!root) return;
+const status=root.querySelector('#lcStatus');
+let lcConfig={wallets:{},archived_wallets:{}}, lcHealth={wallets:{}}, lcAudit={last_rows:[]};
+function h(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function msg(t, bad){if(status){status.textContent=t||'';status.className=bad?'small lc-bad':'small lc-ok';}}
+async function jget(url){const r=await fetch(url,{headers:{'x-requested-with':'fetch'}});return await r.json();}
+async function jpost(url,payload){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','x-requested-with':'fetch'},body:JSON.stringify(payload)});const j=await r.json();if(!r.ok||j.ok===false)throw new Error(j.error||r.statusText);return j;}
+function num(v,d){const n=parseFloat(v);return Number.isFinite(n)?n:d;}
+function countText(obj){return Object.entries(obj||{}).map(([k,v])=>h(k)+': '+h(v)).join(' | ')||'none';}
+function rowPayload(tr){return {wallet:tr.dataset.wallet,mode:tr.querySelector('[name=mode]').value,copy_mode:tr.querySelector('[name=copy_mode]').value,norm_base:num(tr.querySelector('[name=norm_base]').value,100),fixed_notional:num(tr.querySelector('[name=fixed_notional]').value,10),leader_equity_base:num(tr.querySelector('[name=leader_equity_base]').value,10000),max_diff_pct:num(tr.querySelector('[name=max_diff_pct]').value,0.1),daily_loss_limit:num(tr.querySelector('[name=daily_loss_limit]').value,0)};}
+function render(){
+ const wallets=lcConfig.wallets||{}, healthWallets=(lcHealth.wallets||{}), active=Object.values(wallets).filter(w=>w&&w.enabled!==false&&['LIVE','CLO'].includes(String(w.mode||'').toUpperCase())).length;
+ root.querySelector('#lcWalletCount').textContent=active+' / 10'; const wsOverall=lcHealth.overall||'OFFLINE'; root.querySelector('#lcWsOverall').textContent=(['CLOSED','DEGRADED','DISABLED','OFFLINE'].includes(String(wsOverall).toUpperCase()))?'OFFLINE / service not running':wsOverall;
+ const rows=Object.entries(wallets).sort().map(([wallet,cfg])=>{const wh=healthWallets[wallet]||{};const grade=wh.health_grade||'-';const mode=String(cfg.mode||'OFF').toUpperCase();return `<tr class="lc-row-${h(mode)}" data-wallet="${h(wallet)}"><td><code>${h(wallet.slice(0,10)+'...'+wallet.slice(-6))}</code><span class="lc-mode-pill lc-mode-${h(mode)}">${h(mode)}</span></td><td><select name="mode"><option ${mode==='LIVE'?'selected':''}>LIVE</option><option ${mode==='CLO'?'selected':''}>CLO</option><option ${mode==='OFF'?'selected':''}>OFF</option></select></td><td><select name="copy_mode"><option value="proportional" ${cfg.copy_mode!=='fixed'?'selected':''}>proportional</option><option value="fixed" ${cfg.copy_mode==='fixed'?'selected':''}>fixed</option></select></td><td><input name="norm_base" value="${h(cfg.norm_base??100)}"></td><td><input name="fixed_notional" value="${h(cfg.fixed_notional??10)}"></td><td><input name="leader_equity_base" value="${h(cfg.leader_equity_base??10000)}"></td><td><input name="max_diff_pct" value="${h(cfg.max_diff_pct??0.1)}"></td><td><input name="daily_loss_limit" value="${h(cfg.daily_loss_limit??0)}"></td><td>${h(wh.effective_status||wh.status||'-')}</td><td class="lc-health-${h(grade)}">${h(grade)}</td><td>${h(wh.processed_count??0)}</td><td>${Number(wh.reconnects_per_min||0).toFixed(2)}</td><td><label title="Include this wallet in the live performance graph only. Does not affect copy execution."><input type="checkbox" checked> SHOW</label></td><td><div class="live-copy-actions"><button data-act="save" type="button">Save</button><button data-act="clo" type="button">CLO</button><button data-act="off" type="button">OFF</button><button data-act="archive" class="lc-danger" type="button">Archive</button></div></td></tr>`;}).join('');
+ root.querySelector('#lcWalletRows').innerHTML=rows||'<tr><td colspan="14" class="small">No live-copy wallets configured.</td></tr>';
+ root.querySelector('#lcReasonCounts').textContent='Reasons: '+countText(lcAudit.reason_counts);
+ root.querySelector('#lcStatusCounts').textContent='Statuses: '+countText(lcAudit.status_counts);
+ root.querySelector('#lcSourceCounts').textContent='Sources: '+countText(lcAudit.source_counts);
+ root.querySelector('#lcAuditRows').innerHTML=(lcAudit.last_rows||[]).slice(-10).reverse().map(r=>`<tr><td>${h(r.created_at||r.timestamp_iso||'')}</td><td>${h(r.leader_wallet||r.wallet||'')}</td><td>${h(r.coin||'')}</td><td>${h(r.side||'')}</td><td>${h(r.reason||'')}</td><td>${h(r.status||'')}</td><td>${h(r.diff_pct||'')}</td><td>${h(r.notes||'')}</td></tr>`).join('')||'<tr><td colspan="8" class="small">No audit rows found.</td></tr>';
+}
+async function refresh(quiet){try{if(!quiet)msg('Loading...');const [cfg,health,audit]=await Promise.all([jget('/api/live-config'),jget('/api/live-ws-health'),jget('/api/live-audit-summary')]);lcConfig=cfg.config||{wallets:{}};lcHealth=health.health||{};lcAudit=audit||{};render();if(!quiet)msg('Loaded');}catch(e){msg(e.message||String(e),true);}}
+root.querySelector('#lcRefresh').addEventListener('click',refresh);
+root.querySelector('#lcAddForm').addEventListener('submit',async e=>{e.preventDefault();const fd=new FormData(e.currentTarget);const payload=Object.fromEntries(fd.entries());try{msg('Updating...');await jpost('/api/live-config/add-wallet',payload);e.currentTarget.reset();await refresh(true);msg('Updated: '+String(payload.wallet||'wallet').slice(0,10)+' -> SAVED');}catch(err){msg(err.message,true);}});
+root.querySelector('#lcWalletRows').addEventListener('click',async e=>{const btn=e.target.closest('button[data-act]');if(!btn)return;const tr=btn.closest('tr');const wallet=tr.dataset.wallet;const short=wallet.slice(0,10)+'...'+wallet.slice(-6);try{msg('Updating...');if(btn.dataset.act==='save'){await jpost('/api/live-config/set-wallet',rowPayload(tr));await refresh(true);msg('Updated: '+short+' -> SAVED');}if(btn.dataset.act==='clo'){await jpost('/api/live-config/set-mode',{wallet,mode:'CLO'});await refresh(true);msg('Updated: '+short+' -> CLO');}if(btn.dataset.act==='off'){await jpost('/api/live-config/set-mode',{wallet,mode:'OFF'});await refresh(true);msg('Updated: '+short+' -> OFF');}if(btn.dataset.act==='archive'){await jpost('/api/live-config/remove-wallet',{wallet,archive:true});await refresh(true);msg('Updated: '+short+' -> ARCHIVED');}}catch(err){msg(err.message,true);}});
+refresh();
+})();
+</script>
+"""
+
+
 @app.get("/wallet/{wallet}", response_class=HTMLResponse)
 def wallet_detail(wallet: str) -> str:
     wallet = wallet.lower()
@@ -2890,7 +3025,8 @@ def wallet_detail(wallet: str) -> str:
         f"<div class='metric-line'><span>ALIGNMENT</span><b>{esc(row.get('position_alignment_ok', True))}</b></div>",
     ])
     page_html = render_home({**state, "wallet_rows": [row], "portfolio_history": row.get("curve", [])})
-    return page_html + f"""
+    live_copy_panel = render_live_copy_control_panel() if wallet == USER_WALLET else ""
+    detail_html = f"""
     <div class='section'>
       <h3>{esc(wallet)}</h3>
       <div class='panel'><div class='cards' style='padding:0;grid-template-columns:repeat(5,minmax(130px,1fr))'>{summary}</div></div>
@@ -2898,6 +3034,9 @@ def wallet_detail(wallet: str) -> str:
       <h3>Expected copy fills</h3>
       <div class='table-wrap'><table><tr><th>TIME</th><th>COIN</th><th>SIDE</th><th>ACTION</th><th>LEADER PX</th><th>COPY PX</th><th>PRICE DIFF</th><th>LEAD POS AFTER</th><th>COPY POS AFTER</th><th>ALIGNMENT</th></tr>{fill_rows}</table></div>
     </div>"""
+    if "</body></html>" in page_html:
+        return page_html.replace("</body></html>", live_copy_panel + detail_html + "</body></html>")
+    return page_html + live_copy_panel + detail_html
 
 
 @app.get("/api/ui-state")
@@ -3016,6 +3155,16 @@ def sort_column(column: str, request: Request, direction: str = ""):
 @app.get("/api/live-config")
 def get_live_config():
     return JSONResponse(_live_copy_config_response(_load_live_copy_config()))
+
+
+@app.get("/api/live-ws-health")
+def get_live_ws_health():
+    return JSONResponse({"ok": True, "health": _load_live_ws_health()})
+
+
+@app.get("/api/live-audit-summary")
+def get_live_audit_summary():
+    return JSONResponse(_live_audit_summary())
 
 
 @app.post("/api/live-config/add-wallet")
