@@ -90,6 +90,7 @@ LIVE_WS_THREAD_WATCHDOG_SEC = float(os.getenv("HL_LIVE_WS_THREAD_WATCHDOG_SEC", 
 LIVE_WS_PROACTIVE_RECYCLE_SEC = float(os.getenv("HL_LIVE_WS_PROACTIVE_RECYCLE_SEC", "50"))
 LIVE_WS_PROACTIVE_RECYCLE_ENABLED = os.getenv("HL_LIVE_WS_PROACTIVE_RECYCLE_ENABLED", "1") == "1"
 LIVE_WS_SNAPSHOT_RECOVERY_GRACE_MS = int(os.getenv("HL_LIVE_WS_SNAPSHOT_RECOVERY_GRACE_MS", "120000"))
+LIVE_QUOTE_CACHE_TTL_MS = int(os.getenv("HL_LIVE_QUOTE_CACHE_TTL_MS", "1000"))
 LIVE_JSON_WRITE_LOCK = threading.RLock()
 
 ORDER_INTENT_FIELDS = [
@@ -619,7 +620,7 @@ def adverse_diff_pct(fill: LeaderFill, executable_price: float) -> float:
     return max(0.0, (fill.price - executable_price) / fill.price * 100.0)
 
 
-def dry_run_intent_audit_decision(cfg: LiveWalletConfig, fill: LeaderFill, intent_type: str, reducing: bool, replay_history: bool = False) -> Dict[str, Any]:
+def dry_run_intent_audit_decision(cfg: LiveWalletConfig, fill: LeaderFill, intent_type: str, reducing: bool, replay_history: bool = False, quote_getter: Optional[Any] = None) -> Dict[str, Any]:
     source = str(getattr(fill, "source", "") or "").lower()
     target_price = fill.price
     executable_price: Any = fill.price
@@ -654,6 +655,15 @@ def dry_run_intent_audit_decision(cfg: LiveWalletConfig, fill: LeaderFill, inten
         extra_note = "; target limit price=leader fill price"
     elif source == "live_poll":
         executable_price = executable_price_from_fill_payload(fill)
+        quote_source = "FILL_PAYLOAD_QUOTE"
+        quote_error = ""
+        if executable_price <= 0 and quote_getter is not None:
+            quote = quote_getter(fill.coin, fill.side)
+            if isinstance(quote, dict) and quote.get("ok"):
+                executable_price = fnum(quote.get("executable_price"), 0.0)
+                quote_source = str(quote.get("source") or "hyperliquid_l2book")
+            else:
+                quote_error = str((quote or {}).get("error") or "EXECUTABLE_QUOTE_UNAVAILABLE") if isinstance(quote, dict) else "EXECUTABLE_QUOTE_UNAVAILABLE"
         if executable_price > 0:
             target_price = executable_price
             diff_pct = adverse_diff_pct(fill, executable_price)
@@ -665,7 +675,7 @@ def dry_run_intent_audit_decision(cfg: LiveWalletConfig, fill: LeaderFill, inten
                 policy = "LATE_COPY_WITHIN_DIFF_TOLERANCE"
                 suggested_order_type = "IOC_LIMIT"
                 suggested_limit_price = executable_price
-                market_data_source = "FILL_PAYLOAD_QUOTE"
+                market_data_source = quote_source
                 extra_note = f"; executable_price={executable_price:.8g}; adverse_diff_pct={diff_pct:.6g}"
             else:
                 status = "DO_NOT_MARKET_COPY"
@@ -677,7 +687,7 @@ def dry_run_intent_audit_decision(cfg: LiveWalletConfig, fill: LeaderFill, inten
                 suggested_order_type = "LIMIT_AT_ORIGINAL_COPY_PRICE"
                 suggested_limit_price = fill.price
                 manual_reconcile_required = True
-                market_data_source = "FILL_PAYLOAD_QUOTE"
+                market_data_source = quote_source
                 extra_note = f"; executable_price={executable_price:.8g}; adverse_diff_pct={diff_pct:.6g}; suggested_limit_price={fill.price:.8g}; manual reconcile"
         else:
             status = "MANUAL_REVIEW"
@@ -691,7 +701,7 @@ def dry_run_intent_audit_decision(cfg: LiveWalletConfig, fill: LeaderFill, inten
             suggested_limit_price = fill.price
             manual_reconcile_required = True
             market_data_source = ""
-            market_data_error = "EXECUTABLE_QUOTE_UNAVAILABLE"
+            market_data_error = quote_error or "EXECUTABLE_QUOTE_UNAVAILABLE"
             extra_note = "; executable bid/ask unavailable; suggested_limit_price=original copy price; manual reconcile"
     return {
         "reason": reason,
@@ -829,6 +839,56 @@ def fetch_live_fills_since(wallet: str, start_ms: int, end_ms: int) -> Optional[
     return all_rows
 
 
+def parse_l2_level_price(level: Any) -> float:
+    if isinstance(level, dict):
+        return fnum(raw_get(level, "px", "price", "p"), 0.0)
+    if isinstance(level, (list, tuple)) and level:
+        return fnum(level[0], 0.0)
+    return 0.0
+
+
+def fetch_public_executable_quote(coin: str, side: str) -> Dict[str, Any]:
+    coin = str(coin or "").upper().strip()
+    side = str(side or "").upper().strip()
+    quote = {
+        "ok": False,
+        "coin": coin,
+        "side": side,
+        "bid": 0.0,
+        "ask": 0.0,
+        "executable_price": 0.0,
+        "source": "hyperliquid_l2book",
+        "error": "",
+    }
+    if not coin:
+        quote["error"] = "missing coin"
+        return quote
+    if requests is None:
+        quote["error"] = "requests module unavailable"
+        return quote
+    try:
+        response = requests.post("https://api.hyperliquid.xyz/info", json={"type": "l2Book", "coin": coin}, timeout=5)
+        data = response.json()
+        levels = data.get("levels") if isinstance(data, dict) else None
+        if not isinstance(levels, list) or len(levels) < 2:
+            quote["error"] = f"invalid l2Book response: {str(data)[:200]}"
+            return quote
+        bids = levels[0] if isinstance(levels[0], list) else []
+        asks = levels[1] if isinstance(levels[1], list) else []
+        bid = parse_l2_level_price(bids[0]) if bids else 0.0
+        ask = parse_l2_level_price(asks[0]) if asks else 0.0
+        executable = ask if side == "BUY" else bid if side == "SELL" else 0.0
+        quote.update({"bid": bid, "ask": ask, "executable_price": executable})
+        if bid <= 0 or ask <= 0 or executable <= 0:
+            quote["error"] = f"missing executable quote bid={bid} ask={ask} side={side}"
+            return quote
+        quote["ok"] = True
+        return quote
+    except Exception as exc:
+        quote["error"] = f"{type(exc).__name__}: {exc}"
+        return quote
+
+
 class DryRunLiveCopyService:
     def __init__(self) -> None:
         ensure_dirs()
@@ -856,6 +916,7 @@ class DryRunLiveCopyService:
                 self.processed_id_order.append(fill_id)
                 seen_processed.add(fill_id)
         self.processed_ids = set(self.processed_id_order)
+        self.quote_cache: Dict[str, Dict[str, Any]] = {}
 
         for path, fields in [
             (ORDER_INTENTS_CSV, ORDER_INTENT_FIELDS),
@@ -868,6 +929,18 @@ class DryRunLiveCopyService:
     def bump(self, key: str, amount: int = 1) -> None:
         counters = self.state.setdefault("counters", {})
         counters[key] = int(counters.get(key, 0)) + amount
+
+    def get_public_quote(self, coin: str, side: str) -> Dict[str, Any]:
+        coin_key = str(coin or "").upper().strip()
+        now = utc_now_ms()
+        cached = self.quote_cache.get(coin_key)
+        if isinstance(cached, dict) and now - inum(cached.get("ts_ms")) <= LIVE_QUOTE_CACHE_TTL_MS:
+            quote = cached.get("quote")
+            if isinstance(quote, dict):
+                return dict(quote)
+        quote = fetch_public_executable_quote(coin_key, side)
+        self.quote_cache[coin_key] = {"ts_ms": now, "quote": dict(quote)}
+        return quote
 
     def load_config(self) -> Dict[str, LiveWalletConfig]:
         config_file = APP_CONFIG_FILE
@@ -1120,7 +1193,7 @@ class DryRunLiveCopyService:
 
         copy_size = copy_notional / fill.price if fill.price > 0 else 0.0
         intent_id = f"DRYRUN-{utc_now_ms()}-{len(self.processed_ids)+1}"
-        decision = dry_run_intent_audit_decision(cfg, fill, intent_type, reducing, replay_history=replay_history)
+        decision = dry_run_intent_audit_decision(cfg, fill, intent_type, reducing, replay_history=replay_history, quote_getter=self.get_public_quote)
         policy = decision.get("policy") or policy
         audit_notes = audit_notes_for_fill(fill, replay_history=replay_history) + str(decision.get("extra_note") or "")
         self.append_order_intent(
@@ -1961,7 +2034,7 @@ def last_csv_row(path: Path) -> Dict[str, Any]:
 
 
 def self_test() -> bool:
-    global LIVE_POLL_ENABLED, fetch_live_fills_since
+    global LIVE_POLL_ENABLED, fetch_live_fills_since, fetch_public_executable_quote
 
     old_paths = (
         AUDIT_DIR, RAW_LEADER_FILLS_CSV, APP_CONFIG_FILE, APPEND_ONLY_DIR,
@@ -1970,6 +2043,7 @@ def self_test() -> bool:
     )
     old_poll_enabled = LIVE_POLL_ENABLED
     old_fetch_live_fills_since = fetch_live_fills_since
+    old_fetch_public_executable_quote = fetch_public_executable_quote
     wallet = "0xabc0000000000000000000000000000000000001"
     rows = [
         {"fill_id": "hist-1", "wallet": wallet, "coin": "BTC", "side": "BUY", "price": 100, "size": 1, "timestamp_ms": 1000, "raw_json": "{}"},
@@ -2032,6 +2106,44 @@ def self_test() -> bool:
                 return out
 
             fetch_live_fills_since = fake_fetch
+            cfg_for_quote = LiveWalletConfig(wallet=wallet, mode="LIVE", enabled=True, copy_mode="fixed", fixed_notional=20.0, max_diff_pct=0.5)
+            poll_buy = LeaderFill("quote-buy", wallet, "BTC", "BUY", 100.0, 1.0, 1.0, 3000, utc_now_iso(), "live_poll", "REST", {})
+            poll_sell = LeaderFill("quote-sell", wallet, "BTC", "SELL", 100.0, 1.0, -1.0, 3001, utc_now_iso(), "live_poll", "REST", {})
+
+            def quote_within(coin: str, side: str) -> Dict[str, Any]:
+                return {"ok": True, "coin": coin, "side": side, "bid": 99.8, "ask": 100.2, "executable_price": 100.2 if side == "BUY" else 99.8, "source": "hyperliquid_l2book", "error": ""}
+
+            def quote_too_adverse(coin: str, side: str) -> Dict[str, Any]:
+                return {"ok": True, "coin": coin, "side": side, "bid": 98.0, "ask": 102.0, "executable_price": 102.0 if side == "BUY" else 98.0, "source": "hyperliquid_l2book", "error": ""}
+
+            def quote_unavailable(_coin: str, _side: str) -> Dict[str, Any]:
+                return {"ok": False, "coin": _coin, "side": _side, "bid": 0.0, "ask": 0.0, "executable_price": 0.0, "source": "hyperliquid_l2book", "error": "test unavailable"}
+
+            buy_within_decision = dry_run_intent_audit_decision(cfg_for_quote, poll_buy, "ENTRY", False, quote_getter=quote_within)
+            if buy_within_decision.get("execution_decision") != "WOULD_LATE_COPY" or buy_within_decision.get("decision_reason") != "RECOVERED_WITHIN_DIFF_TOLERANCE":
+                raise AssertionError(f"BUY within quote decision mismatch: {buy_within_decision}")
+            buy_adverse_decision = dry_run_intent_audit_decision(cfg_for_quote, poll_buy, "ENTRY", False, quote_getter=quote_too_adverse)
+            if buy_adverse_decision.get("execution_decision") != "DO_NOT_MARKET_COPY" or buy_adverse_decision.get("decision_reason") != "MISSED_FILL_DIFF_TOO_LARGE":
+                raise AssertionError(f"BUY adverse quote decision mismatch: {buy_adverse_decision}")
+            sell_within_decision = dry_run_intent_audit_decision(cfg_for_quote, poll_sell, "ENTRY", False, quote_getter=quote_within)
+            if sell_within_decision.get("execution_decision") != "WOULD_LATE_COPY":
+                raise AssertionError(f"SELL within quote decision mismatch: {sell_within_decision}")
+            unavailable_decision = dry_run_intent_audit_decision(cfg_for_quote, poll_buy, "ENTRY", False, quote_getter=quote_unavailable)
+            if unavailable_decision.get("execution_decision") != "MANUAL_REVIEW" or unavailable_decision.get("market_data_error") != "test unavailable":
+                raise AssertionError(f"unavailable quote decision mismatch: {unavailable_decision}")
+
+            quote_call_count = {"n": 0}
+
+            def fake_public_quote(coin: str, side: str) -> Dict[str, Any]:
+                quote_call_count["n"] += 1
+                return quote_within(coin, side)
+
+            fetch_public_executable_quote = fake_public_quote
+            quote_service = DryRunLiveCopyService()
+            q1 = quote_service.get_public_quote("BTC", "BUY")
+            q2 = quote_service.get_public_quote("BTC", "BUY")
+            if not q1.get("ok") or not q2.get("ok") or quote_call_count["n"] != 1:
+                raise AssertionError(f"quote cache did not reuse cached quote: calls={quote_call_count} q1={q1} q2={q2}")
 
             first = DryRunLiveCopyService().run_once()
             if not first.get("baseline_created") or first.get("processed_this_run") != 0 or first.get("selected_fill_count") != 0:
@@ -2237,6 +2349,7 @@ def self_test() -> bool:
     finally:
         LIVE_POLL_ENABLED = old_poll_enabled
         fetch_live_fills_since = old_fetch_live_fills_since
+        fetch_public_executable_quote = old_fetch_public_executable_quote
         configure_paths(old_paths[0], old_paths[1])
 
 
