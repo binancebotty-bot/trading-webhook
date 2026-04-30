@@ -1169,19 +1169,50 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     copy_equity = sa["copy_real"] + sa["copy_unreal"] + alloc
     lead_real  = sa["lead_real"];  lead_unreal  = sa["lead_unreal"]
     copy_real  = sa["copy_real"];  copy_unreal  = sa["copy_unreal"]
-    lead_peak = max(alloc, lead_equity)
-    copy_peak = max(alloc, copy_equity)
     open_notional_usd = sa["current_position_usd"]
+    # Current DD: sum of live wallet block DD (not curve tail or peak-equity derivation).
+    lead_live_dd = sum(fnum((r.get("lead") or {}).get("drawdown")) for r in portfolio_wallets)
+    copy_live_dd = sum(fnum((r.get("copy") or {}).get("drawdown")) for r in portfolio_wallets)
     # Rebuild combined graph by timestamp using latest wallet lead/copy equity at each event.
     portfolio_history = build_portfolio_history(rows, ui)
-    if portfolio_history:
-        lead_peak = max(fnum(p.get("lead", {}).get("equity")) for p in portfolio_history)
-        copy_peak = max(fnum(p.get("copy", {}).get("equity")) for p in portfolio_history)
-    lead_live_dd = max(0.0, lead_peak - lead_equity)
-    copy_live_dd = max(0.0, copy_peak - copy_equity)
-    max_open_notional_usd = max([fnum(p.get("open_notional_usd")) for p in portfolio_history] or [open_notional_usd])
-    lead_live_dd = fnum((portfolio_history[-1].get("lead") or {}).get("drawdown"), lead_live_dd) if portfolio_history else lead_live_dd
-    copy_live_dd = fnum((portfolio_history[-1].get("copy") or {}).get("drawdown"), copy_live_dd) if portfolio_history else copy_live_dd
+    # Append live snapshot as tail so graph endpoint reconciles with header current DD.
+    _live_snap = {
+        "ts": model_asof,
+        "alloc": round(alloc, 8),
+        "equity": round(copy_equity, 8),
+        "realized": round(copy_real, 8),
+        "unrealized": round(copy_unreal, 8),
+        "peak_equity": round(copy_equity + copy_live_dd, 8),
+        "drawdown_usd": round(copy_live_dd, 8),
+        "drawdown_pct": round((copy_live_dd / alloc * 100.0) if alloc else 0.0, 8),
+        "open_notional_usd": round(open_notional_usd, 8),
+        "lead": {
+            "alloc": round(alloc, 8), "equity": round(lead_equity, 8),
+            "realized": round(lead_real, 8), "unrealized": round(lead_unreal, 8),
+            "drawdown": round(lead_live_dd, 8),
+            "drawdown_usd": round(lead_live_dd, 8),
+            "drawdown_pct": round((lead_live_dd / alloc * 100.0) if alloc else 0.0, 8),
+            "peak_equity": round(lead_equity + lead_live_dd, 8),
+        },
+        "copy": {
+            "alloc": round(alloc, 8), "equity": round(copy_equity, 8),
+            "realized": round(copy_real, 8), "unrealized": round(copy_unreal, 8),
+            "drawdown": round(copy_live_dd, 8),
+            "drawdown_usd": round(copy_live_dd, 8),
+            "drawdown_pct": round((copy_live_dd / alloc * 100.0) if alloc else 0.0, 8),
+            "peak_equity": round(copy_equity + copy_live_dd, 8),
+        },
+        "delta": {
+            "equity": round(copy_equity - lead_equity, 8),
+            "pct": round(((copy_equity - lead_equity) / alloc * 100.0) if alloc else 0.0, 8),
+        },
+    }
+    if portfolio_history and portfolio_history[-1].get("ts") == model_asof:
+        portfolio_history[-1] = _live_snap
+    else:
+        portfolio_history = portfolio_history + [_live_snap]
+    # Max DD and max exposure: max timestamped sum across full history including live tail.
+    max_open_notional_usd = max((fnum(p.get("open_notional_usd")) for p in portfolio_history), default=open_notional_usd)
     lead_maxdd = max((fnum((p.get("lead") or {}).get("drawdown")) for p in portfolio_history), default=lead_live_dd)
     copy_maxdd = max((fnum((p.get("copy") or {}).get("drawdown")) for p in portfolio_history), default=copy_live_dd)
     portfolio = {
@@ -2049,24 +2080,26 @@ def validate_render_contract(state: Dict[str, Any]) -> List[str]:
             errors.append(f"portfolio copy.realized {fnum(port_copy.get('realized')):.4f} != sum_selected {sel_cr2:.4f}")
         if abs(fnum(port.get("open_notional_usd")) - sel_notional) > 0.01:
             errors.append(f"portfolio open_notional_usd {fnum(port.get('open_notional_usd')):.4f} != sum_selected {sel_notional:.4f}")
-        hist = state.get("portfolio_history") or []
-        if hist:
-            hist_max = max((fnum((p.get("copy") or {}).get("drawdown", 0)) for p in hist), default=0.0)
-            if fnum(port_copy.get("max_drawdown")) < hist_max - 0.01:
-                errors.append(f"portfolio copy maxDD {fnum(port_copy.get('max_drawdown')):.4f} < history max {hist_max:.4f}")
+        # Live current stats: portfolio current DD must equal sum of live wallet block DD.
+        live_lead_dd = sum(fnum((r.get("lead") or {}).get("drawdown")) for r in selected_rows)
+        live_copy_dd = sum(fnum((r.get("copy") or {}).get("drawdown")) for r in selected_rows)
+        if abs(fnum(port_lead.get("drawdown")) - live_lead_dd) > 0.01:
+            errors.append(f"portfolio lead DD {fnum(port_lead.get('drawdown')):.4f} != sum live wallet blocks {live_lead_dd:.4f}")
+        if abs(fnum(port_copy.get("drawdown")) - live_copy_dd) > 0.01:
+            errors.append(f"portfolio copy DD {fnum(port_copy.get('drawdown')):.4f} != sum live wallet blocks {live_copy_dd:.4f}")
+        # Historical max stats: portfolio maxDD and max exposure equal max timestamped sum (live snapshot is tail).
         curve_stats = selected_combined_curve_stats(selected_rows)
         if curve_stats["has_points"]:
-            if abs(fnum(port_lead.get("drawdown")) - curve_stats["current_lead_dd"]) > 0.01:
-                errors.append(f"portfolio lead DD {fnum(port_lead.get('drawdown')):.4f} != summed selected wallet DD series {curve_stats['current_lead_dd']:.4f}")
-            if abs(fnum(port_copy.get("drawdown")) - curve_stats["current_copy_dd"]) > 0.01:
-                errors.append(f"portfolio copy DD {fnum(port_copy.get('drawdown')):.4f} != summed selected wallet DD series {curve_stats['current_copy_dd']:.4f}")
-            if abs(fnum(port_lead.get("max_drawdown")) - curve_stats["max_lead_dd"]) > 0.01:
-                errors.append(f"portfolio lead MaxDD {fnum(port_lead.get('max_drawdown')):.4f} != max timestamped summed DD {curve_stats['max_lead_dd']:.4f}")
-            if abs(fnum(port_copy.get("max_drawdown")) - curve_stats["max_copy_dd"]) > 0.01:
-                errors.append(f"portfolio copy MaxDD {fnum(port_copy.get('max_drawdown')):.4f} != max timestamped summed DD {curve_stats['max_copy_dd']:.4f}")
-            if abs(fnum(port.get("max_open_notional_usd")) - curve_stats["max_exposure"]) > 0.01:
-                errors.append(f"portfolio max exposure {fnum(port.get('max_open_notional_usd')):.4f} != max timestamped summed exposure {curve_stats['max_exposure']:.4f}")
-            expected_req_lev = curve_stats["max_exposure"] / norm_base if norm_base else 0.0
+            expected_max_lead_dd = max(curve_stats["max_lead_dd"], live_lead_dd)
+            expected_max_copy_dd = max(curve_stats["max_copy_dd"], live_copy_dd)
+            expected_max_exposure = max(curve_stats["max_exposure"], sel_notional)
+            if abs(fnum(port_lead.get("max_drawdown")) - expected_max_lead_dd) > 0.01:
+                errors.append(f"portfolio lead MaxDD {fnum(port_lead.get('max_drawdown')):.4f} != max timestamped summed DD {expected_max_lead_dd:.4f}")
+            if abs(fnum(port_copy.get("max_drawdown")) - expected_max_copy_dd) > 0.01:
+                errors.append(f"portfolio copy MaxDD {fnum(port_copy.get('max_drawdown')):.4f} != max timestamped summed DD {expected_max_copy_dd:.4f}")
+            if abs(fnum(port.get("max_open_notional_usd")) - expected_max_exposure) > 0.01:
+                errors.append(f"portfolio max exposure {fnum(port.get('max_open_notional_usd')):.4f} != max timestamped summed exposure {expected_max_exposure:.4f}")
+            expected_req_lev = expected_max_exposure / norm_base if norm_base else 0.0
             if abs(fnum(port.get("max_required_leverage")) - expected_req_lev) > 0.001:
                 errors.append(f"portfolio req_lev {fnum(port.get('max_required_leverage')):.4f} != max summed exposure/norm_base {expected_req_lev:.4f}")
 
@@ -2509,9 +2542,12 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
     avg_trade_pct_cell = dash_td(css_class(r.get('avg_trade_pct')), "avg_trade_pct") if no_closed_trades else core_td(r, 'avg_trade_pct' in r, r.get('avg_trade_pct'), pct(r.get('avg_trade_pct'), 3), css_class(r.get('avg_trade_pct')), "avg_trade_pct")
     win_rate_cell = dash_td(css_class(r.get('win_rate')), "win_rate") if no_closed_trades else core_td(r, 'win_rate' in r, r.get('win_rate'), pct(r.get('win_rate')), css_class(r.get('win_rate')), "win_rate")
     inc_cell = ""
-    if not r.get("is_user_wallet"):
+    cfg_cell = ""
+    if r.get("is_user_wallet"):
+        cfg_cell = '<span class="small muted">aggregate · base from global</span>'
+    else:
         inc_cell = f"""<form action="/api/wallet-include" method="post" class="inc-form" title="Include/exclude this wallet from combined graph and header cards only"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><input type="checkbox" name="included" value="1" {'checked' if included else ''} onchange="this.form.requestSubmit()"><span class="small">INC</span></form>"""
-    cfg_cell = f"""<form action="/api/wallet-config" method="post" class="wallet-cfg"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><select name="copy_mode"><option value="" {'selected' if not r.get('wallet_config') else ''}>global</option><option value="proportional" {'selected' if eff_mode == 'proportional' and r.get('wallet_config') else ''}>prop</option><option value="fixed" {'selected' if eff_mode == 'fixed' and r.get('wallet_config') else ''}>fixed</option></select><input name="norm_base" value="{eff_base:g}" size="5" title="wallet normalisation base"><input name="fixed_notional" value="{eff_fixed:g}" size="4" title="wallet fixed $"><button title="save wallet override">Set</button></form>"""
+        cfg_cell = f"""<form action="/api/wallet-config" method="post" class="wallet-cfg"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><select name="copy_mode"><option value="" {'selected' if not r.get('wallet_config') else ''}>global</option><option value="proportional" {'selected' if eff_mode == 'proportional' and r.get('wallet_config') else ''}>prop</option><option value="fixed" {'selected' if eff_mode == 'fixed' and r.get('wallet_config') else ''}>fixed</option></select><input name="norm_base" value="{eff_base:g}" size="5" title="wallet normalisation base"><input name="fixed_notional" value="{eff_fixed:g}" size="4" title="wallet fixed $"><button title="save wallet override">Set</button></form>"""
     row_cls = 'user' if r.get('is_user_wallet') else ''
     if not r.get('is_user_wallet') and not included: row_cls += ' excluded-row'
     wallet_sort = html.escape(wallet)
@@ -2597,8 +2633,8 @@ document.addEventListener('input',e=>{{if(e.target.matches('input,select,textare
 document.addEventListener('change',e=>{{if(e.target.matches('input,select,textarea'))markBusy(15000);}});
 document.addEventListener('submit',async e=>{{
   const form=e.target;if(!form.matches('.ajax-form,.wallet-cfg,.inc-form'))return;
-  e.preventDefault();markBusy(5000);saveViewState();form.classList.add('saving');
-  try{{const r=await fetch(form.action,{{method:'POST',body:new FormData(form),headers:{{'X-Requested-With':'fetch'}}}});if(!r.ok)throw new Error('HTTP '+r.status);flash('saved','saved-flash');}}
+  e.preventDefault();markBusy(5000);form.classList.add('saving');
+  try{{const r=await fetch(form.action,{{method:'POST',body:new FormData(form),headers:{{'X-Requested-With':'fetch'}}}});if(!r.ok)throw new Error('HTTP '+r.status);saveViewState();setTimeout(()=>location.reload(),150);}}
   catch(err){{console.warn('save failed',err);flash('save failed','neg');}}
   finally{{form.classList.remove('saving');restoreViewState();}}
 }});

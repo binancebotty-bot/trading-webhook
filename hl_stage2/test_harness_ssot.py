@@ -1320,6 +1320,225 @@ def test_validator_detects_yellow_cell_tampers() -> None:
           any("pnl_per_hour" in e for e in appmod.validate_render_contract(s4)))
 
 
+def test_live_dd_differs_from_curve_tail_uses_live_blocks() -> None:
+    """
+    Proves current portfolio DD uses live wallet block sums (not curve tail),
+    and max DD uses the max timestamped history sum.
+
+    Setup (mark price = fill price at each event, overwriting engine truth):
+      - BTC BUY at 100 (ts=1000): entry fee creates tiny DD ~0.05.
+      - BTC SELL at 70  (ts=2000): big realized loss → DD ~30.1 (peak stays at alloc).
+      - ETH BUY at 10   (ts=3000): position opens, unrealized=0.
+      - ETH SELL at 200 (ts=4000): massive gain → equity > old peak, dd recovers to 0.
+    Result:
+      - portfolio_history max DD ~ 30.1 (at ts=2000 BTC loss).
+      - portfolio current DD = sum(live wallet block DD) = 0 (closed at gain).
+      - These differ, proving the semantic separation.
+    Then patches wallet row DD to show validator detects live-block mismatch
+    but does NOT flag max DD when live < historical max.
+    """
+    wallet = "0xf100000000000000000000000000000000000050"
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        configure_app_paths(tmp)
+        seed_engine_truth(tmp)
+        rows = [
+            raw_row(wallet, "BTC", "BUY",  100.0, 1.0, 1000, "livedd-btc-buy",  expected_copy_price=100.0),
+            raw_row(wallet, "BTC", "SELL",  70.0, 1.0, 2000, "livedd-btc-sell", expected_copy_price=70.0),
+            raw_row(wallet, "ETH", "BUY",   10.0, 1.0, 3000, "livedd-eth-buy",  expected_copy_price=10.0),
+            raw_row(wallet, "ETH", "SELL", 200.0, 1.0, 4000, "livedd-eth-sell", expected_copy_price=200.0),
+        ]
+        write_raw_fills(appmod.RAW_FILLS_CSV, rows)
+        write_json(appmod.UI_STATE_FILE, {
+            "copy_mode": "fixed", "fixed_notional": 100.0, "norm_base": 100.0, "fee_bps": 5.0,
+        })
+        _reset_app_cache()
+        state = appmod.build_model_state()
+
+        port = state.get("portfolio", {})
+        port_lead = port.get("lead", {})
+        port_copy = port.get("copy", {})
+        ph = state.get("portfolio_history", [])
+        user_row = next((r for r in state["wallet_rows"] if r.get("is_user_wallet")), None)
+        non_user = [r for r in state["wallet_rows"] if not r.get("is_user_wallet")]
+
+        hdr_lead_dd    = float(port_lead.get("drawdown", 0))
+        hdr_lead_maxdd = float(port_lead.get("max_drawdown", 0))
+        hdr_copy_dd    = float(port_copy.get("drawdown", 0))
+        hdr_copy_maxdd = float(port_copy.get("max_drawdown", 0))
+
+        check("header current lead DD = 0 (all positions closed for profit, live blocks)",
+              approx(hdr_lead_dd, 0.0, 0.01), f"hdr_lead_dd={hdr_lead_dd:.4f}")
+        check("header current copy DD = 0 (all positions closed for profit, live blocks)",
+              approx(hdr_copy_dd, 0.0, 0.01), f"hdr_copy_dd={hdr_copy_dd:.4f}")
+        check("header max lead DD > 1 (BTC sold at loss created historical DD > 30)",
+              hdr_lead_maxdd > 1.0, f"hdr_lead_maxdd={hdr_lead_maxdd:.4f}")
+        check("header max copy DD > 1 (BTC sold at loss created historical DD > 30)",
+              hdr_copy_maxdd > 1.0, f"hdr_copy_maxdd={hdr_copy_maxdd:.4f}")
+        check("max DD > current DD (semantics separated: historical > live)",
+              hdr_lead_maxdd > hdr_lead_dd + 1.0, f"max={hdr_lead_maxdd:.4f} cur={hdr_lead_dd:.4f}")
+
+        # portfolio_history tail is the live snapshot; its DD must match header current DD.
+        tail_lead_dd = float((ph[-1].get("lead") or {}).get("drawdown", -1)) if ph else -1.0
+        check("portfolio_history tail DD == header current DD (live snap is tail)",
+              approx(tail_lead_dd, hdr_lead_dd, 0.01),
+              f"tail={tail_lead_dd:.4f} hdr={hdr_lead_dd:.4f}")
+
+        # Validate that the clean state passes the full contract.
+        errs_clean = appmod.validate_render_contract(state)
+        check("validate_render_contract passes on clean state", errs_clean == [], "\n".join(errs_clean[:5]))
+
+        # Diagnostic prints (required by spec).
+        u_lead = (user_row.get("lead") or {}) if user_row else {}
+        u_copy = (user_row.get("copy") or {}) if user_row else {}
+        orig_lead_dd = float(non_user[0]["lead"].get("drawdown", 0)) if non_user else 0.0
+        orig_copy_dd = float(non_user[0]["copy"].get("drawdown", 0)) if non_user else 0.0
+        print(f"\n--- live diagnostic ---")
+        print(f"selected count: {len(non_user)}")
+        print(f"live current lead DD (wallet blocks): {orig_lead_dd:.4f}")
+        print(f"live current copy DD (wallet blocks): {orig_copy_dd:.4f}")
+        print(f"curve max lead DD (portfolio_history): {hdr_lead_maxdd:.4f}")
+        print(f"curve max copy DD (portfolio_history): {hdr_copy_maxdd:.4f}")
+        print(f"header lead current DD: {hdr_lead_dd:.4f}")
+        print(f"header copy current DD: {hdr_copy_dd:.4f}")
+        print(f"header lead maxDD: {hdr_lead_maxdd:.4f}")
+        print(f"header copy maxDD: {hdr_copy_maxdd:.4f}")
+        print(f"user lead current DD: {float(u_lead.get('drawdown', 0)):.4f}")
+        print(f"user copy current DD: {float(u_copy.get('drawdown', 0)):.4f}")
+        print(f"user lead maxDD: {float(u_lead.get('max_drawdown', 0)):.4f}")
+        print(f"user copy maxDD: {float(u_copy.get('max_drawdown', 0)):.4f}")
+        print(f"open exposure: {float(port.get('open_notional_usd', 0)):.4f}")
+        print(f"max exposure: {float(port.get('max_open_notional_usd', 0)):.4f}")
+        print(f"validate_render_contract (clean): {errs_clean}")
+        print(f"--- end live diagnostic ---\n")
+
+        # Inject a different live DD into the wallet row (simulating a live websocket update
+        # that arrived after the last historical event was recorded in the curve).
+        assert non_user, "no non-user wallet rows in test state"
+        injected_lead_dd = orig_lead_dd + 3.0
+        injected_copy_dd = orig_copy_dd + 3.0
+        non_user[0]["lead"]["drawdown"]     = injected_lead_dd
+        non_user[0]["lead"]["drawdown_usd"] = injected_lead_dd
+        non_user[0]["copy"]["drawdown"]     = injected_copy_dd
+        non_user[0]["copy"]["drawdown_usd"] = injected_copy_dd
+
+        # New validator checks live blocks: must detect the mismatch.
+        errs_patched = appmod.validate_render_contract(state)
+        check("validator detects injected live lead DD != portfolio current DD",
+              any("lead DD" in e and "live wallet" in e for e in errs_patched),
+              f"errors: {errs_patched[:3]}")
+        check("validator detects injected live copy DD != portfolio current DD",
+              any("copy DD" in e and "live wallet" in e for e in errs_patched),
+              f"errors: {errs_patched[:3]}")
+        # Max DD must NOT be flagged: live=3.0 < historical max ~20.05, so no regression.
+        check("validator does not flag max DD when live DD < historical max",
+              not any("MaxDD" in e for e in errs_patched),
+              f"unexpected MaxDD errors: {[e for e in errs_patched if 'MaxDD' in e]}")
+
+
+def test_user_row_has_no_fake_wallet_controls_but_global_base_exists() -> None:
+    """USER aggregate row must not contain inc-form or wallet-cfg; global norm_base control must be present."""
+    wallet = "0xa100000000000000000000000000000000000051"
+    with tempfile.TemporaryDirectory() as td:
+        rows = [
+            raw_row(wallet, "BTC", "BUY",  100.0, 1.0, 1000, "uctrl-entry", expected_copy_price=100.0),
+            raw_row(wallet, "BTC", "SELL", 110.0, 1.0, 2000, "uctrl-exit",  expected_copy_price=110.0),
+        ]
+        state = build_app_state(Path(td), rows)
+        html_out = appmod.render_home(state)
+        user_tr_start = html_out.find('<tr class="user">')
+        check("USER tr found in rendered HTML", user_tr_start >= 0, "no <tr class=\"user\"> found")
+        if user_tr_start >= 0:
+            user_tr_end = html_out.find('</tr>', user_tr_start)
+            user_row_html = html_out[user_tr_start:user_tr_end]
+            check("USER row has no inc-form", "inc-form" not in user_row_html, user_row_html[-200:])
+            check("USER row has no wallet-cfg", "wallet-cfg" not in user_row_html, user_row_html[-200:])
+            check("USER row has aggregate indicator text", "aggregate" in user_row_html, user_row_html[-200:])
+        check("global header contains norm_base control", 'name="norm_base"' in html_out, "")
+
+
+def test_non_user_wallet_controls_still_render() -> None:
+    """Regular (non-user) wallet rows must still render inc-form and wallet-cfg controls."""
+    wallet = "0xa110000000000000000000000000000000000052"
+    with tempfile.TemporaryDirectory() as td:
+        rows = [
+            raw_row(wallet, "BTC", "BUY",  100.0, 1.0, 1000, "nuwc-entry", expected_copy_price=100.0),
+            raw_row(wallet, "BTC", "SELL", 110.0, 1.0, 2000, "nuwc-exit",  expected_copy_price=110.0),
+        ]
+        state = build_app_state(Path(td), rows)
+        html_out = appmod.render_home(state)
+        check("inc-form present in rendered HTML for non-user wallet", "inc-form" in html_out, "")
+        check("wallet-cfg present in rendered HTML for non-user wallet", "wallet-cfg" in html_out, "")
+        check("INC label present in non-user wallet row", ">INC<" in html_out, "")
+
+
+def test_global_norm_base_updates_user_and_header_base_values() -> None:
+    """norm_base change must update USER alloc and required_leverage; DD dollar values stay fixed."""
+    wallet = "0xa120000000000000000000000000000000000053"
+    rows = [
+        raw_row(wallet, "BTC", "BUY",  100.0, 1.0, 1000, "nb-entry", expected_copy_price=100.0),
+        raw_row(wallet, "BTC", "SELL", 110.0, 1.0, 2000, "nb-exit",  expected_copy_price=110.0),
+    ]
+    with tempfile.TemporaryDirectory() as td100, tempfile.TemporaryDirectory() as td200:
+        ui100 = {"copy_mode": "fixed", "fixed_notional": 100.0, "norm_base": 100.0, "fee_bps": 5.0}
+        ui200 = {"copy_mode": "fixed", "fixed_notional": 100.0, "norm_base": 200.0, "fee_bps": 5.0}
+        s100 = build_app_state(Path(td100), rows, ui100)
+        s200 = build_app_state(Path(td200), rows, ui200)
+        user100 = next((r for r in s100["wallet_rows"] if r.get("is_user_wallet")), None)
+        user200 = next((r for r in s200["wallet_rows"] if r.get("is_user_wallet")), None)
+        check("USER row exists (norm_base=100)", user100 is not None)
+        check("USER row exists (norm_base=200)", user200 is not None)
+        if user100 is None or user200 is None:
+            return
+        check("USER alloc = norm_base 100", approx(float(user100.get("alloc", 0)), 100.0, 0.01),
+              str(user100.get("alloc")))
+        check("USER alloc = norm_base 200", approx(float(user200.get("alloc", 0)), 200.0, 0.01),
+              str(user200.get("alloc")))
+        rl100 = float(s100.get("portfolio", {}).get("max_required_leverage", 0))
+        rl200 = float(s200.get("portfolio", {}).get("max_required_leverage", 0))
+        check("required_leverage differs when norm_base changes (same exposure)",
+              not approx(rl100, rl200, 0.001),
+              f"rl100={rl100:.4f} rl200={rl200:.4f}")
+        check("header max_required_leverage == USER required_leverage (norm_base=100)",
+              approx(rl100, float(user100.get("required_leverage", -1)), 0.001),
+              f"header={rl100:.4f} user={float(user100.get('required_leverage',-1)):.4f}")
+        check("header max_required_leverage == USER required_leverage (norm_base=200)",
+              approx(rl200, float(user200.get("required_leverage", -1)), 0.001),
+              f"header={rl200:.4f} user={float(user200.get('required_leverage',-1)):.4f}")
+        dd100 = float(s100.get("portfolio", {}).get("lead", {}).get("drawdown", -1))
+        dd200 = float(s200.get("portfolio", {}).get("lead", {}).get("drawdown", -1))
+        check("lead DD dollar value unchanged by norm_base-only change",
+              approx(dd100, dd200, 0.01),
+              f"dd100={dd100:.4f} dd200={dd200:.4f}")
+
+
+def test_ajax_success_reload_present() -> None:
+    """JS submit handler must call location.reload on success; must not appear in catch or finally."""
+    wallet = "0xa130000000000000000000000000000000000054"
+    with tempfile.TemporaryDirectory() as td:
+        state = build_app_state(Path(td), [
+            raw_row(wallet, "BTC", "BUY", 100.0, 1.0, 1000, "arl-entry", expected_copy_price=100.0),
+        ])
+        html_out = appmod.render_home(state)
+        check("rendered JS contains location.reload", "location.reload" in html_out, "")
+        catch_start = html_out.find("catch(err)")
+        finally_start = html_out.find("finally{")
+        if catch_start > 0 and finally_start > catch_start:
+            catch_block = html_out[catch_start:finally_start]
+            check("location.reload not in catch block",
+                  "location.reload" not in catch_block,
+                  f"catch: {catch_block[:120]}")
+        else:
+            check("catch and finally structure found in JS",
+                  catch_start > 0 and finally_start > catch_start,
+                  f"catch={catch_start} finally={finally_start}")
+        if finally_start > 0:
+            finally_block = html_out[finally_start:finally_start + 80]
+            check("location.reload not in finally block",
+                  "location.reload" not in finally_block,
+                  f"finally: {finally_block}")
+
+
 def run_test(fn) -> None:
     """Run a test function, counting any uncaught exception as a FAIL."""
     global FAIL
@@ -1370,6 +1589,11 @@ if __name__ == "__main__":
     run_test(test_combined_maxdd_is_max_timestamped_sum_dd)
     run_test(test_combined_max_exposure_is_max_timestamped_sum_exposure)
     run_test(test_validator_detects_yellow_cell_tampers)
+    run_test(test_live_dd_differs_from_curve_tail_uses_live_blocks)
+    run_test(test_user_row_has_no_fake_wallet_controls_but_global_base_exists)
+    run_test(test_non_user_wallet_controls_still_render)
+    run_test(test_global_norm_base_updates_user_and_header_base_values)
+    run_test(test_ajax_success_reload_present)
     print(f"\nRESULTS: {PASS} PASS / {FAIL} FAIL")
     if FAIL:
         raise SystemExit("RESULT::FAILED")
