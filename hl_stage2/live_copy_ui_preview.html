@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Copy Control Centre</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070c11;
+      --panel: #0f171f;
+      --panel-2: #131f2b;
+      --line: #223342;
+      --text: #e6edf5;
+      --muted: #8fa3b7;
+      --green: #21c16b;
+      --red: #ff5263;
+      --amber: #f5b84b;
+      --blue: #5ea1ff;
+      --button: #1b2a3a;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, Segoe UI, Arial, sans-serif;
+      font-size: 13px;
+    }
+
+    button, input, select { font: inherit; }
+    .page { width: 100%; min-height: 100vh; padding: 12px; }
+
+    header {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 14px;
+      align-items: center;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      background: #0c131a;
+      border-radius: 8px;
+      margin-bottom: 12px;
+    }
+
+    h1, h2, h3 { margin: 0; letter-spacing: 0; }
+    h1 { font-size: 22px; font-weight: 760; }
+    h2 { font-size: 15px; font-weight: 720; margin-bottom: 10px; }
+    h3 { font-size: 13px; font-weight: 720; color: var(--muted); }
+
+    .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .right { justify-content: flex-end; }
+    .global-controls {
+      display: grid;
+      grid-template-columns: repeat(4, auto);
+      gap: 8px;
+      justify-content: end;
+      align-items: center;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 0 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel-2);
+      color: var(--muted);
+      font-weight: 720;
+      white-space: nowrap;
+    }
+    .pill.green { color: var(--green); border-color: rgba(33, 193, 107, .45); }
+    .pill.red { color: var(--red); border-color: rgba(255, 82, 99, .45); }
+    .pill.amber { color: var(--amber); border-color: rgba(245, 184, 75, .45); }
+    .pill.blue { color: var(--blue); border-color: rgba(94, 161, 255, .45); }
+
+    .btn {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0 11px;
+      color: var(--text);
+      background: var(--button);
+      cursor: default;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .btn.soft { color: var(--amber); border-color: rgba(245, 184, 75, .55); }
+    .btn.danger { color: var(--red); border-color: rgba(255, 82, 99, .6); background: #2a1218; }
+    .btn[disabled] { opacity: .5; }
+
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 14px;
+      min-width: 0;
+    }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, .62);
+      z-index: 20;
+      padding: 18px;
+    }
+    .modal-backdrop.active { display: flex; }
+    .modal {
+      width: min(620px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 16px;
+      box-shadow: 0 20px 60px rgba(0,0,0,.45);
+    }
+    .modal-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 760;
+      text-transform: uppercase;
+    }
+    .full { grid-column: 1 / -1; }
+
+    input, select {
+      width: 100%;
+      min-height: 35px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--text);
+      background: #0a1118;
+      padding: 0 9px;
+      outline: none;
+    }
+
+    .graph-panel {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      min-height: 482px;
+    }
+
+    .graph-top {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      align-items: start;
+      margin-bottom: 10px;
+    }
+
+    .graph-title {
+      font-size: 16px;
+      font-weight: 760;
+    }
+
+    .chart-controls {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-start;
+    }
+
+    .seg {
+      min-height: 28px;
+      border: 1px solid var(--line);
+      background: #0a1118;
+      color: var(--muted);
+      border-radius: 6px;
+      padding: 0 8px;
+      font-weight: 700;
+    }
+    .seg.active { color: var(--text); border-color: rgba(94, 161, 255, .55); background: #142337; }
+    .date-control {
+      min-height: 28px;
+      width: 132px;
+      color: var(--muted);
+      border-radius: 6px;
+    }
+
+    .stat-strip {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .stat {
+      border: 1px solid var(--line);
+      background: #0a1118;
+      border-radius: 7px;
+      padding: 9px;
+      min-height: 60px;
+    }
+    .stat .label { color: var(--muted); font-size: 11px; font-weight: 720; text-transform: uppercase; }
+    .stat .value { margin-top: 7px; font-size: 18px; font-weight: 780; white-space: nowrap; }
+
+    .chart-wrap {
+      position: relative;
+      min-height: 300px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background:
+        linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px) 0 0 / 100% 20%,
+        linear-gradient(90deg, rgba(255,255,255,.028) 1px, transparent 1px) 0 0 / 10% 100%,
+        #091017;
+      overflow: hidden;
+    }
+
+    svg { display: block; width: 100%; height: 100%; min-height: 300px; }
+    .axis-label { fill: var(--muted); font-size: 11px; }
+    .subtle { color: var(--muted); font-size: 12px; }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 7px 7px;
+      text-align: left;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+    th {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 780;
+      text-transform: uppercase;
+      background: #0a1118;
+    }
+    td { color: #dce8f4; }
+    .wallet { font-family: Consolas, Monaco, monospace; color: #d9ebff; }
+
+    .mini-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+    .mini-actions button {
+      min-height: 26px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #172437;
+      color: var(--text);
+      padding: 0 7px;
+      cursor: default;
+    }
+
+    .wallet-panel {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 260px;
+      grid-column: 1 / -1;
+    }
+    .wallet-table table { min-width: 1320px; }
+
+    .tabs {
+      margin-top: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .tabbar {
+      display: flex;
+      gap: 8px;
+      border-bottom: 1px solid var(--line);
+    }
+    .tab {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-bottom: 0;
+      border-radius: 7px 7px 0 0;
+      background: #0c131a;
+      color: var(--muted);
+      padding: 0 12px;
+      font-weight: 760;
+    }
+    .tab.active { color: var(--text); background: var(--panel); }
+    .tab-panels { display: block; }
+    .tab-content { display: none; }
+    .tab-content.active { display: grid; grid-template-columns: 1.15fr .85fr; gap: 12px; }
+    .tab-content.single.active { display: block; }
+    .row-select, .row-input {
+      min-height: 27px;
+      width: 82px;
+      padding: 0 6px;
+      font-size: 12px;
+    }
+    .include-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+    .include-toggle input { width: 16px; min-height: 16px; }
+    .money-pos { color: var(--green); font-weight: 760; }
+    .money-neg { color: var(--red); font-weight: 760; }
+    .cell-stack {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+    .inline-controls {
+      display: flex;
+      gap: 5px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .pair {
+      display: grid;
+      grid-template-columns: 34px minmax(52px, auto);
+      gap: 6px;
+      align-items: baseline;
+    }
+    .pair span:first-child {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 780;
+    }
+    .compact-note {
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 2px;
+    }
+    .safety-strip, .source-strip {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .source-strip { margin-top: 2px; }
+
+    @media (max-width: 1300px) {
+      .main-grid { grid-template-columns: 280px 1fr; }
+      .stat-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 900px) {
+      header, .main-grid, .tab-content.active, .global-controls { grid-template-columns: 1fr; justify-content: stretch; }
+      .right, .chart-controls, .global-controls { justify-content: flex-start; }
+      .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <div class="row">
+        <h1>Live Copy Control Centre</h1>
+      </div>
+      <div class="global-controls">
+        <span class="pill blue">Mode: DRY RUN</span>
+        <span class="pill green">WS Fast Path</span>
+        <span class="pill amber">REST Fallback</span>
+        <span class="pill">Live Wallets: <strong style="margin-left:6px;">0 / 10</strong></span>
+      </div>
+      <div class="row right">
+        <button class="btn" data-open-modal="walletModal">Add wallet</button>
+        <button class="btn soft" data-open-modal="globalModal">Global controls</button>
+      </div>
+    </header>
+
+    <section class="safety-strip" aria-label="Global safety state">
+      <span class="pill blue">COPY STATE: DRY RUN</span>
+      <span class="pill green">NEW ENTRIES: ALLOWED</span>
+      <span class="pill green">EXITS: ALLOWED</span>
+      <span class="pill red">REAL ORDERS: DISABLED</span>
+      <span class="pill green">AUDIT: ON</span>
+    </section>
+
+    <section class="main-grid">
+      <section class="panel graph-panel">
+        <div class="graph-top">
+          <div>
+            <div class="graph-title">Exchange-backed user equity</div>
+            <div class="subtle">Dry-run preview values shown. Live mode will use exchange-backed equity with real friction measured, not modelled.</div>
+          </div>
+          <div class="chart-controls">
+            <button class="seg active">Equity</button>
+            <button class="seg">PnL</button>
+            <button class="seg">Exposure</button>
+            <button class="seg">Drawdown</button>
+            <button class="seg">Fees</button>
+            <button class="seg">Realised</button>
+            <input class="date-control" type="date" value="2026-04-30" aria-label="Start date">
+            <input class="date-control" type="time" value="09:00" aria-label="Start time">
+            <input class="date-control" type="time" value="16:30" aria-label="End time">
+            <button class="seg active">1D</button>
+            <button class="seg">7D</button>
+            <button class="seg">All</button>
+          </div>
+        </div>
+        <div class="stat-strip" id="equityCards"></div>
+        <div class="chart-wrap">
+          <svg viewBox="0 0 1000 320" preserveAspectRatio="none" aria-label="Live exchange equity graph">
+            <polyline points="40,232 140,220 240,205 340,214 440,182 540,166 640,146 740,124 840,132 960,96" fill="none" stroke="#21c16b" stroke-width="4"/>
+            <polyline points="40,256 140,248 240,236 340,240 440,226 540,214 640,218 740,202 840,196 960,188" fill="none" stroke="#5ea1ff" stroke-width="2" opacity=".75"/>
+            <path d="M40 232 L140 220 L240 205 L340 214 L440 182 L540 166 L640 146 L740 124 L840 132 L960 96 L960 300 L40 300 Z" fill="rgba(33,193,107,.12)"/>
+            <text x="42" y="34" class="axis-label">$12.5k</text>
+            <text x="42" y="155" class="axis-label">$12.2k</text>
+            <text x="42" y="296" class="axis-label">$11.9k</text>
+            <text x="780" y="52" class="axis-label">exchange-backed user equity</text>
+            <text x="828" y="78" class="axis-label">real fees included</text>
+          </svg>
+        </div>
+      </section>
+
+      <section class="panel wallet-panel">
+        <div>
+          <h2>Live Wallets</h2>
+          <p class="subtle">Command surface mirrors the main dashboard, with wallet base controls and live-copy safety state inline.</p>
+        </div>
+        <div class="table-wrap wallet-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Wallet</th><th>Equity L/C</th><th>Real L/C</th><th>Unreal L/C</th><th>DD L/C</th><th>MaxDD L/C</th>
+                <th>Real diff</th><th>Efficiency</th><th>Sizing</th><th>BL</th><th>Stream</th><th>Graph</th><th>Activity L/C</th><th>Controls</th>
+              </tr>
+            </thead>
+            <tbody id="walletRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <div class="modal-backdrop" id="walletModal" aria-hidden="true">
+      <section class="modal">
+        <div class="modal-head">
+          <h2>Add Wallet</h2>
+          <button class="btn" data-close-modal>close</button>
+        </div>
+        <div class="form-grid">
+          <label class="full">Wallet address
+            <input value="0x0000...preview">
+          </label>
+          <label>Initial mode
+            <select><option>LIVE</option><option>CLO</option><option>OFF</option></select>
+          </label>
+        </div>
+        <p class="subtle">This only introduces a wallet. Row-level controls take over normalisation, sizing, safety limits and graph inclusion.</p>
+        <div class="modal-actions">
+          <button class="btn" data-close-modal>Cancel</button>
+          <button class="btn">Add wallet to live table</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="globalModal" aria-hidden="true">
+      <section class="modal">
+        <div class="modal-head">
+          <h2>Global Controls</h2>
+          <button class="btn" data-close-modal>close</button>
+        </div>
+        <div class="form-grid">
+          <label>Mode
+            <select><option>DRY RUN</option><option disabled>LIVE gated</option></select>
+          </label>
+          <label>Global exposure %
+            <input value="22">
+          </label>
+          <label>Daily loss limit
+            <input value="50">
+          </label>
+          <label>WS fast path
+            <select><option>armed</option><option>off</option></select>
+          </label>
+          <label>REST fallback
+            <select><option>armed</option><option>off</option></select>
+          </label>
+          <label>Confirmation guard
+            <select><option>required</option><option>two-person future</option></select>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn soft">Soft kill</button>
+          <button class="btn danger" disabled>Hard kill</button>
+          <button class="btn" data-close-modal>Close</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="tabs">
+      <div class="tabbar">
+        <button class="tab active" data-tab="audit">Health & Audit</button>
+        <button class="tab" data-tab="recon">Manual Reconciliation</button>
+        <button class="tab" data-tab="ws">WS Detail</button>
+      </div>
+      <div class="tab-panels">
+        <div class="tab-content active" data-panel="audit">
+        <section class="panel">
+          <h2>Execution / Audit</h2>
+          <div class="source-strip">
+            <span class="pill green">WS fills: 184</span>
+            <span class="pill amber">REST recovered: 6</span>
+            <span class="pill blue">Manual review: 3</span>
+            <span class="pill">Duplicates skipped: 42</span>
+            <span class="pill red">Risk rejected: 1</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th><th>Source</th><th>Wallet</th><th>Coin</th><th>Side</th>
+                  <th>Reason</th><th>Status</th><th>Diff %</th><th>Notes</th>
+                </tr>
+              </thead>
+              <tbody id="auditRows"></tbody>
+            </table>
+          </div>
+        </section>
+        </div>
+        <div class="tab-content single" data-panel="recon">
+        <section class="panel">
+          <h2>Manual Reconciliation Queue</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Severity</th><th>Wallet</th><th>Coin</th><th>Issue</th><th>Leader</th><th>Copy</th><th>Action</th><th>Buttons</th>
+                </tr>
+              </thead>
+              <tbody id="reconRows"></tbody>
+            </table>
+          </div>
+        </section>
+        </div>
+        <div class="tab-content single" data-panel="ws">
+        <section class="panel">
+          <h2>WS Health Detail</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Wallet</th><th>Socket status</th><th>Last open</th><th>Last close</th><th>Last msg age</th>
+                  <th>Last data age</th><th>Reconnects</th><th>Duplicates</th><th>Ignored</th><th>Last error</th>
+                </tr>
+              </thead>
+              <tbody id="healthRows"></tbody>
+            </table>
+          </div>
+        </section>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const wallets = [
+      { wallet: '0x8f21...a901', mode: 'LIVE', model: 'proportional', norm: '100', fixed: '', diff: '0.10', loss: '50', baseline: 'OK', leadEq: '+$5,274', copyEq: '+$5,054', leadReal: '+$2,632', copyReal: '+$2,510', leadUnreal: '+$1,422', copyUnreal: '+$1,365', leadDd: '-$249', copyDd: '-$267', leadMaxdd: '-$388', copyMaxdd: '-$404', realDiff: '0.02%', pnlHr: '+$41.90', avgTrade: '1.49%', win: '84.8%', avgPos: '$11,700', maxPos: '$98,653', avgNotional: '$174', over10: '80.2%', reqLev: '9.65x', ws: 'OPEN 1.2s', poll: '45s', fillsLC: '2451 / 2451', exitsLC: '1782 / 1782', posLC: '606 / 606', graph: true },
+      { wallet: '0x59ca...77e2', mode: 'CLO', model: 'fixed', norm: '100', fixed: '25', diff: '0.15', loss: '40', baseline: 'STALE', leadEq: '+$2,977', copyEq: '+$2,831', leadReal: '+$2,256', copyReal: '+$2,110', leadUnreal: '-$279', copyUnreal: '-$279', leadDd: '-$3.18', copyDd: '-$13.89', leadMaxdd: '-$189', copyMaxdd: '-$195', realDiff: '0.04%', pnlHr: '+$31.82', avgTrade: '1.99%', win: '90.7%', avgPos: '$27,084', maxPos: '$53,055', avgNotional: '$434', over10: '92.5%', reqLev: '5.30x', ws: 'STALE 34s', poll: '12s', fillsLC: '681 / 681', exitsLC: '614 / 614', posLC: '3 / 3', graph: true },
+      { wallet: '0xb011...4fd0', mode: 'OFF', model: 'proportional', norm: '75', fixed: '', diff: '0.08', loss: '25', baseline: 'MISSING', leadEq: '+$1,283', copyEq: '+$1,253', leadReal: '+$266', copyReal: '+$236', leadUnreal: '+$16.74', copyUnreal: '+$16.74', leadDd: '-$63.71', copyDd: '-$66.93', leadMaxdd: '-$95.47', copyMaxdd: '-$98.86', realDiff: '0.01%', pnlHr: '+$3.48', avgTrade: '1.05%', win: '86.1%', avgPos: '$4,688', maxPos: '$8,190', avgNotional: '$371', over10: '84.0%', reqLev: '8.19x', ws: 'OFFLINE', poll: '3m', fillsLC: '787 / 787', exitsLC: '657 / 657', posLC: '11 / 11', graph: false }
+    ];
+
+    const equity = [
+      ['real equity', '$12,480.22'], ['realised PnL', '+$184.09'], ['unrealised PnL', '-$32.16'],
+      ['fees paid', '$9.44'], ['open exposure', '$2,810.00'], ['drawdown', '1.8%']
+    ];
+
+    const audit = [
+      ['12:04:11', 'WS', '0x8f21...a901', 'BTC', 'BUY', 'LIVE_WS_DETECTED', 'DRY_RUN_FILLED', '0.00', 'source=live_ws'],
+      ['12:03:42', 'REST_POLL', '0x59ca...77e2', 'ETH', 'SELL', 'LIVE_POLL_DETECTED', 'DRY_RUN_FILLED', '0.01', 'recovered after stale socket'],
+      ['12:01:08', 'MANUAL', '0xb011...4fd0', 'SOL', 'BUY', 'MANUAL_REVIEW', 'QUEUED', '-', 'operator preview']
+    ];
+
+    const recon = [
+      ['WARN', '0x59ca...77e2', 'ETH', 'copy underfilled', 'SHORT 0.42', 'SHORT 0.38', 'align delta'],
+      ['INFO', '0xb011...4fd0', 'SOL', 'wallet OFF', 'LONG 12.0', 'FLAT', 'review only'],
+      ['CRITICAL', '0x8f21...a901', 'BTC', 'below min notional', 'LONG 0.012', 'LONG 0.011', 'accumulate']
+    ];
+
+    const health = [
+      ['0x8f21...a901', 'OPEN', '12:03:58', '-', '1.2s', '1.2s', 0, 2, 1, ''],
+      ['0x59ca...77e2', 'STALE', '11:58:09', '12:03:20', '34s', '4m', 3, 4, 7, 'last reconnect timed out'],
+      ['0xb011...4fd0', 'CLOSED', '11:45:02', '11:46:13', '-', '-', 1, 0, 3, 'wallet disabled']
+    ];
+
+    function pill(text) {
+      const token = String(text).split(' ')[0];
+      const cls = token === 'OPEN' || token === 'LIVE' || token === 'OK' || token === 'DRY_RUN_FILLED' ? 'green'
+        : token === 'STALE' || token === 'CLO' || token === 'QUEUED' ? 'amber'
+        : token === 'OFFLINE' || token === 'CLOSED' || token === 'OFF' || token === 'MISSING' ? 'red' : '';
+      return `<span class="pill ${cls}">${text}</span>`;
+    }
+
+    function severityPill(text) {
+      const cls = text === 'CRITICAL' ? 'red' : text === 'WARN' ? 'amber' : 'blue';
+      return `<span class="pill ${cls}">${text}</span>`;
+    }
+
+    document.getElementById('walletRows').innerHTML = wallets.map(w => `
+      <tr>
+        <td>
+          <div class="cell-stack">
+            <span class="wallet">${w.wallet}</span>
+            <span class="compact-note">${pill(w.mode)} ${w.model}</span>
+          </div>
+        </td>
+        <td><div class="cell-stack"><div class="pair"><span>L</span><b class="${w.leadEq.startsWith('+') ? 'money-pos' : 'money-neg'}">${w.leadEq}</b></div><div class="pair"><span>C</span><b class="${w.copyEq.startsWith('+') ? 'money-pos' : 'money-neg'}">${w.copyEq}</b></div></div></td>
+        <td><div class="cell-stack"><div class="pair"><span>L</span><b class="${w.leadReal.startsWith('+') ? 'money-pos' : 'money-neg'}">${w.leadReal}</b></div><div class="pair"><span>C</span><b class="${w.copyReal.startsWith('+') ? 'money-pos' : 'money-neg'}">${w.copyReal}</b></div></div></td>
+        <td><div class="cell-stack"><div class="pair"><span>L</span><b class="${w.leadUnreal.startsWith('+') ? 'money-pos' : 'money-neg'}">${w.leadUnreal}</b></div><div class="pair"><span>C</span><b class="${w.copyUnreal.startsWith('+') ? 'money-pos' : 'money-neg'}">${w.copyUnreal}</b></div></div></td>
+        <td><div class="cell-stack"><div class="pair"><span>L</span><b class="money-neg">${w.leadDd}</b></div><div class="pair"><span>C</span><b class="money-neg">${w.copyDd}</b></div></div></td>
+        <td><div class="cell-stack"><div class="pair"><span>L</span><b class="money-neg">${w.leadMaxdd}</b></div><div class="pair"><span>C</span><b class="money-neg">${w.copyMaxdd}</b></div></div></td>
+        <td>${w.realDiff}</td>
+        <td><div class="cell-stack"><div class="pair"><span>hr</span><b class="${w.pnlHr.startsWith('+') ? 'money-pos' : 'money-neg'}">${w.pnlHr}</b></div><div class="pair"><span>avg</span>${w.avgTrade}</div><div class="pair"><span>win</span>${w.win}</div></div></td>
+        <td><div class="cell-stack"><div class="pair"><span>avg</span>${w.avgPos}</div><div class="pair"><span>max</span>${w.maxPos}</div><div class="pair"><span>notl</span>${w.avgNotional}</div><div class="pair"><span>&gt;10</span>${w.over10}</div><div class="pair"><span>lev</span>${w.reqLev}</div></div></td>
+        <td>${pill(w.baseline)}</td>
+        <td><div class="cell-stack">${pill(w.ws)}<span class="compact-note">poll ${w.poll}</span></div></td>
+        <td><label class="include-toggle" title="Include this wallet in the live performance graph only. Does not affect copy execution."><input type="checkbox" ${w.graph ? 'checked' : ''}>SHOW</label></td>
+        <td><div class="cell-stack"><div class="pair"><span>fills</span>${w.fillsLC}</div><div class="pair"><span>exits</span>${w.exitsLC}</div><div class="pair"><span>pos</span>${w.posLC}</div></div></td>
+        <td>
+          <div class="cell-stack">
+            <div class="inline-controls">
+              <select class="row-select"><option ${w.mode === 'LIVE' ? 'selected' : ''}>LIVE</option><option ${w.mode === 'CLO' ? 'selected' : ''}>CLO</option><option ${w.mode === 'OFF' ? 'selected' : ''}>OFF</option></select>
+              <select class="row-select"><option ${w.model === 'proportional' ? 'selected' : ''}>proportion</option><option ${w.model === 'fixed' ? 'selected' : ''}>fixed</option></select>
+            </div>
+            <div class="inline-controls">
+              <span class="compact-note">N</span><input class="row-input" value="${w.norm}">
+              <span class="compact-note">F</span><input class="row-input" value="${w.fixed}">
+            </div>
+            <div class="inline-controls">
+              <span class="compact-note">diff</span><input class="row-input" value="${w.diff}">
+              <span class="compact-note">loss</span><input class="row-input" value="${w.loss}">
+            </div>
+            <div class="mini-actions"><button>edit</button><button>remove</button><button>CLO</button><button>OFF</button></div>
+          </div>
+        </td>
+      </tr>
+    `).join('');
+
+    document.getElementById('equityCards').innerHTML = equity.map(([label, value]) => `
+      <div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>
+    `).join('');
+
+    document.getElementById('auditRows').innerHTML = audit.map(r => `
+      <tr>${r.map((v, i) => `<td class="${i === 2 ? 'wallet' : ''}">${i === 6 ? pill(v) : v}</td>`).join('')}</tr>
+    `).join('');
+
+    document.getElementById('reconRows').innerHTML = recon.map(r => `
+      <tr>
+        ${r.map((v, i) => `<td class="${i === 1 ? 'wallet' : ''}">${i === 0 ? severityPill(v) : v}</td>`).join('')}
+        <td><div class="mini-actions"><button>review</button><button>ignore</button><button>close</button><button>align</button></div></td>
+      </tr>
+    `).join('');
+
+    document.getElementById('healthRows').innerHTML = health.map(r => `
+      <tr>${r.map((v, i) => `<td class="${i === 0 ? 'wallet' : ''}">${i === 1 ? pill(v) : v}</td>`).join('')}</tr>
+    `).join('');
+
+    document.querySelectorAll('.tab').forEach(button => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(panel => panel.classList.remove('active'));
+        button.classList.add('active');
+        document.querySelector(`[data-panel="${button.dataset.tab}"]`).classList.add('active');
+      });
+    });
+
+    document.querySelectorAll('[data-open-modal]').forEach(button => {
+      button.addEventListener('click', () => {
+        const modal = document.getElementById(button.dataset.openModal);
+        modal.classList.add('active');
+        modal.setAttribute('aria-hidden', 'false');
+      });
+    });
+
+    document.querySelectorAll('[data-close-modal]').forEach(button => {
+      button.addEventListener('click', () => {
+        const modal = button.closest('.modal-backdrop');
+        modal.classList.remove('active');
+        modal.setAttribute('aria-hidden', 'true');
+      });
+    });
+  </script>
+</body>
+</html>
