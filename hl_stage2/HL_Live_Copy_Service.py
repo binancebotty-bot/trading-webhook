@@ -83,6 +83,8 @@ LIVE_WS_PING_INTERVAL_SEC = int(os.getenv("HL_LIVE_WS_PING_INTERVAL_SEC", "20"))
 LIVE_WS_PING_TIMEOUT_SEC = int(os.getenv("HL_LIVE_WS_PING_TIMEOUT_SEC", "10"))
 LIVE_WS_RECONNECT_BACKOFF_CAP_SEC = float(os.getenv("HL_LIVE_WS_RECONNECT_BACKOFF_CAP_SEC", "30"))
 LIVE_WS_HEALTH_WRITE_SEC = float(os.getenv("HL_LIVE_WS_HEALTH_WRITE_SEC", "2"))
+LIVE_WS_INITIAL_BACKOFF_SEC = float(os.getenv("HL_LIVE_WS_INITIAL_BACKOFF_SEC", "1"))
+LIVE_WS_BACKOFF_MULTIPLIER = float(os.getenv("HL_LIVE_WS_BACKOFF_MULTIPLIER", "1.5"))
 
 ORDER_INTENT_FIELDS = [
     "created_at", "intent_id", "dry_run", "leader_wallet", "leader_fill_id",
@@ -381,6 +383,19 @@ def extract_ws_fills(message: str) -> List[Tuple[str, Dict[str, Any]]]:
                 wallet = str(item.get("user") or item.get("wallet") or "").lower()
                 out.append((wallet, item))
     return out
+
+
+def is_benign_ws_error(err: Any) -> bool:
+    name = type(err).__name__
+    module = type(err).__module__
+    text = repr(err)
+    if "websocket._abnf" in module:
+        return True
+    if name == "ABNF":
+        return True
+    if text.startswith("<websocket._abnf.ABNF object"):
+        return True
+    return False
 
 
 def parse_ws_leader_fill(wallet: str, raw: Dict[str, Any]) -> Optional[LeaderFill]:
@@ -995,12 +1010,17 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
             transport_stale_ms = (now - transport_ref) if transport_ref else 10**12
             last_data_ms = int(status.get("last_data_ms") or 0)
             data_stale_ms = (now - last_data_ms) if last_data_ms else 0
+            next_reconnect_ms = int(status.get("next_reconnect_ms") or 0)
+            last_open_ms = int(status.get("last_open_ms") or 0)
+            last_close_ms = int(status.get("last_close_ms") or 0)
             status_name = str(status.get("status", "UNKNOWN"))
             effective_status = status_name
             if status_name == "OPEN" and (LIVE_WS_STALE_MS <= 0 or transport_stale_ms <= LIVE_WS_STALE_MS):
                 effective_status = "OPEN"
             elif status_name == "OPEN":
                 effective_status = "STALE"
+            elif status_name in {"CONNECTING", "RECONNECTING"}:
+                effective_status = status_name
             if last_data_ms == 0:
                 data_status = "IDLE_NO_FILLS"
             elif LIVE_WS_STALE_MS > 0 and data_stale_ms > LIVE_WS_STALE_MS:
@@ -1009,6 +1029,9 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
                 data_status = "ACTIVE"
             if effective_status != "OPEN":
                 overall = "DEGRADED"
+            reconnect_in_ms = max(0, next_reconnect_ms - now) if next_reconnect_ms else 0
+            uptime_ms = (now - last_open_ms) if status_name == "OPEN" and last_open_ms else int(status.get("uptime_ms") or 0)
+            downtime_ms = (now - last_close_ms) if status_name in {"CLOSED", "RECONNECTING"} and last_close_ms else 0
             wallets[wallet] = {
                 **status,
                 "effective_status": effective_status,
@@ -1016,6 +1039,9 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
                 "stale_ms": transport_stale_ms,
                 "transport_stale_ms": transport_stale_ms,
                 "data_stale_ms": data_stale_ms,
+                "reconnect_in_ms": reconnect_in_ms,
+                "uptime_ms": uptime_ms,
+                "downtime_ms": downtime_ms,
             }
     return {
         "enabled": bool(manager is not None),
@@ -1053,6 +1079,13 @@ class DedicatedLiveWSManager:
                 "last_heartbeat_ms": 0,
                 "last_close_status_code": "",
                 "last_close_msg": "",
+                "last_reconnect_attempt_ms": 0,
+                "next_reconnect_ms": 0,
+                "reconnect_backoff_sec": 0.0,
+                "close_count": 0,
+                "uptime_ms": 0,
+                "downtime_ms": 0,
+                "last_run_forever_return_ms": 0,
                 "processed_count": 0,
                 "duplicate_count": 0,
                 "ignored_count": 0,
@@ -1060,6 +1093,8 @@ class DedicatedLiveWSManager:
                 "reconnect_count": 0,
                 "last_error": "",
                 "last_error_repr": "",
+                "benign_event_count": 0,
+                "last_benign_event_repr": "",
                 "data_status": "IDLE_NO_FILLS",
             }
             for wallet in self.wallets
@@ -1118,14 +1153,22 @@ class DedicatedLiveWSManager:
             return
 
         attempt = 0
+        backoff = max(0.1, LIVE_WS_INITIAL_BACKOFF_SEC)
         while not self.stop_event.is_set():
-            self.update_status(wallet, status="CONNECTING", last_error="")
+            self.update_status(wallet, status="CONNECTING", last_error="", last_reconnect_attempt_ms=utc_now_ms())
 
             def on_open(app: Any) -> None:
+                nonlocal backoff
                 now = utc_now_ms()
-                patch = {"status": "OPEN", "last_open_ms": now, "last_msg_ms": now, "last_heartbeat_ms": now}
-                if attempt > 0:
-                    patch["reconnect_count"] = self.wallet_status.get(wallet, {}).get("reconnect_count", 0) + 1
+                backoff = max(0.1, LIVE_WS_INITIAL_BACKOFF_SEC)
+                patch = {
+                    "status": "OPEN",
+                    "last_open_ms": now,
+                    "last_msg_ms": now,
+                    "last_heartbeat_ms": now,
+                    "reconnect_backoff_sec": backoff,
+                    "next_reconnect_ms": 0,
+                }
                 self.update_status(wallet, **patch)
                 app.send(json.dumps({"method": "subscribe", "subscription": {"type": "userFills", "user": wallet}}))
 
@@ -1163,19 +1206,27 @@ class DedicatedLiveWSManager:
             def on_error(_app: Any, error: Any) -> None:
                 with self.status_lock:
                     status = self.wallet_status[wallet]
+                    if is_benign_ws_error(error):
+                        status["benign_event_count"] += 1
+                        status["last_benign_event_repr"] = repr(error)
+                        status["last_heartbeat_ms"] = utc_now_ms()
+                        return
                     status["status"] = "ERROR"
                     status["error_count"] += 1
                     status["last_error"] = str(error)
                     status["last_error_repr"] = repr(error)
 
             def on_close(_app: Any, close_status_code: Any, close_msg: Any) -> None:
-                self.update_status(
-                    wallet,
-                    status="CLOSED",
-                    last_close_ms=utc_now_ms(),
-                    last_close_status_code=close_status_code,
-                    last_close_msg=str(close_msg or ""),
-                )
+                message = str(close_msg or "")
+                if close_status_code is None and not message:
+                    message = "run_forever returned/connection closed without close frame"
+                with self.status_lock:
+                    status = self.wallet_status[wallet]
+                    status["status"] = "CLOSED"
+                    status["close_count"] += 1
+                    status["last_close_ms"] = utc_now_ms()
+                    status["last_close_status_code"] = close_status_code
+                    status["last_close_msg"] = message
 
             try:
                 app = websocket.WebSocketApp(
@@ -1204,9 +1255,22 @@ class DedicatedLiveWSManager:
 
             if self.stop_event.is_set():
                 break
+            now = utc_now_ms()
+            next_reconnect_ms = now + int(backoff * 1000)
+            with self.status_lock:
+                status = self.wallet_status[wallet]
+                status["status"] = "RECONNECTING"
+                status["last_run_forever_return_ms"] = now
+                status["reconnect_count"] += 1
+                status["reconnect_backoff_sec"] = backoff
+                status["next_reconnect_ms"] = next_reconnect_ms
+                if not status.get("last_close_msg"):
+                    status["last_close_msg"] = "run_forever returned/connection closed without close frame"
+            write_ws_health(self)
+            while not self.stop_event.is_set() and utc_now_ms() < next_reconnect_ms:
+                self.stop_event.wait(min(0.5, max(0.0, (next_reconnect_ms - utc_now_ms()) / 1000)))
             attempt += 1
-            backoff = min(LIVE_WS_RECONNECT_BACKOFF_CAP_SEC, max(1.0, 2 ** min(attempt, 5)))
-            self.stop_event.wait(backoff)
+            backoff = min(LIVE_WS_RECONNECT_BACKOFF_CAP_SEC, max(0.1, backoff * LIVE_WS_BACKOFF_MULTIPLIER))
 
 
 def write_self_test_fills(path: Path, rows: List[Dict[str, Any]]) -> None:
@@ -1344,8 +1408,14 @@ def self_test() -> bool:
             if "source=live_ws" not in ws_intent.get("notes", ""):
                 raise AssertionError(f"WS order intent notes missing source label: {ws_intent}")
 
+            class ABNF:
+                __module__ = "websocket._abnf"
+
+            if not is_benign_ws_error(ABNF()):
+                raise AssertionError("ABNF websocket callback object was not classified as benign")
+
             manager = DedicatedLiveWSManager(service, [wallet])
-            manager.update_status(wallet, status="OPEN", last_open_ms=utc_now_ms(), last_data_ms=0)
+            manager.update_status(wallet, status="OPEN", last_open_ms=utc_now_ms(), last_data_ms=0, benign_event_count=2)
             health_snapshot = build_ws_health_snapshot(manager)
             wallet_health = health_snapshot.get("wallets", {}).get(wallet, {})
             if wallet_health.get("effective_status") != "OPEN":
@@ -1354,6 +1424,24 @@ def self_test() -> bool:
                 raise AssertionError(f"quiet open WS data status mismatch: {health_snapshot}")
             if health_snapshot.get("overall") != "OK":
                 raise AssertionError(f"quiet open WS should not degrade overall: {health_snapshot}")
+            if wallet_health.get("benign_event_count") != 2:
+                raise AssertionError(f"WS benign event count missing from health: {health_snapshot}")
+            reconnect_wallet = "0xreconnect"
+            manager.update_status(
+                reconnect_wallet,
+                status="RECONNECTING",
+                last_close_ms=utc_now_ms(),
+                next_reconnect_ms=utc_now_ms() + 5000,
+                reconnect_backoff_sec=5.0,
+            )
+            reconnect_snapshot = build_ws_health_snapshot(manager)
+            reconnect_health = reconnect_snapshot.get("wallets", {}).get(reconnect_wallet, {})
+            if reconnect_health.get("effective_status") != "RECONNECTING":
+                raise AssertionError(f"reconnecting wallet status mismatch: {reconnect_snapshot}")
+            if reconnect_health.get("reconnect_in_ms", 0) <= 0:
+                raise AssertionError(f"reconnect countdown missing: {reconnect_snapshot}")
+            if reconnect_snapshot.get("overall") != "DEGRADED":
+                raise AssertionError(f"reconnecting wallet should degrade overall: {reconnect_snapshot}")
             write_ws_health(manager)
             health = load_json(LIVE_WS_HEALTH_FILE, {})
             if health.get("mode") != "DEDICATED_SOCKET_PER_WALLET":
