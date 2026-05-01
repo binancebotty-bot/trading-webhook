@@ -236,6 +236,20 @@ def load_json(path: Path, default: Any) -> Any:
     return default
 
 
+def get_wallet_live_config(wallet: str) -> Dict[str, Any]:
+    try:
+        if APP_CONFIG_FILE.exists():
+            cfg = json.loads(APP_CONFIG_FILE.read_text(encoding="utf-8-sig"))
+            wallets = cfg.get("wallets") if isinstance(cfg, dict) else None
+            if isinstance(wallets, dict):
+                entry = wallets.get(str(wallet or "").lower().strip())
+                if isinstance(entry, dict):
+                    return entry
+    except Exception:
+        pass
+    return {}
+
+
 def atomic_write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}_{time.time_ns()}.tmp")
@@ -672,6 +686,24 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
         append_send_attempt(row, "INTENT_REFUSED", confirmed=confirm_send, error=error, notes="manual one-shot send refused by payload validation")
         return {"ok": False, "status": "INTENT_REFUSED", "intent_id": intent_id, "error": error, "row": row}
 
+    wallet_cfg = get_wallet_live_config(str(row.get("leader_wallet", "")))
+    if wallet_cfg.get("max_manual_order_notional_usd") is not None:
+        manual_open_cap = fnum(wallet_cfg["max_manual_order_notional_usd"], LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD)
+        limit_source = "wallet_config"
+    elif wallet_cfg.get("fixed_notional") is not None:
+        manual_open_cap = fnum(wallet_cfg["fixed_notional"], LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD)
+        limit_source = "wallet_config"
+    else:
+        manual_open_cap = LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD
+        limit_source = "env_fallback"
+    close_adverse_diff_limit = (
+        fnum(wallet_cfg["max_close_adverse_diff_pct"], LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT)
+        if wallet_cfg.get("max_close_adverse_diff_pct") is not None
+        else LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT
+    )
+    if wallet_cfg.get("max_close_adverse_diff_pct") is not None and limit_source == "env_fallback":
+        limit_source = "wallet_config"
+
     payload = {
         "coin": row.get("coin", ""),
         "side": row.get("side", ""),
@@ -716,6 +748,8 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
     payload["position_before"] = position_before
     payload["close_position"] = bool(close_position)
     payload["size_source"] = size_source
+    payload["manual_open_cap"] = manual_open_cap
+    payload["limit_source"] = limit_source
     is_close_guard_path = (
         bool(close_position)
         and bool(payload.get("reduce_only"))
@@ -757,11 +791,11 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
             else:
                 _adv = max(0.0, (_ref - _wire) / _ref * 100.0) if _ref > 0 else 0.0
             payload["close_adverse_diff_pct"] = _adv
-            payload["close_adverse_diff_limit_pct"] = LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT
-            if _adv > LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT:
+            payload["close_adverse_diff_limit_pct"] = close_adverse_diff_limit
+            if _adv > close_adverse_diff_limit:
                 append_send_attempt(
                     row, "CLOSE_ADVERSE_DIFF_TOO_LARGE", confirmed=confirm_send,
-                    error=f"close_adverse_diff_pct={_adv:.4f} > limit={LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT}",
+                    error=f"close_adverse_diff_pct={_adv:.4f} > limit={close_adverse_diff_limit}",
                     notes="close adverse diff guard rejected",
                 )
                 return {
@@ -769,7 +803,7 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
                     "status": "CLOSE_ADVERSE_DIFF_TOO_LARGE",
                     "intent_id": intent_id,
                     "close_adverse_diff_pct": _adv,
-                    "close_adverse_diff_limit_pct": LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT,
+                    "close_adverse_diff_limit_pct": close_adverse_diff_limit,
                     "close_notional_cap_bypassed": True,
                     "notional_cap_reason": "manual_close_diff_guard",
                     "payload": payload,
@@ -784,7 +818,7 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
         payload,
         marketable_bps=marketable_bps,
         use_current_quote=bool(use_current_quote and close_position),
-        max_notional=1e12 if is_close_guard_path else None,
+        max_notional=1e12 if is_close_guard_path else manual_open_cap,
     )
     status = str(result.get("status") or "ORDER_SENDER_NOT_IMPLEMENTED")
     position_after = position_before
@@ -2874,10 +2908,17 @@ def self_test() -> bool:
             if missing_creds.get("status") != "CREDENTIALS_MISSING":
                 raise AssertionError(f"confirmed manual send should require credentials: {missing_creds}")
             LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = 1.0
+            _ncfg = load_json(APP_CONFIG_FILE, {})
+            _ncfg["wallets"][wallet]["max_manual_order_notional_usd"] = 1.0
+            safe_atomic_write_json(APP_CONFIG_FILE, _ncfg)
             os.environ["HL_LIVE_HL_PRIVATE_KEY"] = "0x" + ("1" * 64)
             max_refused = manual_send_one_intent(str(ws_intent.get("intent_id")), True)
             if max_refused.get("status") != "MAX_NOTIONAL_EXCEEDED":
                 raise AssertionError(f"manual send should enforce max notional: {max_refused}")
+            if max_refused.get("response", {}).get("notional_cap_reason") != "manual_open_cap":
+                raise AssertionError(f"MAX_NOTIONAL_EXCEEDED missing notional_cap_reason: {max_refused}")
+            _ncfg["wallets"][wallet].pop("max_manual_order_notional_usd", None)
+            safe_atomic_write_json(APP_CONFIG_FILE, _ncfg)
             LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = 25.0
             safe_ok, safe_value, safe_error = wire_safe_float(0.038284839204, "size")
             if not safe_ok or safe_value <= 0 or safe_value > 0.038284839204:
@@ -2968,6 +3009,80 @@ def self_test() -> bool:
             no_position = manual_send_one_intent("manual-close-dust", False, close_position=True)
             if no_position.get("status") != "NO_MANUAL_POSITION_TO_CLOSE":
                 raise AssertionError(f"close-position should refuse without tracked position: {no_position}")
+
+            # --- wallet-config limit self-tests ---
+            # Reuses ws_intent (BTC BUY, leader_wallet=wallet) and would_send_row.
+
+            # 1. wallet fixed_notional controls manual open cap (no max_manual_order_notional_usd)
+            _wlcfg = load_json(APP_CONFIG_FILE, {})
+            _wlcfg["wallets"][wallet].pop("max_manual_order_notional_usd", None)
+            _wlcfg["wallets"][wallet]["fixed_notional"] = 20.0
+            safe_atomic_write_json(APP_CONFIG_FILE, _wlcfg)
+            _fn_preview = manual_send_one_intent(str(ws_intent.get("intent_id")), False)
+            if _fn_preview.get("payload", {}).get("manual_open_cap") != 20.0:
+                raise AssertionError(f"fixed_notional should set manual_open_cap=20.0: {_fn_preview}")
+            if _fn_preview.get("payload", {}).get("limit_source") != "wallet_config":
+                raise AssertionError(f"limit_source should be wallet_config via fixed_notional: {_fn_preview}")
+
+            # 2. max_manual_order_notional_usd overrides fixed_notional
+            _wlcfg["wallets"][wallet]["max_manual_order_notional_usd"] = 8.0
+            safe_atomic_write_json(APP_CONFIG_FILE, _wlcfg)
+            _override_preview = manual_send_one_intent(str(ws_intent.get("intent_id")), False)
+            if _override_preview.get("payload", {}).get("manual_open_cap") != 8.0:
+                raise AssertionError(f"max_manual_order_notional_usd should override fixed_notional: {_override_preview}")
+
+            # 3. env fallback when wallet not in config
+            _unknown_row = dict(would_send_row)
+            _unknown_row["intent_id"] = "unknown-wallet-intent"
+            _unknown_row["leader_wallet"] = "0x0000000000000000000000000000000000000099"
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, _unknown_row)
+            LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = 11.0
+            _env_fb = manual_send_one_intent("unknown-wallet-intent", False)
+            LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = 25.0
+            if _env_fb.get("payload", {}).get("manual_open_cap") != 11.0:
+                raise AssertionError(f"env fallback manual_open_cap should be 11.0: {_env_fb}")
+            if _env_fb.get("payload", {}).get("limit_source") != "env_fallback":
+                raise AssertionError(f"limit_source should be env_fallback for unknown wallet: {_env_fb}")
+
+            # 4. wallet max_close_adverse_diff_pct controls close guard
+            # (TAO close section below will re-set meta; set it up here with wallet config)
+            HL_PERP_META_BY_COIN_CACHE = {"TAO": {"szDecimals": 3, "name": "TAO"}}
+            _wlcfg["wallets"][wallet]["max_close_adverse_diff_pct"] = 0.001
+            _wlcfg["wallets"][wallet].pop("max_manual_order_notional_usd", None)
+            safe_atomic_write_json(APP_CONFIG_FILE, _wlcfg)
+            _tao_wc_row = {
+                "created_at": utc_now_iso(), "dry_run": True, "intent_id": "tao-wc-close",
+                "leader_wallet": wallet, "leader_fill_id": "tao-wc-close", "source_reason": "LIVE_MANUAL_TEST",
+                "execution_decision": "WOULD_PLACE_IOC_LIMIT", "decision_reason": "LIVE_WS_FAST_PATH",
+                "coin": "TAO", "side": "SELL", "copy_size": 0.05, "copy_notional": 13.06,
+                "order_type": "IOC_LIMIT", "limit_price": 261.2, "reduce_only": True,
+                "manual_reconcile_required": False, "status": "WOULD_SEND_DRY_RUN", "notes": "self-test",
+            }
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, _tao_wc_row)
+            save_manual_live_positions({"TAO": {"signed_size": 0.05, "last_updated_at": utc_now_iso(), "last_oid": "wc", "last_intent_id": "wc"}})
+
+            def _fake_wc_quote(coin: str, side: str) -> Dict[str, Any]:
+                return {"ok": True, "coin": coin, "side": side, "bid": 261.7654321, "ask": 261.7654321,
+                        "executable_price": 261.7654321, "source": "test", "error": ""}
+
+            fetch_public_executable_quote = _fake_wc_quote
+            _wc_adverse = manual_send_one_intent("tao-wc-close", False, close_position=True, use_current_quote=True)
+            if _wc_adverse.get("status") != "CLOSE_ADVERSE_DIFF_TOO_LARGE":
+                raise AssertionError(f"wallet max_close_adverse_diff_pct=0.001 should block tiny adverse diff: {_wc_adverse}")
+            if _wc_adverse.get("payload", {}).get("close_adverse_diff_limit_pct") != 0.001:
+                raise AssertionError(f"close_adverse_diff_limit_pct should be wallet value 0.001: {_wc_adverse}")
+            # remove wallet close limit → env fallback 0.25% → passes
+            _wlcfg["wallets"][wallet].pop("max_close_adverse_diff_pct", None)
+            safe_atomic_write_json(APP_CONFIG_FILE, _wlcfg)
+            _wc_pass = manual_send_one_intent("tao-wc-close", False, close_position=True, use_current_quote=True)
+            if _wc_pass.get("status") != "CONFIRM_REQUIRED":
+                raise AssertionError(f"env fallback close guard (0.25%) should pass tiny adverse diff: {_wc_pass}")
+            fetch_public_executable_quote = old_fetch_public_executable_quote
+            save_manual_live_positions({})
+            # restore config baseline
+            _wlcfg["wallets"][wallet]["fixed_notional"] = 20.0
+            safe_atomic_write_json(APP_CONFIG_FILE, _wlcfg)
+            # --- end wallet-config limit self-tests ---
 
             # --- close adverse diff guard tests ---
             # Uses TAO meta (szDecimals=3) already in cache.
