@@ -8,9 +8,9 @@ Boundary:
 - Reads app live config from hl_live_copy_audit/live_config.json.
 - Reads leader fills from hl_copy_output/raw_live_fills.csv for dry-run replay/proof.
 - Writes only to permanent audit files outside hl_copy_output.
-- Does NOT place exchange orders.
-- Does NOT use private keys.
-- Does NOT open websockets.
+- Default WS/REST paths remain dry-run only and do not place exchange orders.
+- Private key use is limited to explicit manual --send-one-intent --confirm-send.
+- Opens websockets only when explicitly requested with --ws / HL_LIVE_WS_ENABLED.
 - Does NOT mutate engine truth or app-derived dashboard files.
 
 Run:
@@ -31,6 +31,7 @@ import time
 import traceback
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -93,7 +94,10 @@ LIVE_WS_PROACTIVE_RECYCLE_SEC = float(os.getenv("HL_LIVE_WS_PROACTIVE_RECYCLE_SE
 LIVE_WS_PROACTIVE_RECYCLE_ENABLED = os.getenv("HL_LIVE_WS_PROACTIVE_RECYCLE_ENABLED", "1") == "1"
 LIVE_WS_SNAPSHOT_RECOVERY_GRACE_MS = int(os.getenv("HL_LIVE_WS_SNAPSHOT_RECOVERY_GRACE_MS", "120000"))
 LIVE_QUOTE_CACHE_TTL_MS = int(os.getenv("HL_LIVE_QUOTE_CACHE_TTL_MS", "1000"))
+LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = float(os.getenv("HL_LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD", "25"))
+LIVE_ORDER_ENDPOINT = os.getenv("HL_LIVE_ORDER_ENDPOINT", "https://api.hyperliquid.xyz/exchange")
 LIVE_JSON_WRITE_LOCK = threading.RLock()
+HL_PERP_META_BY_COIN_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
 
 ORDER_INTENT_FIELDS = [
     "created_at", "intent_id", "dry_run", "leader_wallet", "leader_fill_id",
@@ -323,11 +327,228 @@ def append_send_attempt(intent_row: Dict[str, Any], status: str, confirmed: bool
     })
 
 
-def send_hyperliquid_order(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {"ok": False, "status": "ORDER_SENDER_NOT_IMPLEMENTED"}
+def wire_safe_float(value: Any, kind: str) -> Tuple[bool, float, str]:
+    try:
+        from hyperliquid.utils.signing import float_to_wire  # type: ignore
+        original = Decimal(str(value))
+        if original <= 0:
+            return False, 0.0, f"{kind} must be positive"
+        try:
+            float_to_wire(float(original))
+            return True, float(original), ""
+        except ValueError:
+            pass
+        for places in range(8, -1, -1):
+            quantum = Decimal("1").scaleb(-places)
+            candidate = original.quantize(quantum, rounding=ROUND_DOWN)
+            if candidate <= 0 or candidate > original:
+                continue
+            try:
+                float_to_wire(float(candidate))
+                return True, float(candidate), ""
+            except ValueError:
+                continue
+        return False, 0.0, f"{kind} is not wire-safe after rounding down"
+    except Exception as exc:
+        return False, 0.0, f"{kind} wire conversion failed: {exc!r}"
 
 
-def manual_send_one_intent(intent_id: str, confirm_send: bool) -> Dict[str, Any]:
+def get_hl_perp_meta_by_coin() -> Dict[str, Dict[str, Any]]:
+    global HL_PERP_META_BY_COIN_CACHE
+    if HL_PERP_META_BY_COIN_CACHE is not None:
+        return HL_PERP_META_BY_COIN_CACHE
+    if requests is None:
+        HL_PERP_META_BY_COIN_CACHE = {}
+        return HL_PERP_META_BY_COIN_CACHE
+    try:
+        response = requests.post("https://api.hyperliquid.xyz/info", json={"type": "meta"}, timeout=8)
+        data = response.json()
+        universe = data.get("universe") if isinstance(data, dict) else None
+        out: Dict[str, Dict[str, Any]] = {}
+        if isinstance(universe, list):
+            for item in universe:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).upper().strip()
+                if not name:
+                    continue
+                out[name] = {"szDecimals": inum(item.get("szDecimals")), "name": name}
+        HL_PERP_META_BY_COIN_CACHE = out
+        return out
+    except Exception:
+        HL_PERP_META_BY_COIN_CACHE = {}
+        return HL_PERP_META_BY_COIN_CACHE
+
+
+def floor_decimal_to_places(value: Any, places: int) -> Decimal:
+    quant = Decimal("1").scaleb(-max(0, int(places)))
+    return Decimal(str(value)).quantize(quant, rounding=ROUND_DOWN)
+
+
+def round_price_hl_perp(price: Any, sz_decimals: int) -> Decimal:
+    max_decimals = max(0, 6 - int(sz_decimals))
+    candidate = floor_decimal_to_places(price, max_decimals)
+    if candidate <= 0:
+        return candidate
+    sig_quant = Decimal("1e{}".format(candidate.adjusted() - 4))
+    candidate = candidate.quantize(sig_quant, rounding=ROUND_DOWN)
+    return floor_decimal_to_places(candidate, max_decimals)
+
+
+def response_has_order_error(response: Any) -> bool:
+    if not isinstance(response, dict):
+        return False
+    if response.get("status") == "err":
+        return True
+    statuses = (((response.get("response") or {}).get("data") or {}).get("statuses"))
+    if not isinstance(statuses, list):
+        return False
+    return any(isinstance(item, dict) and item.get("error") for item in statuses)
+
+
+def prepare_hl_order_numbers(coin: str, size: Any, limit_px: Any, max_notional: float) -> Dict[str, Any]:
+    meta = get_hl_perp_meta_by_coin()
+    item = meta.get(str(coin or "").upper().strip())
+    if not item:
+        return {"ok": False, "status": "META_UNAVAILABLE", "error": f"missing perp meta for {coin}"}
+    try:
+        from hyperliquid.utils.signing import float_to_wire  # type: ignore
+        sz_decimals = inum(item.get("szDecimals"))
+        original_size = Decimal(str(size))
+        original_limit_price = Decimal(str(limit_px))
+        wire_size_dec = floor_decimal_to_places(original_size, sz_decimals)
+        wire_limit_dec = round_price_hl_perp(original_limit_price, sz_decimals)
+        if wire_size_dec <= 0 or wire_limit_dec <= 0:
+            return {
+                "ok": False,
+                "status": "WIRE_NUMBER_UNSAFE",
+                "error": "size/price rounded to non-positive value",
+                "szDecimals": sz_decimals,
+                "original_size": float(original_size),
+                "original_limit_price": float(original_limit_price),
+            }
+        wire_notional_dec = wire_size_dec * wire_limit_dec
+        if wire_notional_dec < Decimal("10.0"):
+            return {
+                "ok": False,
+                "status": "MIN_NOTIONAL_AFTER_ROUNDING",
+                "szDecimals": sz_decimals,
+                "original_size": float(original_size),
+                "wire_size": float(wire_size_dec),
+                "original_limit_price": float(original_limit_price),
+                "wire_limit_price": float(wire_limit_dec),
+                "wire_notional": float(wire_notional_dec),
+            }
+        if wire_notional_dec > Decimal(str(max_notional)):
+            return {
+                "ok": False,
+                "status": "MAX_NOTIONAL_EXCEEDED",
+                "cap": max_notional,
+                "copy_notional": float(wire_notional_dec),
+                "szDecimals": sz_decimals,
+                "original_size": float(original_size),
+                "wire_size": float(wire_size_dec),
+                "original_limit_price": float(original_limit_price),
+                "wire_limit_price": float(wire_limit_dec),
+                "wire_notional": float(wire_notional_dec),
+            }
+        float_to_wire(float(wire_size_dec))
+        float_to_wire(float(wire_limit_dec))
+        return {
+            "ok": True,
+            "status": "OK",
+            "szDecimals": sz_decimals,
+            "original_size": float(original_size),
+            "wire_size": float(wire_size_dec),
+            "original_limit_price": float(original_limit_price),
+            "wire_limit_price": float(wire_limit_dec),
+            "wire_notional": float(wire_notional_dec),
+        }
+    except Exception as exc:
+        return {"ok": False, "status": "WIRE_NUMBER_UNSAFE", "error": repr(exc)}
+
+
+def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0) -> Dict[str, Any]:
+    coin = str(payload.get("coin", "")).upper().strip()
+    side = str(payload.get("side", "")).upper().strip()
+    size = fnum(payload.get("copy_size"))
+    limit_px = fnum(payload.get("limit_price"))
+    reduce_only = bool(payload.get("reduce_only"))
+    marketable_bps = fnum(marketable_bps)
+    if marketable_bps < 0:
+        return {"ok": False, "status": "MARKETABLE_BPS_INVALID", "marketable_bps": marketable_bps}
+    if marketable_bps > 20:
+        return {"ok": False, "status": "MARKETABLE_BPS_TOO_HIGH", "marketable_bps": marketable_bps}
+    adjusted_limit_px = limit_px
+    if marketable_bps > 0:
+        multiplier = 1 + (marketable_bps / 10000.0) if side == "BUY" else 1 - (marketable_bps / 10000.0)
+        adjusted_limit_px = limit_px * multiplier
+    private_key = os.getenv("HL_LIVE_HL_PRIVATE_KEY", "").strip()
+    if not private_key:
+        return {"ok": False, "status": "CREDENTIALS_MISSING"}
+    try:
+        from eth_account import Account  # type: ignore
+        from hyperliquid.exchange import Exchange  # type: ignore
+    except Exception as exc:
+        return {"ok": False, "status": "SDK_UNAVAILABLE", "error": repr(exc)}
+
+    try:
+        prepared = prepare_hl_order_numbers(coin, size, adjusted_limit_px, LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD)
+        if not prepared.get("ok"):
+            return {"ok": False, "marketable_bps": marketable_bps, "adjusted_limit_price": adjusted_limit_px, **prepared}
+        wire_size = fnum(prepared.get("wire_size"))
+        wire_limit_px = fnum(prepared.get("wire_limit_price"))
+        account = Account.from_key(private_key)
+        base_url = str(LIVE_ORDER_ENDPOINT or "").strip() or "https://api.hyperliquid.xyz/exchange"
+        if base_url.endswith("/exchange"):
+            base_url = base_url[: -len("/exchange")]
+        account_address = os.getenv("HL_LIVE_HL_ACCOUNT_ADDRESS", "").strip() or None
+        exchange = Exchange(account, base_url=base_url, account_address=account_address)
+        response = exchange.order(
+            coin,
+            side == "BUY",
+            wire_size,
+            wire_limit_px,
+            {"limit": {"tif": "Ioc"}},
+            reduce_only=reduce_only,
+        )
+        ok = not response_has_order_error(response)
+        return {
+            "ok": bool(ok),
+            "status": "ORDER_SUBMITTED" if ok else "ORDER_REJECTED",
+            "response": response,
+            "coin": coin,
+            "side": side,
+            "size": wire_size,
+            "limit_price": wire_limit_px,
+            "marketable_bps": marketable_bps,
+            "adjusted_limit_price": adjusted_limit_px,
+            "szDecimals": prepared.get("szDecimals"),
+            "original_size": prepared.get("original_size"),
+            "wire_size": prepared.get("wire_size"),
+            "original_limit_price": limit_px,
+            "wire_limit_price": prepared.get("wire_limit_price"),
+            "wire_notional": prepared.get("wire_notional"),
+            "reduce_only": reduce_only,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "ORDER_REJECTED",
+            "error": repr(exc),
+            "coin": coin,
+            "side": side,
+            "size": size,
+            "limit_price": limit_px,
+            "marketable_bps": marketable_bps,
+            "adjusted_limit_price": adjusted_limit_px,
+            "original_size": size,
+            "original_limit_price": limit_px,
+            "reduce_only": reduce_only,
+        }
+
+
+def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: float = 0.0) -> Dict[str, Any]:
     ensure_csv_schema(SEND_ATTEMPTS_CSV, SEND_ATTEMPT_FIELDS)
     row = load_would_send_order(intent_id)
     if row is None:
@@ -363,14 +584,28 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool) -> Dict[str, Any]
         "copy_notional": fnum(row.get("copy_notional")),
         "reduce_only": truthy_csv(row.get("reduce_only")),
     }
+    marketable_bps = fnum(marketable_bps)
+    if marketable_bps < 0:
+        append_send_attempt(row, "MARKETABLE_BPS_INVALID", confirmed=confirm_send, error="marketable_bps must be >= 0")
+        return {"ok": False, "status": "MARKETABLE_BPS_INVALID", "intent_id": intent_id, "marketable_bps": marketable_bps}
+    if marketable_bps > 20:
+        append_send_attempt(row, "MARKETABLE_BPS_TOO_HIGH", confirmed=confirm_send, error="marketable_bps must be <= 20")
+        return {"ok": False, "status": "MARKETABLE_BPS_TOO_HIGH", "intent_id": intent_id, "marketable_bps": marketable_bps}
+    payload["marketable_bps"] = marketable_bps
+    adjusted_limit_price = fnum(payload.get("limit_price"))
+    if marketable_bps > 0:
+        side = str(payload.get("side", "")).upper()
+        multiplier = 1 + (marketable_bps / 10000.0) if side == "BUY" else 1 - (marketable_bps / 10000.0)
+        adjusted_limit_price *= multiplier
+    payload["adjusted_limit_price"] = adjusted_limit_price
     if not confirm_send:
         append_send_attempt(row, "CONFIRM_REQUIRED", confirmed=False, response={"payload": payload}, notes="pass --confirm-send to reach disabled sender placeholder")
         return {"ok": False, "status": "CONFIRM_REQUIRED", "intent_id": intent_id, "payload": payload}
 
-    result = send_hyperliquid_order(payload)
+    result = send_hyperliquid_order(payload, marketable_bps=marketable_bps)
     status = str(result.get("status") or "ORDER_SENDER_NOT_IMPLEMENTED")
-    append_send_attempt(row, status, confirmed=True, response=result, notes="disabled sender placeholder; no order placed")
-    return {"ok": False, "status": status, "intent_id": intent_id, "payload": payload, "response": result}
+    append_send_attempt(row, status, confirmed=True, response=result, notes="manual one-shot sender result")
+    return {"ok": bool(result.get("ok")), "status": status, "intent_id": intent_id, "payload": payload, "response": result}
 
 
 def side_from_signed(value: float) -> str:
@@ -2190,7 +2425,8 @@ def last_csv_row(path: Path) -> Dict[str, Any]:
 
 
 def self_test() -> bool:
-    global LIVE_POLL_ENABLED, fetch_live_fills_since, fetch_public_executable_quote
+    global LIVE_POLL_ENABLED, LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD
+    global HL_PERP_META_BY_COIN_CACHE, fetch_live_fills_since, fetch_public_executable_quote
 
     old_paths = (
         AUDIT_DIR, RAW_LEADER_FILLS_CSV, APP_CONFIG_FILE, APPEND_ONLY_DIR,
@@ -2199,6 +2435,10 @@ def self_test() -> bool:
         SEND_ATTEMPTS_CSV, LIVE_FILLS_CSV, RECONCILIATION_CSV, ERRORS_CSV,
     )
     old_poll_enabled = LIVE_POLL_ENABLED
+    old_max_manual_order_notional = LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD
+    old_meta_cache = HL_PERP_META_BY_COIN_CACHE
+    old_private_key = os.environ.get("HL_LIVE_HL_PRIVATE_KEY")
+    old_account_address = os.environ.get("HL_LIVE_HL_ACCOUNT_ADDRESS")
     old_fetch_live_fills_since = fetch_live_fills_since
     old_fetch_public_executable_quote = fetch_public_executable_quote
     wallet = "0xabc0000000000000000000000000000000000001"
@@ -2384,6 +2624,22 @@ def self_test() -> bool:
             confirm_required = manual_send_one_intent(str(ws_intent.get("intent_id")), False)
             if confirm_required.get("status") != "CONFIRM_REQUIRED" or confirm_required.get("payload", {}).get("order_type") != "IOC_LIMIT":
                 raise AssertionError(f"manual send should require confirmation and show payload: {confirm_required}")
+            buy_offset = manual_send_one_intent(str(ws_intent.get("intent_id")), False, marketable_bps=5)
+            if buy_offset.get("payload", {}).get("adjusted_limit_price", 0) <= buy_offset.get("payload", {}).get("limit_price", 0):
+                raise AssertionError(f"BUY marketable offset did not increase price: {buy_offset}")
+            sell_payload = dict(would_send_row)
+            sell_payload["intent_id"] = "sell-offset-intent"
+            sell_payload["side"] = "SELL"
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, sell_payload)
+            sell_offset = manual_send_one_intent("sell-offset-intent", False, marketable_bps=5)
+            if sell_offset.get("payload", {}).get("adjusted_limit_price", 0) >= sell_offset.get("payload", {}).get("limit_price", 0):
+                raise AssertionError(f"SELL marketable offset did not decrease price: {sell_offset}")
+            too_high_bps = manual_send_one_intent(str(ws_intent.get("intent_id")), False, marketable_bps=20.1)
+            if too_high_bps.get("status") != "MARKETABLE_BPS_TOO_HIGH":
+                raise AssertionError(f"marketable bps >20 should be rejected: {too_high_bps}")
+            default_offset = manual_send_one_intent(str(ws_intent.get("intent_id")), False)
+            if default_offset.get("payload", {}).get("adjusted_limit_price") != default_offset.get("payload", {}).get("limit_price"):
+                raise AssertionError(f"default marketable offset should be unchanged: {default_offset}")
             invalid_would_send = dict(would_send_row)
             invalid_would_send["intent_id"] = "manual-review-intent"
             invalid_would_send["execution_decision"] = "MANUAL_REVIEW"
@@ -2392,9 +2648,48 @@ def self_test() -> bool:
             refused = manual_send_one_intent("manual-review-intent", False)
             if refused.get("status") != "INTENT_REFUSED":
                 raise AssertionError(f"manual review would-send row should be refused: {refused}")
-            not_implemented = manual_send_one_intent(str(ws_intent.get("intent_id")), True)
-            if not_implemented.get("status") != "ORDER_SENDER_NOT_IMPLEMENTED":
-                raise AssertionError(f"confirmed manual send should stop at disabled placeholder: {not_implemented}")
+            os.environ.pop("HL_LIVE_HL_PRIVATE_KEY", None)
+            missing_creds = manual_send_one_intent(str(ws_intent.get("intent_id")), True)
+            if missing_creds.get("status") != "CREDENTIALS_MISSING":
+                raise AssertionError(f"confirmed manual send should require credentials: {missing_creds}")
+            LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = 1.0
+            os.environ["HL_LIVE_HL_PRIVATE_KEY"] = "0x" + ("1" * 64)
+            max_refused = manual_send_one_intent(str(ws_intent.get("intent_id")), True)
+            if max_refused.get("status") != "MAX_NOTIONAL_EXCEEDED":
+                raise AssertionError(f"manual send should enforce max notional: {max_refused}")
+            LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = 25.0
+            safe_ok, safe_value, safe_error = wire_safe_float(0.038284839204, "size")
+            if not safe_ok or safe_value <= 0 or safe_value > 0.038284839204:
+                raise AssertionError(f"wire_safe_float did not round size safely: ok={safe_ok} value={safe_value} error={safe_error}")
+            zero_ok, _zero_value, _zero_error = wire_safe_float(0, "size")
+            negative_ok, _negative_value, _negative_error = wire_safe_float(-0.1, "size")
+            if zero_ok or negative_ok:
+                raise AssertionError("wire_safe_float should reject zero/negative values")
+            HL_PERP_META_BY_COIN_CACHE = {"TAO": {"szDecimals": 3, "name": "TAO"}}
+            tao_too_small = prepare_hl_order_numbers("TAO", 0.038284839204, 261.2, 25.0)
+            if tao_too_small.get("status") != "MIN_NOTIONAL_AFTER_ROUNDING" or tao_too_small.get("wire_size") != 0.038:
+                raise AssertionError(f"TAO lot preflight should floor size and reject min notional: {tao_too_small}")
+            tao_valid = prepare_hl_order_numbers("TAO", 0.04, 261.2, 25.0)
+            if not tao_valid.get("ok") or tao_valid.get("wire_size") != 0.04 or tao_valid.get("wire_limit_price") != 261.2:
+                raise AssertionError(f"TAO lot preflight valid example failed: {tao_valid}")
+            rejected_response = {"status": "ok", "response": {"data": {"statuses": [{"error": "Order has invalid size."}]}}}
+            if not response_has_order_error(rejected_response):
+                raise AssertionError(f"SDK error response was not detected: {rejected_response}")
+            import builtins
+            real_import = builtins.__import__
+
+            def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+                if name.startswith("hyperliquid") or name.startswith("eth_account"):
+                    raise ImportError("forced self-test SDK unavailable")
+                return real_import(name, *args, **kwargs)
+
+            try:
+                builtins.__import__ = fake_import
+                sdk_result = send_hyperliquid_order({"coin": "BTC", "side": "BUY", "order_type": "IOC_LIMIT", "limit_price": 100.0, "copy_size": 0.01, "copy_notional": 1.0, "reduce_only": False})
+            finally:
+                builtins.__import__ = real_import
+            if sdk_result.get("status") != "SDK_UNAVAILABLE":
+                raise AssertionError(f"forced SDK unavailable path returned unexpected status: {sdk_result}")
             if count_csv_data_rows(SEND_ATTEMPTS_CSV) < 3:
                 raise AssertionError("send attempts ledger did not record manual send attempts")
 
@@ -2544,13 +2839,23 @@ def self_test() -> bool:
         return False
     finally:
         LIVE_POLL_ENABLED = old_poll_enabled
+        LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = old_max_manual_order_notional
+        HL_PERP_META_BY_COIN_CACHE = old_meta_cache
+        for key, value in {
+            "HL_LIVE_HL_PRIVATE_KEY": old_private_key,
+            "HL_LIVE_HL_ACCOUNT_ADDRESS": old_account_address,
+        }.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         fetch_live_fills_since = old_fetch_live_fills_since
         fetch_public_executable_quote = old_fetch_public_executable_quote
         configure_paths(old_paths[0], old_paths[1])
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Phase 2 dry-run live copy service. No exchange orders.")
+    parser = argparse.ArgumentParser(description="Dry-run live copy service with explicit manual one-shot sender.")
     parser.add_argument("--once", action="store_true", help="Run one dry-run replay cycle and exit.")
     parser.add_argument("--loop", action="store_true", help="Run continuously.")
     parser.add_argument("--interval", type=float, default=5.0, help="Loop interval seconds.")
@@ -2559,6 +2864,7 @@ def main() -> None:
     parser.add_argument("--ws", action="store_true", help="Run dedicated dry-run live websocket sockets for active wallets.")
     parser.add_argument("--send-one-intent", help="Inspect or manually send one would-send intent_id through the disabled sender skeleton.")
     parser.add_argument("--confirm-send", action="store_true", help="Confirm the manual one-shot sender path. Sender remains disabled in this skeleton.")
+    parser.add_argument("--marketable-bps", type=float, default=0.0, help="Optional manual IOC marketability offset in basis points, capped at 20.")
     args = parser.parse_args()
     if args.self_test:
         raise SystemExit(0 if self_test() else 1)
@@ -2572,7 +2878,7 @@ def main() -> None:
         configure_paths(REPLAY_AUDIT_DIR, RAW_LEADER_FILLS_CSV)
     service = DryRunLiveCopyService()
     if args.send_one_intent:
-        print(json.dumps(manual_send_one_intent(args.send_one_intent, bool(args.confirm_send)), indent=2, sort_keys=True))
+        print(json.dumps(manual_send_one_intent(args.send_one_intent, bool(args.confirm_send), marketable_bps=args.marketable_bps), indent=2, sort_keys=True))
         return
     if run_ws:
         config = service.load_config()
