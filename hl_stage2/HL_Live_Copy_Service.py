@@ -61,6 +61,7 @@ LIVE_EQUITY_HISTORY_FILE = AUDIT_DIR / "live_equity_history.json"
 LIVE_WS_HEALTH_FILE = AUDIT_DIR / "live_ws_health.json"
 
 ORDER_INTENTS_CSV = APPEND_ONLY_DIR / "order_intents.csv"
+WOULD_SEND_ORDERS_CSV = APPEND_ONLY_DIR / "would_send_orders.csv"
 LIVE_FILLS_CSV = APPEND_ONLY_DIR / "live_fills.csv"
 RECONCILIATION_CSV = APPEND_ONLY_DIR / "reconciliation.csv"
 ERRORS_CSV = APPEND_ONLY_DIR / "errors.csv"
@@ -104,6 +105,13 @@ ORDER_INTENT_FIELDS = [
     "market_data_source", "market_data_error",
 ]
 
+WOULD_SEND_ORDER_FIELDS = [
+    "created_at", "dry_run", "intent_id", "leader_wallet", "leader_fill_id",
+    "source_reason", "execution_decision", "decision_reason", "coin", "side",
+    "copy_size", "copy_notional", "order_type", "limit_price", "reduce_only",
+    "manual_reconcile_required", "status", "notes",
+]
+
 LIVE_FILL_FIELDS = [
     "created_at", "dry_run", "intent_id", "leader_wallet", "leader_fill_id",
     "coin", "side", "fill_status", "fill_price", "fill_size", "fill_notional",
@@ -122,7 +130,7 @@ ERROR_FIELDS = ["created_at", "context", "error_type", "message", "traceback"]
 
 def configure_paths(audit_dir: Path, source_fills: Path) -> None:
     global AUDIT_DIR, APP_CONFIG_FILE, APPEND_ONLY_DIR, SERVICE_STATE_FILE
-    global LIVE_POSITIONS_FILE, LIVE_EQUITY_HISTORY_FILE, LIVE_WS_HEALTH_FILE, ORDER_INTENTS_CSV
+    global LIVE_POSITIONS_FILE, LIVE_EQUITY_HISTORY_FILE, LIVE_WS_HEALTH_FILE, ORDER_INTENTS_CSV, WOULD_SEND_ORDERS_CSV
     global LIVE_FILLS_CSV, RECONCILIATION_CSV, ERRORS_CSV, RAW_LEADER_FILLS_CSV
 
     AUDIT_DIR = Path(audit_dir)
@@ -134,6 +142,7 @@ def configure_paths(audit_dir: Path, source_fills: Path) -> None:
     LIVE_EQUITY_HISTORY_FILE = AUDIT_DIR / "live_equity_history.json"
     LIVE_WS_HEALTH_FILE = AUDIT_DIR / "live_ws_health.json"
     ORDER_INTENTS_CSV = APPEND_ONLY_DIR / "order_intents.csv"
+    WOULD_SEND_ORDERS_CSV = APPEND_ONLY_DIR / "would_send_orders.csv"
     LIVE_FILLS_CSV = APPEND_ONLY_DIR / "live_fills.csv"
     RECONCILIATION_CSV = APPEND_ONLY_DIR / "reconciliation.csv"
     ERRORS_CSV = APPEND_ONLY_DIR / "errors.csv"
@@ -251,6 +260,21 @@ def append_csv(path: Path, fieldnames: List[str], row: Dict[str, Any]) -> None:
     ensure_csv_schema(path, fieldnames)
     with path.open("a", newline="", encoding="utf-8") as f:
         csv.DictWriter(f, fieldnames=fieldnames).writerow({k: row.get(k, "") for k in fieldnames})
+
+
+def load_csv_ids(path: Path, id_field: str) -> set:
+    if not path.exists() or path.stat().st_size <= 0:
+        return set()
+    try:
+        with path.open("r", newline="", encoding="utf-8-sig") as f:
+            return {str(row.get(id_field, "")).strip() for row in csv.DictReader(f) if str(row.get(id_field, "")).strip()}
+    except Exception:
+        return set()
+
+
+def should_write_would_send(decision: Dict[str, Any], row: Dict[str, Any]) -> bool:
+    execution_decision = str((decision or {}).get("execution_decision") or row.get("execution_decision") or "").strip()
+    return execution_decision in {"WOULD_PLACE_IOC_LIMIT", "WOULD_LATE_COPY", "WOULD_REDUCE_OR_EXIT"}
 
 
 def side_from_signed(value: float) -> str:
@@ -920,11 +944,13 @@ class DryRunLiveCopyService:
 
         for path, fields in [
             (ORDER_INTENTS_CSV, ORDER_INTENT_FIELDS),
+            (WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS),
             (LIVE_FILLS_CSV, LIVE_FILL_FIELDS),
             (RECONCILIATION_CSV, RECONCILIATION_FIELDS),
             (ERRORS_CSV, ERROR_FIELDS),
         ]:
             ensure_csv_schema(path, fields)
+        self.would_send_intent_ids = load_csv_ids(WOULD_SEND_ORDERS_CSV, "intent_id")
 
     def bump(self, key: str, amount: int = 1) -> None:
         counters = self.state.setdefault("counters", {})
@@ -1077,7 +1103,7 @@ class DryRunLiveCopyService:
 
     def append_order_intent(self, cfg: LiveWalletConfig, fill: LeaderFill, intent_id: str, linked_ids: List[str], intent_type: str, reason: str, status: str, copy_notional: float, copy_size: float, policy: str, notes: str = "", target_price: Optional[float] = None, diff_pct: Any = 0.0, decision: Optional[Dict[str, Any]] = None) -> None:
         decision = decision or {}
-        append_csv(ORDER_INTENTS_CSV, ORDER_INTENT_FIELDS, {
+        row = {
             "created_at": utc_now_iso(), "intent_id": intent_id, "dry_run": True,
             "leader_wallet": cfg.wallet, "leader_fill_id": fill.fill_id,
             "linked_leader_fill_ids": "|".join(linked_ids), "mode": cfg.mode,
@@ -1097,7 +1123,40 @@ class DryRunLiveCopyService:
             "manual_reconcile_required": decision.get("manual_reconcile_required", ""),
             "market_data_source": decision.get("market_data_source", ""),
             "market_data_error": decision.get("market_data_error", ""),
-        })
+        }
+        append_csv(ORDER_INTENTS_CSV, ORDER_INTENT_FIELDS, row)
+        if should_write_would_send(decision, row):
+            self.append_would_send_order(row)
+
+    def append_would_send_order(self, intent_row: Dict[str, Any]) -> None:
+        if not should_write_would_send(intent_row, intent_row):
+            return
+        intent_id = str(intent_row.get("intent_id", "")).strip()
+        if not intent_id or intent_id in self.would_send_intent_ids:
+            return
+        execution_decision = str(intent_row.get("execution_decision", ""))
+        row = {
+            "created_at": utc_now_iso(),
+            "dry_run": True,
+            "intent_id": intent_id,
+            "leader_wallet": intent_row.get("leader_wallet", ""),
+            "leader_fill_id": intent_row.get("leader_fill_id", ""),
+            "source_reason": intent_row.get("reason", ""),
+            "execution_decision": execution_decision,
+            "decision_reason": intent_row.get("decision_reason", ""),
+            "coin": intent_row.get("coin", ""),
+            "side": intent_row.get("side", ""),
+            "copy_size": intent_row.get("copy_size", ""),
+            "copy_notional": intent_row.get("copy_notional", ""),
+            "order_type": intent_row.get("suggested_order_type") or "IOC_LIMIT",
+            "limit_price": intent_row.get("suggested_limit_price") or intent_row.get("target_price", ""),
+            "reduce_only": execution_decision == "WOULD_REDUCE_OR_EXIT",
+            "manual_reconcile_required": intent_row.get("manual_reconcile_required", ""),
+            "status": "WOULD_SEND_DRY_RUN",
+            "notes": "dry-run would-send payload only; no order placed",
+        }
+        append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, row)
+        self.would_send_intent_ids.add(intent_id)
 
     def append_live_fill(self, cfg: LiveWalletConfig, fill: LeaderFill, intent_id: str, status: str, copy_notional: float, copy_size: float, pos: Dict[str, Any], realized_pnl: float, notes: str = "") -> None:
         append_csv(LIVE_FILLS_CSV, LIVE_FILL_FIELDS, {
@@ -2039,7 +2098,8 @@ def self_test() -> bool:
     old_paths = (
         AUDIT_DIR, RAW_LEADER_FILLS_CSV, APP_CONFIG_FILE, APPEND_ONLY_DIR,
         SERVICE_STATE_FILE, LIVE_POSITIONS_FILE, LIVE_EQUITY_HISTORY_FILE,
-        LIVE_WS_HEALTH_FILE, ORDER_INTENTS_CSV, LIVE_FILLS_CSV, RECONCILIATION_CSV, ERRORS_CSV,
+        LIVE_WS_HEALTH_FILE, ORDER_INTENTS_CSV, WOULD_SEND_ORDERS_CSV,
+        LIVE_FILLS_CSV, RECONCILIATION_CSV, ERRORS_CSV,
     )
     old_poll_enabled = LIVE_POLL_ENABLED
     old_fetch_live_fills_since = fetch_live_fills_since
@@ -2162,6 +2222,7 @@ def self_test() -> bool:
                 raise AssertionError(f"third run neither had zero selection nor duplicate skip: {third}")
 
             before_ws_rows = count_csv_data_rows(ORDER_INTENTS_CSV)
+            before_would_send_rows = count_csv_data_rows(WOULD_SEND_ORDERS_CSV)
             ws_message = json.dumps({
                 "channel": "userFills",
                 "data": {
@@ -2201,6 +2262,28 @@ def self_test() -> bool:
                 raise AssertionError(f"WS order intent decision columns mismatch: {ws_intent}")
             if "source=live_ws" not in ws_intent.get("notes", ""):
                 raise AssertionError(f"WS order intent notes missing source label: {ws_intent}")
+            after_would_send_rows = count_csv_data_rows(WOULD_SEND_ORDERS_CSV)
+            if after_would_send_rows - before_would_send_rows != 1:
+                raise AssertionError(f"expected one would-send row, before={before_would_send_rows} after={after_would_send_rows}")
+            would_send_row = last_csv_row(WOULD_SEND_ORDERS_CSV)
+            if (
+                would_send_row.get("coin") != "BTC"
+                or would_send_row.get("side") != "BUY"
+                or would_send_row.get("order_type") != "IOC_LIMIT"
+                or not would_send_row.get("copy_size")
+                or not would_send_row.get("limit_price")
+            ):
+                raise AssertionError(f"would-send row missing order payload fields: {would_send_row}")
+            service.append_would_send_order(ws_intent)
+            if count_csv_data_rows(WOULD_SEND_ORDERS_CSV) != after_would_send_rows:
+                raise AssertionError("duplicate would-send intent_id was appended")
+            manual_row = dict(ws_intent)
+            manual_row["intent_id"] = "manual-review-intent"
+            manual_row["execution_decision"] = "MANUAL_REVIEW"
+            manual_row["decision_reason"] = "RECOVERY_QUOTE_UNAVAILABLE"
+            service.append_would_send_order(manual_row)
+            if count_csv_data_rows(WOULD_SEND_ORDERS_CSV) != after_would_send_rows:
+                raise AssertionError("MANUAL_REVIEW should not append would-send row")
 
             class ABNF:
                 __module__ = "websocket._abnf"
