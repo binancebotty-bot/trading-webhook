@@ -96,6 +96,7 @@ LIVE_WS_PROACTIVE_RECYCLE_ENABLED = os.getenv("HL_LIVE_WS_PROACTIVE_RECYCLE_ENAB
 LIVE_WS_SNAPSHOT_RECOVERY_GRACE_MS = int(os.getenv("HL_LIVE_WS_SNAPSHOT_RECOVERY_GRACE_MS", "120000"))
 LIVE_QUOTE_CACHE_TTL_MS = int(os.getenv("HL_LIVE_QUOTE_CACHE_TTL_MS", "1000"))
 LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = float(os.getenv("HL_LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD", "25"))
+LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT = float(os.getenv("HL_LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT", "0.25"))
 LIVE_ORDER_ENDPOINT = os.getenv("HL_LIVE_ORDER_ENDPOINT", "https://api.hyperliquid.xyz/exchange")
 LIVE_JSON_WRITE_LOCK = threading.RLock()
 HL_PERP_META_BY_COIN_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
@@ -518,7 +519,7 @@ def prepare_hl_order_numbers(coin: str, size: Any, limit_px: Any, max_notional: 
         return {"ok": False, "status": "WIRE_NUMBER_UNSAFE", "error": repr(exc)}
 
 
-def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0) -> Dict[str, Any]:
+def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0, use_current_quote: bool = False, max_notional: Optional[float] = None) -> Dict[str, Any]:
     coin = str(payload.get("coin", "")).upper().strip()
     side = str(payload.get("side", "")).upper().strip()
     size = fnum(payload.get("copy_size"))
@@ -543,9 +544,13 @@ def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0)
         return {"ok": False, "status": "SDK_UNAVAILABLE", "error": repr(exc)}
 
     try:
-        prepared = prepare_hl_order_numbers(coin, size, adjusted_limit_px, LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD)
+        _effective_max_notional = max_notional if max_notional is not None else LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD
+        prepared = prepare_hl_order_numbers(coin, size, adjusted_limit_px, _effective_max_notional)
         if not prepared.get("ok"):
-            return {"ok": False, "marketable_bps": marketable_bps, "adjusted_limit_price": adjusted_limit_px, **prepared}
+            _out = {"ok": False, "marketable_bps": marketable_bps, "adjusted_limit_price": adjusted_limit_px, **prepared}
+            if prepared.get("status") == "MAX_NOTIONAL_EXCEEDED":
+                _out["notional_cap_reason"] = "manual_open_cap"
+            return _out
         wire_size = fnum(prepared.get("wire_size"))
         wire_limit_px = fnum(prepared.get("wire_limit_price"))
         account = Account.from_key(private_key)
@@ -577,6 +582,9 @@ def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0)
             "limit_price": wire_limit_px,
             "marketable_bps": marketable_bps,
             "adjusted_limit_price": adjusted_limit_px,
+            "use_current_quote": bool(use_current_quote),
+            "price_source": payload.get("price_source", "intent_price"),
+            "current_quote_price": payload.get("current_quote_price", ""),
             "szDecimals": prepared.get("szDecimals"),
             "original_size": prepared.get("original_size"),
             "wire_size": prepared.get("wire_size"),
@@ -596,13 +604,16 @@ def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0)
             "limit_price": limit_px,
             "marketable_bps": marketable_bps,
             "adjusted_limit_price": adjusted_limit_px,
+            "use_current_quote": bool(use_current_quote),
+            "price_source": payload.get("price_source", "intent_price"),
+            "current_quote_price": payload.get("current_quote_price", ""),
             "original_size": size,
             "original_limit_price": limit_px,
             "reduce_only": reduce_only,
         }
 
 
-def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: float = 0.0, close_position: bool = False) -> Dict[str, Any]:
+def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: float = 0.0, close_position: bool = False, use_current_quote: bool = False) -> Dict[str, Any]:
     ensure_csv_schema(SEND_ATTEMPTS_CSV, SEND_ATTEMPT_FIELDS)
     row = load_would_send_order(intent_id)
     if row is None:
@@ -650,6 +661,14 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
         payload["copy_size"] = abs(position_before)
         payload["reduce_only"] = True
         size_source = "manual_position_close"
+        if use_current_quote:
+            quote = fetch_public_executable_quote(str(payload.get("coin", "")), str(payload.get("side", "")))
+            if not quote.get("ok") or fnum(quote.get("executable_price")) <= 0:
+                append_send_attempt(row, "CURRENT_QUOTE_UNAVAILABLE", confirmed=confirm_send, error=str(quote.get("error") or "quote unavailable"))
+                return {"ok": False, "status": "CURRENT_QUOTE_UNAVAILABLE", "intent_id": intent_id, "quote": quote, "position_before": position_before, "close_position": True}
+            payload["limit_price"] = fnum(quote.get("executable_price"))
+            payload["current_quote_price"] = fnum(quote.get("executable_price"))
+            payload["price_source"] = "current_quote"
     elif payload.get("reduce_only") and position_before != 0:
         current_abs = abs(position_before)
         if fnum(payload.get("copy_size")) > current_abs:
@@ -658,10 +677,18 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
         payload["reduce_only"] = True
     elif payload.get("reduce_only"):
         payload["position_note"] = "no tracked manual live position; using payload size"
+    payload.setdefault("price_source", "intent_price")
+    payload["use_current_quote"] = bool(use_current_quote and close_position)
+    payload.setdefault("current_quote_price", "")
     payload["copy_notional"] = fnum(payload.get("copy_size")) * fnum(payload.get("limit_price"))
     payload["position_before"] = position_before
     payload["close_position"] = bool(close_position)
     payload["size_source"] = size_source
+    is_close_guard_path = (
+        bool(close_position)
+        and bool(payload.get("reduce_only"))
+        and size_source == "manual_position_close"
+    )
     marketable_bps = fnum(marketable_bps)
     if marketable_bps < 0:
         append_send_attempt(row, "MARKETABLE_BPS_INVALID", confirmed=confirm_send, error="marketable_bps must be >= 0")
@@ -676,11 +703,57 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
         multiplier = 1 + (marketable_bps / 10000.0) if side == "BUY" else 1 - (marketable_bps / 10000.0)
         adjusted_limit_price *= multiplier
     payload["adjusted_limit_price"] = adjusted_limit_price
+    if is_close_guard_path:
+        payload["close_notional_cap_bypassed"] = True
+        payload["notional_cap_reason"] = "manual_close_diff_guard"
+        _prep = prepare_hl_order_numbers(
+            str(payload.get("coin", "")).upper().strip(),
+            fnum(payload.get("copy_size")),
+            adjusted_limit_price,
+            1e12,
+        )
+        if _prep.get("ok"):
+            _side = str(payload.get("side", "")).upper()
+            _ref = (
+                fnum(payload.get("current_quote_price"))
+                if str(payload.get("price_source", "")) == "current_quote"
+                else fnum(payload.get("limit_price"))
+            )
+            _wire = fnum(_prep.get("wire_limit_price"))
+            if _side == "BUY":
+                _adv = max(0.0, (_wire - _ref) / _ref * 100.0) if _ref > 0 else 0.0
+            else:
+                _adv = max(0.0, (_ref - _wire) / _ref * 100.0) if _ref > 0 else 0.0
+            payload["close_adverse_diff_pct"] = _adv
+            payload["close_adverse_diff_limit_pct"] = LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT
+            if _adv > LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT:
+                append_send_attempt(
+                    row, "CLOSE_ADVERSE_DIFF_TOO_LARGE", confirmed=confirm_send,
+                    error=f"close_adverse_diff_pct={_adv:.4f} > limit={LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT}",
+                    notes="close adverse diff guard rejected",
+                )
+                return {
+                    "ok": False,
+                    "status": "CLOSE_ADVERSE_DIFF_TOO_LARGE",
+                    "intent_id": intent_id,
+                    "close_adverse_diff_pct": _adv,
+                    "close_adverse_diff_limit_pct": LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT,
+                    "close_notional_cap_bypassed": True,
+                    "notional_cap_reason": "manual_close_diff_guard",
+                    "payload": payload,
+                }
+        # META_UNAVAILABLE / MIN_NOTIONAL / WIRE_UNSAFE: skip adverse diff guard;
+        # send_hyperliquid_order will apply its own checks at send time.
     if not confirm_send:
         append_send_attempt(row, "CONFIRM_REQUIRED", confirmed=False, response={"payload": payload}, notes="pass --confirm-send to reach disabled sender placeholder")
         return {"ok": False, "status": "CONFIRM_REQUIRED", "intent_id": intent_id, "payload": payload}
 
-    result = send_hyperliquid_order(payload, marketable_bps=marketable_bps)
+    result = send_hyperliquid_order(
+        payload,
+        marketable_bps=marketable_bps,
+        use_current_quote=bool(use_current_quote and close_position),
+        max_notional=1e12 if is_close_guard_path else None,
+    )
     status = str(result.get("status") or "ORDER_SENDER_NOT_IMPLEMENTED")
     position_after = position_before
     if status == "ORDER_FILLED":
@@ -2514,7 +2587,7 @@ def last_csv_row(path: Path) -> Dict[str, Any]:
 
 
 def self_test() -> bool:
-    global LIVE_POLL_ENABLED, LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD
+    global LIVE_POLL_ENABLED, LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD, LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT
     global HL_PERP_META_BY_COIN_CACHE, fetch_live_fills_since, fetch_public_executable_quote, send_hyperliquid_order
 
     old_paths = (
@@ -2525,6 +2598,7 @@ def self_test() -> bool:
     )
     old_poll_enabled = LIVE_POLL_ENABLED
     old_max_manual_order_notional = LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD
+    old_max_close_adverse_diff = LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT
     old_meta_cache = HL_PERP_META_BY_COIN_CACHE
     old_private_key = os.environ.get("HL_LIVE_HL_PRIVATE_KEY")
     old_account_address = os.environ.get("HL_LIVE_HL_ACCOUNT_ADDRESS")
@@ -2786,7 +2860,7 @@ def self_test() -> bool:
             exit_intent.update({"intent_id": "manual-exit-fill", "side": "SELL", "copy_size": 51.5, "copy_notional": 10.46377, "limit_price": 0.20318, "reduce_only": True})
             append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, exit_intent)
 
-            def fake_sender(payload: Dict[str, Any], marketable_bps: float = 0.0) -> Dict[str, Any]:
+            def fake_sender(payload: Dict[str, Any], marketable_bps: float = 0.0, use_current_quote: bool = False, max_notional: Optional[float] = None) -> Dict[str, Any]:
                 return {
                     "ok": True, "status": "ORDER_FILLED", "fill_avg_px": str(payload.get("limit_price")),
                     "fill_size": str(payload.get("copy_size")), "oid": "selftest-oid",
@@ -2807,10 +2881,96 @@ def self_test() -> bool:
             close_preview = manual_send_one_intent("manual-close-dust", False, close_position=True)
             if close_preview.get("payload", {}).get("side") != "SELL" or not close_preview.get("payload", {}).get("reduce_only") or round(fnum(close_preview.get("payload", {}).get("copy_size")), 8) != 0.3:
                 raise AssertionError(f"close-position preview did not use tracked dust: {close_preview}")
+            save_manual_live_positions({"AVAX": {"signed_size": -1.15, "last_updated_at": utc_now_iso(), "last_oid": "short", "last_intent_id": "short"}})
+            avax_intent = dict(close_intent)
+            avax_intent.update({"intent_id": "manual-close-short-quote", "coin": "AVAX", "side": "SELL", "limit_price": 20.0})
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, avax_intent)
+
+            def fake_close_quote(coin: str, side: str) -> Dict[str, Any]:
+                if coin == "AVAX" and side == "BUY":
+                    return {"ok": True, "coin": coin, "side": side, "bid": 21.0, "ask": 21.1, "executable_price": 21.1, "source": "test", "error": ""}
+                if coin == "FARTCOIN" and side == "SELL":
+                    return {"ok": True, "coin": coin, "side": side, "bid": 0.2, "ask": 0.21, "executable_price": 0.2, "source": "test", "error": ""}
+                return {"ok": False, "coin": coin, "side": side, "bid": 0.0, "ask": 0.0, "executable_price": 0.0, "source": "test", "error": "missing"}
+
+            fetch_public_executable_quote = fake_close_quote
+            short_quote_preview = manual_send_one_intent("manual-close-short-quote", False, close_position=True, use_current_quote=True)
+            if short_quote_preview.get("payload", {}).get("side") != "BUY" or short_quote_preview.get("payload", {}).get("limit_price") != 21.1 or short_quote_preview.get("payload", {}).get("price_source") != "current_quote":
+                raise AssertionError(f"close short current quote did not use ask: {short_quote_preview}")
+            save_manual_live_positions({"FARTCOIN": {"signed_size": 0.3, "last_updated_at": utc_now_iso(), "last_oid": "long", "last_intent_id": "long"}})
+            long_quote_preview = manual_send_one_intent("manual-close-dust", False, close_position=True, use_current_quote=True)
+            if long_quote_preview.get("payload", {}).get("side") != "SELL" or long_quote_preview.get("payload", {}).get("limit_price") != 0.2 or long_quote_preview.get("payload", {}).get("price_source") != "current_quote":
+                raise AssertionError(f"close long current quote did not use bid: {long_quote_preview}")
+            save_manual_live_positions({"AVAX": {"signed_size": -1.15, "last_updated_at": utc_now_iso(), "last_oid": "short", "last_intent_id": "short"}})
+            fetch_public_executable_quote = lambda coin, side: {"ok": False, "coin": coin, "side": side, "error": "forced unavailable"}
+            unavailable_quote = manual_send_one_intent("manual-close-short-quote", False, close_position=True, use_current_quote=True)
+            if unavailable_quote.get("status") != "CURRENT_QUOTE_UNAVAILABLE":
+                raise AssertionError(f"unavailable current quote should refuse close: {unavailable_quote}")
+            fetch_public_executable_quote = old_fetch_public_executable_quote
             save_manual_live_positions({})
             no_position = manual_send_one_intent("manual-close-dust", False, close_position=True)
             if no_position.get("status") != "NO_MANUAL_POSITION_TO_CLOSE":
                 raise AssertionError(f"close-position should refuse without tracked position: {no_position}")
+
+            # --- close adverse diff guard tests ---
+            # Uses TAO meta (szDecimals=3) already in cache.
+            HL_PERP_META_BY_COIN_CACHE = {"TAO": {"szDecimals": 3, "name": "TAO"}}
+            tao_close_row = {
+                "created_at": utc_now_iso(), "dry_run": True, "intent_id": "tao-close-long",
+                "leader_wallet": wallet, "leader_fill_id": "tao-close-long", "source_reason": "LIVE_MANUAL_TEST",
+                "execution_decision": "WOULD_PLACE_IOC_LIMIT", "decision_reason": "LIVE_WS_FAST_PATH",
+                "coin": "TAO", "side": "SELL", "copy_size": 0.05, "copy_notional": 13.06,
+                "order_type": "IOC_LIMIT", "limit_price": 261.2, "reduce_only": True,
+                "manual_reconcile_required": False, "status": "WOULD_SEND_DRY_RUN", "notes": "self-test",
+            }
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, tao_close_row)
+            tao_short_row = dict(tao_close_row)
+            tao_short_row.update({"intent_id": "tao-close-short", "side": "BUY"})
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, tao_short_row)
+
+            # test: close over open cap (notional ~$13 > cap $10) with fine adverse diff → CONFIRM_REQUIRED
+            # open order over cap is already asserted above (MAX_NOTIONAL_EXCEEDED at line ~2820).
+            save_manual_live_positions({"TAO": {"signed_size": 0.05, "last_updated_at": utc_now_iso(), "last_oid": "long", "last_intent_id": "long"}})
+            LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = 10.0
+            tao_close_over_cap = manual_send_one_intent("tao-close-long", False, close_position=True)
+            LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = 25.0
+            if tao_close_over_cap.get("status") != "CONFIRM_REQUIRED":
+                raise AssertionError(f"close over open cap with fine adverse diff should give CONFIRM_REQUIRED: {tao_close_over_cap}")
+            if tao_close_over_cap.get("payload", {}).get("close_notional_cap_bypassed") is not True:
+                raise AssertionError(f"close_notional_cap_bypassed missing from close payload: {tao_close_over_cap}")
+            if tao_close_over_cap.get("payload", {}).get("notional_cap_reason") != "manual_close_diff_guard":
+                raise AssertionError(f"notional_cap_reason mismatch for close: {tao_close_over_cap}")
+
+            # test: SELL close adverse diff over tiny limit → CLOSE_ADVERSE_DIFF_TOO_LARGE
+            # price 261.7654321 rounds DOWN to 261.76 (TAO szDecimals=3, 5-sig-fig rule);
+            # SELL adverse = (ref - wire)/ref*100 ≈ 0.00207 % which exceeds 0.001 % limit.
+            LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT = 0.001
+
+            def fake_tao_close_quote(coin: str, side: str) -> Dict[str, Any]:
+                return {"ok": True, "coin": coin, "side": side, "bid": 261.7654321, "ask": 261.7654321,
+                        "executable_price": 261.7654321, "source": "test", "error": ""}
+
+            fetch_public_executable_quote = fake_tao_close_quote
+            tao_sell_adverse = manual_send_one_intent("tao-close-long", False, close_position=True, use_current_quote=True)
+            if tao_sell_adverse.get("status") != "CLOSE_ADVERSE_DIFF_TOO_LARGE":
+                raise AssertionError(f"SELL close adverse diff over tiny limit should be rejected: {tao_sell_adverse}")
+            if not (fnum(tao_sell_adverse.get("close_adverse_diff_pct")) > 0):
+                raise AssertionError(f"SELL close adverse diff should be positive: {tao_sell_adverse}")
+
+            # test: BUY close (closing short) at same price is FAVORABLE (wire rounds DOWN for BUY)
+            # → adverse=0 → passes even with tiny limit.
+            save_manual_live_positions({"TAO": {"signed_size": -0.05, "last_updated_at": utc_now_iso(), "last_oid": "short", "last_intent_id": "short"}})
+            tao_buy_favorable = manual_send_one_intent("tao-close-short", False, close_position=True, use_current_quote=True)
+            if tao_buy_favorable.get("status") != "CONFIRM_REQUIRED":
+                raise AssertionError(f"BUY close with favorable wire price should pass adverse diff guard: {tao_buy_favorable}")
+            if fnum(tao_buy_favorable.get("payload", {}).get("close_adverse_diff_pct")) != 0.0:
+                raise AssertionError(f"BUY close adverse diff should be 0 for favorable fill: {tao_buy_favorable}")
+
+            LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT = 0.25
+            fetch_public_executable_quote = old_fetch_public_executable_quote
+            save_manual_live_positions({})
+            # --- end close adverse diff guard tests ---
+
             send_hyperliquid_order = old_send_hyperliquid_order
             import builtins
             real_import = builtins.__import__
@@ -2977,6 +3137,7 @@ def self_test() -> bool:
     finally:
         LIVE_POLL_ENABLED = old_poll_enabled
         LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = old_max_manual_order_notional
+        LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT = old_max_close_adverse_diff
         HL_PERP_META_BY_COIN_CACHE = old_meta_cache
         for key, value in {
             "HL_LIVE_HL_PRIVATE_KEY": old_private_key,
@@ -3004,6 +3165,7 @@ def main() -> None:
     parser.add_argument("--confirm-send", action="store_true", help="Confirm the manual one-shot sender path. Sender remains disabled in this skeleton.")
     parser.add_argument("--marketable-bps", type=float, default=0.0, help="Optional manual IOC marketability offset in basis points, capped at 20.")
     parser.add_argument("--close-position", action="store_true", help="Manual sender only: size reduce-only order from tracked manual live position.")
+    parser.add_argument("--use-current-quote", action="store_true", help="Manual close-position only: use current executable bid/ask instead of intent price.")
     args = parser.parse_args()
     if args.self_test:
         raise SystemExit(0 if self_test() else 1)
@@ -3017,7 +3179,7 @@ def main() -> None:
         configure_paths(REPLAY_AUDIT_DIR, RAW_LEADER_FILLS_CSV)
     service = DryRunLiveCopyService()
     if args.send_one_intent:
-        print(json.dumps(manual_send_one_intent(args.send_one_intent, bool(args.confirm_send), marketable_bps=args.marketable_bps, close_position=bool(args.close_position)), indent=2, sort_keys=True))
+        print(json.dumps(manual_send_one_intent(args.send_one_intent, bool(args.confirm_send), marketable_bps=args.marketable_bps, close_position=bool(args.close_position), use_current_quote=bool(args.use_current_quote)), indent=2, sort_keys=True))
         return
     if run_ws:
         config = service.load_config()
