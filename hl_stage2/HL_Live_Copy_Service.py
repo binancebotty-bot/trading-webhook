@@ -62,6 +62,7 @@ LIVE_WS_HEALTH_FILE = AUDIT_DIR / "live_ws_health.json"
 
 ORDER_INTENTS_CSV = APPEND_ONLY_DIR / "order_intents.csv"
 WOULD_SEND_ORDERS_CSV = APPEND_ONLY_DIR / "would_send_orders.csv"
+SEND_ATTEMPTS_CSV = APPEND_ONLY_DIR / "send_attempts.csv"
 LIVE_FILLS_CSV = APPEND_ONLY_DIR / "live_fills.csv"
 RECONCILIATION_CSV = APPEND_ONLY_DIR / "reconciliation.csv"
 ERRORS_CSV = APPEND_ONLY_DIR / "errors.csv"
@@ -112,6 +113,12 @@ WOULD_SEND_ORDER_FIELDS = [
     "manual_reconcile_required", "status", "notes",
 ]
 
+SEND_ATTEMPT_FIELDS = [
+    "created_at", "intent_id", "leader_wallet", "coin", "side", "order_type",
+    "limit_price", "copy_size", "copy_notional", "reduce_only", "confirmed",
+    "status", "response", "error", "notes",
+]
+
 LIVE_FILL_FIELDS = [
     "created_at", "dry_run", "intent_id", "leader_wallet", "leader_fill_id",
     "coin", "side", "fill_status", "fill_price", "fill_size", "fill_notional",
@@ -130,7 +137,7 @@ ERROR_FIELDS = ["created_at", "context", "error_type", "message", "traceback"]
 
 def configure_paths(audit_dir: Path, source_fills: Path) -> None:
     global AUDIT_DIR, APP_CONFIG_FILE, APPEND_ONLY_DIR, SERVICE_STATE_FILE
-    global LIVE_POSITIONS_FILE, LIVE_EQUITY_HISTORY_FILE, LIVE_WS_HEALTH_FILE, ORDER_INTENTS_CSV, WOULD_SEND_ORDERS_CSV
+    global LIVE_POSITIONS_FILE, LIVE_EQUITY_HISTORY_FILE, LIVE_WS_HEALTH_FILE, ORDER_INTENTS_CSV, WOULD_SEND_ORDERS_CSV, SEND_ATTEMPTS_CSV
     global LIVE_FILLS_CSV, RECONCILIATION_CSV, ERRORS_CSV, RAW_LEADER_FILLS_CSV
 
     AUDIT_DIR = Path(audit_dir)
@@ -143,6 +150,7 @@ def configure_paths(audit_dir: Path, source_fills: Path) -> None:
     LIVE_WS_HEALTH_FILE = AUDIT_DIR / "live_ws_health.json"
     ORDER_INTENTS_CSV = APPEND_ONLY_DIR / "order_intents.csv"
     WOULD_SEND_ORDERS_CSV = APPEND_ONLY_DIR / "would_send_orders.csv"
+    SEND_ATTEMPTS_CSV = APPEND_ONLY_DIR / "send_attempts.csv"
     LIVE_FILLS_CSV = APPEND_ONLY_DIR / "live_fills.csv"
     RECONCILIATION_CSV = APPEND_ONLY_DIR / "reconciliation.csv"
     ERRORS_CSV = APPEND_ONLY_DIR / "errors.csv"
@@ -275,6 +283,94 @@ def load_csv_ids(path: Path, id_field: str) -> set:
 def should_write_would_send(decision: Dict[str, Any], row: Dict[str, Any]) -> bool:
     execution_decision = str((decision or {}).get("execution_decision") or row.get("execution_decision") or "").strip()
     return execution_decision in {"WOULD_PLACE_IOC_LIMIT", "WOULD_LATE_COPY", "WOULD_REDUCE_OR_EXIT"}
+
+
+def load_would_send_order(intent_id: str) -> Optional[Dict[str, Any]]:
+    wanted = str(intent_id or "").strip()
+    if not wanted or not WOULD_SEND_ORDERS_CSV.exists():
+        return None
+    try:
+        with WOULD_SEND_ORDERS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                if str(row.get("intent_id", "")).strip() == wanted:
+                    return dict(row)
+    except Exception:
+        return None
+    return None
+
+
+def truthy_csv(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def append_send_attempt(intent_row: Dict[str, Any], status: str, confirmed: bool = False, response: Any = "", error: str = "", notes: str = "") -> None:
+    append_csv(SEND_ATTEMPTS_CSV, SEND_ATTEMPT_FIELDS, {
+        "created_at": utc_now_iso(),
+        "intent_id": intent_row.get("intent_id", ""),
+        "leader_wallet": intent_row.get("leader_wallet", ""),
+        "coin": intent_row.get("coin", ""),
+        "side": intent_row.get("side", ""),
+        "order_type": intent_row.get("order_type", ""),
+        "limit_price": intent_row.get("limit_price", ""),
+        "copy_size": intent_row.get("copy_size", ""),
+        "copy_notional": intent_row.get("copy_notional", ""),
+        "reduce_only": intent_row.get("reduce_only", ""),
+        "confirmed": bool(confirmed),
+        "status": status,
+        "response": json.dumps(response, sort_keys=True) if isinstance(response, (dict, list)) else response,
+        "error": error,
+        "notes": notes,
+    })
+
+
+def send_hyperliquid_order(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {"ok": False, "status": "ORDER_SENDER_NOT_IMPLEMENTED"}
+
+
+def manual_send_one_intent(intent_id: str, confirm_send: bool) -> Dict[str, Any]:
+    ensure_csv_schema(SEND_ATTEMPTS_CSV, SEND_ATTEMPT_FIELDS)
+    row = load_would_send_order(intent_id)
+    if row is None:
+        missing = {"intent_id": intent_id}
+        append_send_attempt(missing, "INTENT_NOT_FOUND", confirmed=confirm_send, notes="would-send intent_id not found")
+        return {"ok": False, "status": "INTENT_NOT_FOUND", "intent_id": intent_id}
+
+    allowed = {"WOULD_PLACE_IOC_LIMIT", "WOULD_LATE_COPY", "WOULD_REDUCE_OR_EXIT"}
+    errors = []
+    if str(row.get("execution_decision", "")).strip() not in allowed:
+        errors.append("execution_decision")
+    if str(row.get("status", "")).strip() != "WOULD_SEND_DRY_RUN":
+        errors.append("status")
+    if fnum(row.get("limit_price")) <= 0:
+        errors.append("limit_price")
+    if fnum(row.get("copy_size")) <= 0:
+        errors.append("copy_size")
+    if str(row.get("order_type", "")).strip() != "IOC_LIMIT":
+        errors.append("order_type")
+    if truthy_csv(row.get("manual_reconcile_required")):
+        errors.append("manual_reconcile_required")
+    if errors:
+        error = "REFUSED_INVALID_WOULD_SEND_ROW:" + ",".join(errors)
+        append_send_attempt(row, "INTENT_REFUSED", confirmed=confirm_send, error=error, notes="manual one-shot send refused by payload validation")
+        return {"ok": False, "status": "INTENT_REFUSED", "intent_id": intent_id, "error": error, "row": row}
+
+    payload = {
+        "coin": row.get("coin", ""),
+        "side": row.get("side", ""),
+        "order_type": row.get("order_type", ""),
+        "limit_price": fnum(row.get("limit_price")),
+        "copy_size": fnum(row.get("copy_size")),
+        "copy_notional": fnum(row.get("copy_notional")),
+        "reduce_only": truthy_csv(row.get("reduce_only")),
+    }
+    if not confirm_send:
+        append_send_attempt(row, "CONFIRM_REQUIRED", confirmed=False, response={"payload": payload}, notes="pass --confirm-send to reach disabled sender placeholder")
+        return {"ok": False, "status": "CONFIRM_REQUIRED", "intent_id": intent_id, "payload": payload}
+
+    result = send_hyperliquid_order(payload)
+    status = str(result.get("status") or "ORDER_SENDER_NOT_IMPLEMENTED")
+    append_send_attempt(row, status, confirmed=True, response=result, notes="disabled sender placeholder; no order placed")
+    return {"ok": False, "status": status, "intent_id": intent_id, "payload": payload, "response": result}
 
 
 def side_from_signed(value: float) -> str:
@@ -945,6 +1041,7 @@ class DryRunLiveCopyService:
         for path, fields in [
             (ORDER_INTENTS_CSV, ORDER_INTENT_FIELDS),
             (WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS),
+            (SEND_ATTEMPTS_CSV, SEND_ATTEMPT_FIELDS),
             (LIVE_FILLS_CSV, LIVE_FILL_FIELDS),
             (RECONCILIATION_CSV, RECONCILIATION_FIELDS),
             (ERRORS_CSV, ERROR_FIELDS),
@@ -2099,7 +2196,7 @@ def self_test() -> bool:
         AUDIT_DIR, RAW_LEADER_FILLS_CSV, APP_CONFIG_FILE, APPEND_ONLY_DIR,
         SERVICE_STATE_FILE, LIVE_POSITIONS_FILE, LIVE_EQUITY_HISTORY_FILE,
         LIVE_WS_HEALTH_FILE, ORDER_INTENTS_CSV, WOULD_SEND_ORDERS_CSV,
-        LIVE_FILLS_CSV, RECONCILIATION_CSV, ERRORS_CSV,
+        SEND_ATTEMPTS_CSV, LIVE_FILLS_CSV, RECONCILIATION_CSV, ERRORS_CSV,
     )
     old_poll_enabled = LIVE_POLL_ENABLED
     old_fetch_live_fills_since = fetch_live_fills_since
@@ -2284,6 +2381,22 @@ def self_test() -> bool:
             service.append_would_send_order(manual_row)
             if count_csv_data_rows(WOULD_SEND_ORDERS_CSV) != after_would_send_rows:
                 raise AssertionError("MANUAL_REVIEW should not append would-send row")
+            confirm_required = manual_send_one_intent(str(ws_intent.get("intent_id")), False)
+            if confirm_required.get("status") != "CONFIRM_REQUIRED" or confirm_required.get("payload", {}).get("order_type") != "IOC_LIMIT":
+                raise AssertionError(f"manual send should require confirmation and show payload: {confirm_required}")
+            invalid_would_send = dict(would_send_row)
+            invalid_would_send["intent_id"] = "manual-review-intent"
+            invalid_would_send["execution_decision"] = "MANUAL_REVIEW"
+            invalid_would_send["manual_reconcile_required"] = True
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, invalid_would_send)
+            refused = manual_send_one_intent("manual-review-intent", False)
+            if refused.get("status") != "INTENT_REFUSED":
+                raise AssertionError(f"manual review would-send row should be refused: {refused}")
+            not_implemented = manual_send_one_intent(str(ws_intent.get("intent_id")), True)
+            if not_implemented.get("status") != "ORDER_SENDER_NOT_IMPLEMENTED":
+                raise AssertionError(f"confirmed manual send should stop at disabled placeholder: {not_implemented}")
+            if count_csv_data_rows(SEND_ATTEMPTS_CSV) < 3:
+                raise AssertionError("send attempts ledger did not record manual send attempts")
 
             class ABNF:
                 __module__ = "websocket._abnf"
@@ -2444,6 +2557,8 @@ def main() -> None:
     parser.add_argument("--replay-history", action="store_true", help="Replay historical source fills instead of creating/using live-copy baselines.")
     parser.add_argument("--self-test", action="store_true", help="Run a compact temp-file live-forward self-test.")
     parser.add_argument("--ws", action="store_true", help="Run dedicated dry-run live websocket sockets for active wallets.")
+    parser.add_argument("--send-one-intent", help="Inspect or manually send one would-send intent_id through the disabled sender skeleton.")
+    parser.add_argument("--confirm-send", action="store_true", help="Confirm the manual one-shot sender path. Sender remains disabled in this skeleton.")
     args = parser.parse_args()
     if args.self_test:
         raise SystemExit(0 if self_test() else 1)
@@ -2456,6 +2571,9 @@ def main() -> None:
     if args.replay_history and not AUDIT_DIR_OVERRIDE:
         configure_paths(REPLAY_AUDIT_DIR, RAW_LEADER_FILLS_CSV)
     service = DryRunLiveCopyService()
+    if args.send_one_intent:
+        print(json.dumps(manual_send_one_intent(args.send_one_intent, bool(args.confirm_send)), indent=2, sort_keys=True))
+        return
     if run_ws:
         config = service.load_config()
         active_wallets = [
