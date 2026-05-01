@@ -798,6 +798,10 @@ def _load_recent_send_attempts(limit: int = 20) -> List[Dict[str, Any]]:
                             val = payload.get(key)
                         if val is not None:
                             parsed[key] = val
+                    # actual_side: prefer executed side from response/payload over CSV intent side
+                    actual_side = resp.get("side") or payload.get("side") or row.get("side")
+                    if actual_side:
+                        parsed["actual_side"] = actual_side
                 out.append({**row, **parsed})
         return out[-limit:]
     except Exception:
@@ -3442,7 +3446,7 @@ function renderManualExec(){
   ['Open positions',openPos,openPos>0?'lc-blue':''],
  ].map(([k,v,cls])=>`<span class="lc-pill ${cls}">${h(k)}: <b>${h(v)}</b></span>`).join('');
  root.querySelector('#lcManualPosRows').innerHTML=Object.entries(positions).sort().map(([coin,p])=>{const sz=parseFloat(p.signed_size||0);const cls=sz>0?'lc-pos':sz<0?'lc-neg':'lc-muted';return `<tr><td>${h(coin)}</td><td class="${cls}">${h(sz)}</td><td class="lc-wallet">${tiny(String(p.last_oid||'—'),32)}</td><td>${tiny(String(p.last_intent_id||'—'),36)}</td><td>${h(p.last_updated_at||'—')}</td></tr>`;}).join('')||'<tr><td colspan="5">No manual positions tracked.</td></tr>';
- root.querySelector('#lcSendAttemptRows').innerHTML=attempts.map(a=>{const st=String(a.status||'—');const stCls=st==='ORDER_FILLED'?'lc-green':['ORDER_REJECTED','MAX_NOTIONAL_EXCEEDED','CLOSE_ADVERSE_DIFF_TOO_LARGE','NO_MANUAL_POSITION_TO_CLOSE'].includes(st)?'lc-red':'lc-amber';const fill=a.fill_avg_px?`${h(a.fill_size||'?')} @ ${h(a.fill_avg_px)}`:'—';const posMov=(a.position_before!=null&&a.position_after!=null)?`${h(a.position_before)}→${h(a.position_after)}`:'—';const err=String(a.error||'');return `<tr><td>${h(first(a,['created_at']))}</td><td>${h(a.coin||'—')}</td><td>${h(a.side||'—')}</td><td><span class="lc-pill ${stCls}">${h(st)}</span></td><td>${fill}</td><td>${posMov}</td><td>${tiny(String(a.price_source||'—'),22)}</td><td>${tiny(String(a.size_source||'—'),22)}</td><td title="${h(err)}">${tiny(err,40)}</td></tr>`;}).join('')||'<tr><td colspan="9">No send attempts recorded.</td></tr>';
+ root.querySelector('#lcSendAttemptRows').innerHTML=attempts.map(a=>{const st=String(a.status||'—');const stCls=st==='ORDER_FILLED'?'lc-green':['ORDER_REJECTED','MAX_NOTIONAL_EXCEEDED','CLOSE_ADVERSE_DIFF_TOO_LARGE','NO_MANUAL_POSITION_TO_CLOSE'].includes(st)?'lc-red':'lc-amber';const fill=a.fill_avg_px?`${h(a.fill_size||'?')} @ ${h(a.fill_avg_px)}`:'—';const posMov=(a.position_before!=null&&a.position_after!=null)?`${h(a.position_before)}→${h(a.position_after)}`:'—';const err=String(a.error||'');return `<tr><td>${h(first(a,['created_at']))}</td><td>${h(a.coin||'—')}</td><td>${h(a.actual_side||a.side||'—')}</td><td><span class="lc-pill ${stCls}">${h(st)}</span></td><td>${fill}</td><td>${posMov}</td><td>${tiny(String(a.price_source||'—'),22)}</td><td>${tiny(String(a.size_source||'—'),22)}</td><td title="${h(err)}">${tiny(err,40)}</td></tr>`;}).join('')||'<tr><td colspan="9">No send attempts recorded.</td></tr>';
 }
 function age(ms){const n=Number(ms||0);if(!n)return '—';const d=Math.max(0,Date.now()-n);return d<60000?Math.round(d/1000)+'s':Math.round(d/60000)+'m';}
 function time(ms){const n=Number(ms||0);return n?new Date(n).toLocaleTimeString():'—';}
