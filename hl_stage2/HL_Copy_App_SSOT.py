@@ -479,10 +479,14 @@ def load_json(path: Path, default: Any) -> Any:
 
 def load_engine_truth() -> Dict[str, Any]:
     truth = load_json(ENGINE_TRUTH_JSON, None)
-    if isinstance(truth, dict):
-        return truth
-    legacy = load_json(LEGACY_LIVE_STATE_JSON, {})
-    return legacy if isinstance(legacy, dict) else {}
+    if not isinstance(truth, dict):
+        legacy = load_json(LEGACY_LIVE_STATE_JSON, {})
+        truth = legacy if isinstance(legacy, dict) else {}
+    # ADMIN MAINTENANCE ONLY: locally blacklisted wallets stay hidden from
+    # dashboard/model reads even if an active engine-loaded file is repopulated.
+    for wallet in load_purged_wallets():
+        truth, _ = _remove_wallet_from_json_obj(truth, wallet)
+    return truth
 
 
 def _clean_wallet_config(raw_cfg: Any) -> Dict[str, Dict[str, Any]]:
@@ -690,6 +694,10 @@ def _live_audit_summary() -> Dict[str, Any]:
     reason_counts: Dict[str, int] = {}
     status_counts: Dict[str, int] = {}
     source_counts: Dict[str, int] = {}
+    execution_decision_counts: Dict[str, int] = {}
+    decision_reason_counts: Dict[str, int] = {}
+    manual_reconcile_required_counts: Dict[str, int] = {}
+    market_data_error_counts: Dict[str, int] = {}
     last_rows: List[Dict[str, Any]] = []
     rows = 0
     if path.exists():
@@ -703,8 +711,17 @@ def _live_audit_summary() -> Dict[str, Any]:
                     source = str(row.get("source", "") or "")
                     if not source and "source=" in notes:
                         source = notes.split("source=", 1)[1].split(";", 1)[0].split()[0]
+                    execution_decision = str(row.get("execution_decision", "") or "UNKNOWN")
+                    decision_reason = str(row.get("decision_reason", "") or "UNKNOWN")
+                    manual_required = str(row.get("manual_reconcile_required", "") or "UNKNOWN")
+                    market_data_error = str(row.get("market_data_error", "") or "")
                     reason_counts[reason] = reason_counts.get(reason, 0) + 1
                     status_counts[status] = status_counts.get(status, 0) + 1
+                    execution_decision_counts[execution_decision] = execution_decision_counts.get(execution_decision, 0) + 1
+                    decision_reason_counts[decision_reason] = decision_reason_counts.get(decision_reason, 0) + 1
+                    manual_reconcile_required_counts[manual_required] = manual_reconcile_required_counts.get(manual_required, 0) + 1
+                    if market_data_error:
+                        market_data_error_counts[market_data_error] = market_data_error_counts.get(market_data_error, 0) + 1
                     if source:
                         source_counts[source] = source_counts.get(source, 0) + 1
                     last_rows.append(row)
@@ -718,6 +735,10 @@ def _live_audit_summary() -> Dict[str, Any]:
         "reason_counts": reason_counts,
         "status_counts": status_counts,
         "source_counts": source_counts,
+        "execution_decision_counts": execution_decision_counts,
+        "decision_reason_counts": decision_reason_counts,
+        "manual_reconcile_required_counts": manual_reconcile_required_counts,
+        "market_data_error_counts": market_data_error_counts,
         "last_rows": last_rows,
     }
 
@@ -865,10 +886,11 @@ def load_raw_fills() -> List[RawFill]:
         return []
     fills: List[RawFill] = []
     seen = set()
+    purged = load_purged_wallets()
     with RAW_FILLS_CSV.open("r", newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             fill = parse_raw_fill_row(row)
-            if fill is None or fill.fill_id in seen:
+            if fill is None or fill.fill_id in seen or fill.wallet in purged:
                 continue
             seen.add(fill.fill_id)
             fills.append(fill)
@@ -2978,7 +3000,12 @@ document.addEventListener('focusin',e=>{{if(e.target.matches('input,select,texta
 document.addEventListener('input',e=>{{if(e.target.matches('input,select,textarea'))markBusy(30000);}});
 document.addEventListener('change',e=>{{if(e.target.matches('input,select,textarea'))markBusy(15000);}});
 document.addEventListener('submit',async e=>{{
-  const form=e.target;if(!form.matches('.ajax-form,.wallet-cfg,.inc-form'))return;
+  const form=e.target;if(!form.matches('.ajax-form,.wallet-cfg,.inc-form,.purge-form'))return;
+  if(form.matches('.purge-form')){{
+    const wallet=(new FormData(form).get('wallet')||'').toString();
+    const typed=prompt('Type full wallet address to permanently purge');
+    if(typed!==wallet){{e.preventDefault();flash('purge cancelled','muted');return;}}
+  }}
   e.preventDefault();markBusy(5000);form.classList.add('saving');
   try{{const r=await fetch(form.action,{{method:'POST',body:new FormData(form),headers:{{'X-Requested-With':'fetch'}}}});if(!r.ok)throw new Error('HTTP '+r.status);saveViewState();setTimeout(()=>location.reload(),150);}}
   catch(err){{console.warn('save failed',err);flash('save failed','neg');}}
@@ -3094,6 +3121,22 @@ async def set_wallet_config(request: Request):
     return HTMLResponse('<meta http-equiv="refresh" content="0; url=/">')
 
 
+@app.post("/api/admin/purge-wallet")
+async def admin_purge_wallet(request: Request):
+    """ADMIN MAINTENANCE ONLY: purge a wallet from active dashboard data files."""
+    form = await request.form()
+    try:
+        proof = purge_wallet_everywhere(str(form.get("wallet", "")))
+        if wants_json_response(request):
+            return JSONResponse(proof)
+        return HTMLResponse('<meta http-equiv="refresh" content="0; url=/">')
+    except ValueError as exc:
+        payload = {"ok": False, "error": str(exc)}
+        if wants_json_response(request):
+            return JSONResponse(payload, status_code=400)
+        return HTMLResponse(f"<h1>400</h1><pre>{html.escape(str(exc))}</pre>", status_code=400)
+
+
 def render_live_copy_control_panel() -> str:
     return """
 <div class="section live-copy-centre" id="liveCopyPanel">
@@ -3168,7 +3211,7 @@ def render_live_copy_control_panel() -> str:
         <h3>Execution / Audit</h3>
         <div class="lc-source-strip" id="lcSourceChips"></div>
         <div class="lc-table-wrap">
-          <table><thead><tr><th>Time</th><th>Source</th><th>Wallet</th><th>Coin</th><th>Side</th><th>Reason</th><th>Status</th><th>Diff %</th><th>Notes</th></tr></thead><tbody id="lcAuditRows"><tr><td colspan="9">Loading audit summary...</td></tr></tbody></table>
+          <table><thead><tr><th>Time</th><th>Wallet</th><th>Coin</th><th>Side</th><th>Source / Reason</th><th>Status</th><th>Decision</th><th>Decision reason</th><th>Suggested order</th><th>Suggested limit</th><th>Diff %</th><th>Manual?</th><th>Notes</th></tr></thead><tbody id="lcAuditRows"><tr><td colspan="13">Loading audit summary...</td></tr></tbody></table>
         </div>
       </section>
     </div>
@@ -3184,7 +3227,7 @@ def render_live_copy_control_panel() -> str:
       <section class="lc-panel">
         <h3>WS Health Detail</h3>
         <div class="lc-table-wrap">
-          <table><thead><tr><th>Wallet</th><th>Socket status</th><th>Last open</th><th>Last close</th><th>Last msg age</th><th>Last data age</th><th>Reconnects</th><th>Duplicates</th><th>Ignored</th><th>Last error</th></tr></thead><tbody id="lcHealthRows"></tbody></table>
+          <table><thead><tr><th>Wallet</th><th>Effective</th><th>Grade</th><th>Thread</th><th>Reconnect/min</th><th>Processed</th><th>Raw msg</th><th>Parsed msg</th><th>Snapshot seen</th><th>Snapshot recovered</th><th>Ignored snapshots</th><th>Errors</th><th>Transport stale</th><th>Data status</th><th>Last close/error</th></tr></thead><tbody id="lcHealthRows"></tbody></table>
         </div>
       </section>
     </div>
@@ -3239,8 +3282,10 @@ async function jpost(url,payload){const r=await fetch(url,{method:'POST',headers
 function num(v,d){const n=parseFloat(v);return Number.isFinite(n)?n:d;}
 function first(row,keys){for(const k of keys){if(row&&row[k]!=null&&row[k]!=='')return row[k];}return '';}
 function shortWallet(w){return String(w||'').length>18?String(w).slice(0,10)+'...'+String(w).slice(-6):String(w||'');}
-function pill(text,kind){const t=String(text||'pending');const token=String(kind||t).split(' ')[0].toUpperCase();const cls=['OPEN','LIVE','OK','GOOD','DRY_RUN_FILLED','ALLOWED','ACTIVE'].includes(token)?'lc-green':['STALE','CLO','WATCH','QUEUED','RECONNECTING','PENDING'].includes(token)?'lc-amber':['OFF','OFFLINE','CLOSED','MISSING','DEGRADED','DISABLED','ERROR','RECONNECT_OVERDUE'].includes(token)?'lc-red':'';
+function pill(text,kind){const t=String(text||'pending');const token=String(kind||t).split(' ')[0].toUpperCase();const cls=['OPEN','LIVE','OK','GOOD','DRY_RUN_FILLED','ALLOWED','ACTIVE'].includes(token)?'lc-green':['STALE','DEGRADED','CLO','WATCH','QUEUED','RECONNECTING','PENDING'].includes(token)?'lc-amber':['OFF','OFFLINE','CLOSED','MISSING','DISABLED','ERROR','RECONNECT_OVERDUE'].includes(token)?'lc-red':'';
  return `<span class="lc-pill ${cls}">${h(t)}</span>`;}
+function decisionPill(text){const t=String(text||'—');const u=t.toUpperCase();const cls=['WOULD_PLACE_IOC_LIMIT','WOULD_LATE_COPY','WOULD_REDUCE_OR_EXIT','WOULD_EXIT','WOULD_REDUCE'].includes(u)?'lc-green':u==='DO_NOT_MARKET_COPY'?'lc-red':u==='MANUAL_REVIEW'?'lc-amber':'';return `<span class="lc-pill ${cls}">${h(t)}</span>`;}
+function tiny(v,n){const s=String(v==null?'':v);return h(s.length>n?s.slice(0,n-1)+'…':s);}
 function pair(a,b,cls){return `<div class="lc-pair"><span>${h(a)}</span><b class="${cls||''}">${h(b||'—')}</b></div>`;}
 function signed(v){const s=String(v||'—');return s.trim().startsWith('-')?'lc-neg':(s.trim().startsWith('+')?'lc-pos':'');}
 function count(obj,key){return Number((obj||{})[key]||0);}
@@ -3277,23 +3322,24 @@ function renderWallets(){
 }
 function renderAudit(){
  const rows=(lcAudit.last_rows||[]).slice(-10).reverse();
- const reason=lcAudit.reason_counts||{}, statusCounts=lcAudit.status_counts||{}, sourceCounts=lcAudit.source_counts||{};
+ const reason=lcAudit.reason_counts||{}, statusCounts=lcAudit.status_counts||{}, sourceCounts=lcAudit.source_counts||{}, decisionCounts=lcAudit.execution_decision_counts||{}, decisionReasonCounts=lcAudit.decision_reason_counts||{}, manualCounts=lcAudit.manual_reconcile_required_counts||{}, errorCounts=lcAudit.market_data_error_counts||{};
  root.querySelector('#lcSourceChips').innerHTML=[
-  ['WS fills',count(sourceCounts,'WS')+count(sourceCounts,'live_ws')+count(reason,'LIVE_WS_DETECTED'),'lc-green'],
-  ['REST recovered',count(sourceCounts,'REST_POLL')+count(sourceCounts,'live_poll')+count(reason,'LIVE_POLL_DETECTED'),'lc-amber'],
-  ['Manual review',count(reason,'MANUAL_REVIEW'),'lc-blue'],
-  ['Duplicates skipped',count(statusCounts,'DUPLICATE')+count(statusCounts,'SKIPPED_DUPLICATE'),''],
-  ['Risk rejected',count(statusCounts,'RISK_REJECTED')+count(reason,'RISK_REJECTED'),'lc-red']
+  ['WS fast path',count(decisionCounts,'WOULD_PLACE_IOC_LIMIT'),'lc-green'],
+  ['Late copy',count(decisionCounts,'WOULD_LATE_COPY'),'lc-green'],
+  ['Do not market copy',count(decisionCounts,'DO_NOT_MARKET_COPY'),'lc-red'],
+  ['Manual review',count(decisionCounts,'MANUAL_REVIEW')+count(manualCounts,'True')+count(manualCounts,'true'),'lc-amber'],
+  ['Quote unavailable',count(errorCounts,'EXECUTABLE_QUOTE_UNAVAILABLE')+count(decisionReasonCounts,'RECOVERY_QUOTE_UNAVAILABLE'),'lc-amber'],
+  ['Snapshot recovery',count(reason,'LIVE_WS_SNAPSHOT_RECOVERY')+count(decisionReasonCounts,'LIVE_WS_SNAPSHOT_RECOVERY'),'lc-blue']
  ].map(([k,v,cls])=>`<span class="lc-pill ${cls}">${h(k)}: <b>${h(v)}</b></span>`).join('');
- root.querySelector('#lcAuditRows').innerHTML=rows.map(r=>`<tr><td>${h(first(r,['created_at','timestamp_iso','time']))}</td><td>${h(sourceOf(r))}</td><td class="lc-wallet">${h(shortWallet(first(r,['leader_wallet','wallet'])))}</td><td>${h(first(r,['coin','asset']))}</td><td>${h(first(r,['side']))}</td><td>${h(first(r,['reason']))}</td><td>${pill(first(r,['status'])||'—')}</td><td>${h(first(r,['diff_pct','real_diff_pct','price_diff_pct']))}</td><td>${h(first(r,['notes','message']))}</td></tr>`).join('')||'<tr><td colspan="9">No audit rows found.</td></tr>';
+ root.querySelector('#lcAuditRows').innerHTML=rows.map(r=>`<tr><td>${h(first(r,['created_at','timestamp_iso','time']))}</td><td class="lc-wallet">${h(shortWallet(first(r,['leader_wallet','wallet'])))}</td><td>${h(first(r,['coin','asset']))}</td><td>${h(first(r,['side']))}</td><td><div class="lc-cell-stack"><span>${h(sourceOf(r))}</span><span class="lc-muted">${tiny(first(r,['reason']),32)}</span></div></td><td>${pill(first(r,['status'])||'—')}</td><td>${decisionPill(first(r,['execution_decision'])||'—')}</td><td>${tiny(first(r,['decision_reason']),34)}</td><td>${tiny(first(r,['suggested_order_type']),28)}</td><td>${h(first(r,['suggested_limit_price','target_price']))}</td><td>${h(first(r,['adverse_diff_pct','diff_pct','real_diff_pct','price_diff_pct']))}</td><td>${h(first(r,['manual_reconcile_required']))}</td><td title="${h(first(r,['notes','message']))}">${tiny(first(r,['notes','message']),60)}</td></tr>`).join('')||'<tr><td colspan="13">No audit rows found.</td></tr>';
  const manual=rows.filter(r=>String(first(r,['reason','status'])).toUpperCase().includes('MANUAL')).slice(0,5);
  root.querySelector('#lcReconRows').innerHTML=(manual.length?manual:[{}]).map((r,i)=>{const sev=i===0&&manual.length?'WARN':'INFO';return `<tr><td>${pill(sev,sev)}</td><td class="lc-wallet">${h(shortWallet(first(r,['leader_wallet','wallet'])||'pending'))}</td><td>${h(first(r,['coin'])||'—')}</td><td>${h(first(r,['reason'])||'pending manual review feed')}</td><td>pending</td><td>pending</td><td>${h(first(r,['action'])||'review')}</td><td><div class="lc-mini-actions"><button type="button">review</button><button type="button">ignore</button><button type="button">close</button><button type="button">align</button></div></td></tr>`;}).join('');
 }
 function age(ms){const n=Number(ms||0);if(!n)return '—';const d=Math.max(0,Date.now()-n);return d<60000?Math.round(d/1000)+'s':Math.round(d/60000)+'m';}
 function time(ms){const n=Number(ms||0);return n?new Date(n).toLocaleTimeString():'—';}
 function renderHealth(){
- const rows=Object.entries(lcHealth.wallets||{}).sort().map(([wallet,wh])=>`<tr><td class="lc-wallet">${h(shortWallet(wallet))}</td><td>${pill(wh.effective_status||wh.status||'OFFLINE')}</td><td>${h(time(wh.last_open_ms))}</td><td>${h(time(wh.last_close_ms))}</td><td>${h(age(wh.last_msg_ms))}</td><td>${h(age(wh.last_data_ms))}</td><td>${h(wh.reconnect_count??0)}</td><td>${h(wh.duplicate_count??0)}</td><td>${h(wh.ignored_count??0)}</td><td>${h(wh.last_error||wh.last_close_msg||'')}</td></tr>`).join('');
- root.querySelector('#lcHealthRows').innerHTML=rows||'<tr><td colspan="10">WS service not running or no wallet health file found.</td></tr>';
+ const rows=Object.entries(lcHealth.wallets||{}).sort().map(([wallet,wh])=>{const effective=String(wh.effective_status||wh.status||'OFFLINE');const alive=!!wh.thread_alive||!!wh.worker_thread_alive;const fatal=Number(wh.fatal_error_count||0);const label=(effective==='STALE'&&alive&&fatal===0)?'STALE / non-fatal; worker alive':effective;const lastErr=wh.last_error_repr||wh.last_error||wh.last_close_msg||'';return `<tr><td class="lc-wallet">${h(shortWallet(wallet))}</td><td>${pill(label,effective)}</td><td>${pill(wh.health_grade||'—',wh.health_grade||'')}</td><td>${h(alive?'alive':'down')}</td><td>${Number(wh.reconnects_per_min||0).toFixed(2)}</td><td>${h(wh.processed_count??0)}</td><td>${h(wh.raw_message_count??0)}</td><td>${h(wh.parsed_fill_message_count??0)}</td><td>${h(wh.snapshot_fill_seen_count??0)}</td><td>${h(wh.snapshot_fill_recovered_count??0)}</td><td>${h(wh.ignored_snapshot_count??0)}</td><td>${h(wh.error_count??0)}</td><td>${h(wh.transport_stale_ms??wh.stale_ms??'')}</td><td>${pill(wh.data_status||'—',wh.data_status||'')}</td><td title="${h(lastErr)}">${tiny(lastErr,70)}</td></tr>`;}).join('');
+ root.querySelector('#lcHealthRows').innerHTML=rows||'<tr><td colspan="15">WS service not running or no wallet health file found.</td></tr>';
 }
 function render(){
  const wallets=lcConfig.wallets||{}, active=Object.values(wallets).filter(w=>w&&w.enabled!==false&&['LIVE','CLO'].includes(String(w.mode||'').toUpperCase())).length;
