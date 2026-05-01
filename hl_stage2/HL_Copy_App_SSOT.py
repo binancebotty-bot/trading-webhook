@@ -63,6 +63,8 @@ LIVE_COPY_AUDIT_DIR = BASE_DIR / "hl_live_copy_audit"
 LIVE_COPY_CONFIG_FILE = LIVE_COPY_AUDIT_DIR / "live_config.json"
 LIVE_COPY_WS_HEALTH_FILE = LIVE_COPY_AUDIT_DIR / "live_ws_health.json"
 LIVE_COPY_ORDER_INTENTS_CSV = LIVE_COPY_AUDIT_DIR / "append_only" / "order_intents.csv"
+MANUAL_POSITIONS_FILE = LIVE_COPY_AUDIT_DIR / "manual_live_positions.json"
+SEND_ATTEMPTS_CSV = LIVE_COPY_AUDIT_DIR / "append_only" / "send_attempts.csv"
 LIVE_CONFIG_DIR = BASE_DIR / "hl_live_copy_audit"
 LIVE_CONFIG_FILE = LIVE_CONFIG_DIR / "live_config.json"
 SNAP_DIR = DATA_DIR / "snapshots"
@@ -550,8 +552,10 @@ def load_ui_state() -> Dict[str, Any]:
     ranking_col = ranking.get("column")
     ranking_dir = str(ranking.get("direction", "desc")).lower()
     ranking = {"column": ranking_col, "direction": ranking_dir if ranking_dir in {"asc", "desc"} else "desc"}
+    norm_base = max(1.0, fnum(raw.get("norm_base"), DEFAULT_NORM_BASE))
     return {
-        "norm_base": max(1.0, fnum(raw.get("norm_base"), DEFAULT_NORM_BASE)),
+        "norm_base": norm_base,
+        "user_norm_base": max(1.0, fnum(raw.get("user_norm_base"), norm_base)),
         "copy_mode": mode,
         "normalisation_mode": norm_mode,
         "fixed_notional": max(0.01, fnum(raw.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL)),
@@ -565,11 +569,17 @@ def load_ui_state() -> Dict[str, Any]:
 
 
 def save_ui_state(patch: Dict[str, Any]) -> Dict[str, Any]:
+    raw_existing = load_json(UI_STATE_FILE, {})
+    raw_has_user_base = isinstance(raw_existing, dict) and "user_norm_base" in raw_existing
     existing = load_ui_state()
     merged = {**existing, **patch}
     mode = str(merged.get("copy_mode", "proportional")).lower()
     merged["copy_mode"] = mode if mode in {"proportional", "fixed"} else "proportional"
     merged["norm_base"] = max(1.0, fnum(merged.get("norm_base"), DEFAULT_NORM_BASE))
+    if "user_norm_base" in patch or raw_has_user_base:
+        merged["user_norm_base"] = max(1.0, fnum(merged.get("user_norm_base"), merged.get("norm_base", DEFAULT_NORM_BASE)))
+    else:
+        merged["user_norm_base"] = merged["norm_base"]
     merged["fee_bps"] = max(0.0, fnum(merged.get("fee_bps"), DEFAULT_FEE_BPS))
     merged["copy_friction_bps"] = max(0.0, fnum(merged.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS))
     merged["wallet_config"] = _clean_wallet_config(merged.get("wallet_config", {}))
@@ -729,6 +739,9 @@ def _live_audit_summary() -> Dict[str, Any]:
                         last_rows.pop(0)
         except Exception:
             pass
+    manual_positions = _load_manual_live_positions()
+    recent_send_attempts = _load_recent_send_attempts(20)
+    send_attempt_counts = _load_send_attempt_counts()
     return {
         "ok": True,
         "rows": rows,
@@ -740,7 +753,69 @@ def _live_audit_summary() -> Dict[str, Any]:
         "manual_reconcile_required_counts": manual_reconcile_required_counts,
         "market_data_error_counts": market_data_error_counts,
         "last_rows": last_rows,
+        "manual_positions": manual_positions,
+        "recent_send_attempts": recent_send_attempts,
+        "send_attempt_counts": send_attempt_counts,
     }
+
+
+def _load_manual_live_positions() -> Dict[str, Any]:
+    try:
+        if MANUAL_POSITIONS_FILE.exists():
+            data = json.loads(MANUAL_POSITIONS_FILE.read_text(encoding="utf-8-sig"))
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _load_recent_send_attempts(limit: int = 20) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    if not SEND_ATTEMPTS_CSV.exists():
+        return out
+    try:
+        with SEND_ATTEMPTS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                resp_text = str(row.get("response") or "")
+                parsed: Dict[str, Any] = {}
+                if resp_text:
+                    try:
+                        resp = json.loads(resp_text)
+                        if not isinstance(resp, dict):
+                            resp = {}
+                    except Exception:
+                        resp = {}
+                    payload = resp.get("payload") or {}
+                    for key in (
+                        "fill_avg_px", "fill_size", "oid",
+                        "position_before", "position_after",
+                        "price_source", "size_source",
+                        "close_adverse_diff_pct", "close_adverse_diff_limit_pct",
+                        "notional_cap_reason", "error",
+                    ):
+                        val = resp.get(key)
+                        if val is None:
+                            val = payload.get(key)
+                        if val is not None:
+                            parsed[key] = val
+                out.append({**row, **parsed})
+        return out[-limit:]
+    except Exception:
+        return out[-limit:] if len(out) >= limit else out
+
+
+def _load_send_attempt_counts() -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    if not SEND_ATTEMPTS_CSV.exists():
+        return counts
+    try:
+        with SEND_ATTEMPTS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                s = str(row.get("status") or "UNKNOWN")
+                counts[s] = counts.get(s, 0) + 1
+    except Exception:
+        pass
+    return counts
 
 
 def load_live_config() -> Dict[str, Any]:
@@ -1116,6 +1191,7 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
     gate = load_wallet_gate()
     norm_base = ui["norm_base"]
+    user_base = max(1.0, fnum(ui.get("user_norm_base"), norm_base))
     fee_bps = ui["fee_bps"]
     mark_prices: Dict[str, float] = {str(k).upper(): fnum(v) for k, v in (truth.get("mark_prices") or {}).items()} if isinstance(truth.get("mark_prices"), dict) else {}
 
@@ -1529,7 +1605,7 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     # a wallet from combined graph/header aggregation only, not from tracking.
     portfolio_wallets = [r for r in rows if not r["is_user_wallet"] and r.get("include_in_portfolio", True)]
     # Single canonical aggregate — header, USER row, and validator all read from here.
-    sa = selected_aggregate(portfolio_wallets, trades, norm_base)
+    sa = selected_aggregate(portfolio_wallets, trades, user_base)
     alloc = sum(fnum(r["alloc"]) for r in portfolio_wallets)
     lead_equity = sa["lead_real"] + sa["lead_unreal"] + alloc
     copy_equity = sa["copy_real"] + sa["copy_unreal"] + alloc
@@ -1601,8 +1677,7 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 
     # USER row is a display-only aggregate of all tracked non-user copy models.
-    # It keeps the same normalisation base as every other row; it does not use
-    # the full portfolio allocation as its displayed starting equity.
+    # It uses user_norm_base only for the aggregate/header display denominator.
     user_row = next((r for r in rows if r.get("is_user_wallet")), None)
     if user_row is not None:
         total_lead_pnl = lead_real + lead_unreal
@@ -1616,8 +1691,8 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             copy_point = point.get("copy", {}) if isinstance(point.get("copy"), dict) else {}
             lead_pnl_point = fnum(lead_point.get("equity")) - p_alloc
             copy_pnl_point = fnum(copy_point.get("equity")) - p_alloc
-            u_lead_eq = norm_base + lead_pnl_point
-            u_copy_eq = norm_base + copy_pnl_point
+            u_lead_eq = user_base + lead_pnl_point
+            u_copy_eq = user_base + copy_pnl_point
             # Use stored DD from portfolio_history — it tracks rolling peak across
             # ALL events (including same-timestamp intermediates) so it is accurate.
             # Re-deriving from compacted equity values would miss intra-timestamp peaks.
@@ -1639,18 +1714,18 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             user_curve.append({
                 "ts": model_asof,
                 "lead_pnl": round(total_lead_pnl, 8),
-                "lead_equity": round(norm_base + total_lead_pnl, 8),
+                "lead_equity": round(user_base + total_lead_pnl, 8),
                 "lead_drawdown": max(0.0, -total_lead_pnl),
                 "copy_pnl": round(total_copy_pnl, 8),
-                "copy_equity": round(norm_base + total_copy_pnl, 8),
+                "copy_equity": round(user_base + total_copy_pnl, 8),
                 "copy_drawdown": max(0.0, -total_copy_pnl),
                 "pnl": round(total_copy_pnl, 8),
-                "equity": round(norm_base + total_copy_pnl, 8),
+                "equity": round(user_base + total_copy_pnl, 8),
                 "drawdown": max(0.0, -total_copy_pnl),
             })
 
-        u_lead_equity = norm_base + total_lead_pnl
-        u_copy_equity = norm_base + total_copy_pnl
+        u_lead_equity = user_base + total_lead_pnl
+        u_copy_equity = user_base + total_copy_pnl
         # Current DD: use the same lead_live_dd / copy_live_dd that the portfolio
         # header uses, so header and USER row always match on current DD.
         u_lead_dd = lead_live_dd
@@ -1663,10 +1738,10 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         u_copy_maxdd = max((fnum(p.get("copy_drawdown")) for p in user_curve), default=u_copy_dd)
 
         user_row.update({
-            "alloc": norm_base,
-            "lead": block(u_lead_equity, lead_real, lead_unreal, u_lead_dd, u_lead_maxdd, u_lead_peak, norm_base),
-            "copy": block(u_copy_equity, copy_real, copy_unreal, u_copy_dd, u_copy_maxdd, u_copy_peak, norm_base),
-            "delta": {"equity": round(total_copy_pnl - total_lead_pnl, 8), "pct": round(((total_copy_pnl - total_lead_pnl) / norm_base * 100.0) if norm_base else 0.0, 8)},
+            "alloc": user_base,
+            "lead": block(u_lead_equity, lead_real, lead_unreal, u_lead_dd, u_lead_maxdd, u_lead_peak, user_base),
+            "copy": block(u_copy_equity, copy_real, copy_unreal, u_copy_dd, u_copy_maxdd, u_copy_peak, user_base),
+            "delta": {"equity": round(total_copy_pnl - total_lead_pnl, 8), "pct": round(((total_copy_pnl - total_lead_pnl) / user_base * 100.0) if user_base else 0.0, 8)},
             "lead_total_pnl": round(total_lead_pnl, 8),
             "copy_total_pnl": round(total_copy_pnl, 8),
             "copy_error": round(total_copy_pnl - total_lead_pnl, 8),
@@ -2279,6 +2354,7 @@ def validate_render_contract(state: Dict[str, Any]) -> List[str]:
     try:
         ui = state.get("ui_state") or {}
         norm_base = fnum(ui.get("norm_base"), DEFAULT_NORM_BASE)
+        user_base = max(1.0, fnum(ui.get("user_norm_base"), norm_base))
         rows = state.get("wallet_rows") or []
         copy_trades = state.get("copy_trades") or []
 
@@ -2402,9 +2478,9 @@ def validate_render_contract(state: Dict[str, Any]) -> List[str]:
             u = user_rows[0]
             u_lead = u.get("lead") if isinstance(u.get("lead"), dict) else {}
             u_copy = u.get("copy") if isinstance(u.get("copy"), dict) else {}
-            u_alloc = fnum(u.get("alloc"), norm_base)
-            if abs(u_alloc - norm_base) > 0.01:
-                errors.append(f"user_aggregate alloc {u_alloc:.4f} != norm_base {norm_base:.4f}")
+            u_alloc = fnum(u.get("alloc"), user_base)
+            if abs(u_alloc - user_base) > 0.01:
+                errors.append(f"user_aggregate alloc {u_alloc:.4f} != user_norm_base {user_base:.4f}")
             sel_lr = sum(fnum((r.get("lead") or {}).get("realized")) for r in selected_rows)
             sel_cr = sum(fnum((r.get("copy") or {}).get("realized")) for r in selected_rows)
             sel_lu = sum(fnum((r.get("lead") or {}).get("unrealized")) for r in selected_rows)
@@ -2417,12 +2493,12 @@ def validate_render_contract(state: Dict[str, Any]) -> List[str]:
                 errors.append(f"user_aggregate lead.unrealized {fnum(u_lead.get('unrealized')):.4f} != sum_selected {sel_lu:.4f}")
             if abs(fnum(u_copy.get("unrealized")) - sel_cu) > 0.01:
                 errors.append(f"user_aggregate copy.unrealized {fnum(u_copy.get('unrealized')):.4f} != sum_selected {sel_cu:.4f}")
-            exp_u_lead_eq = norm_base + sel_lr + sel_lu
-            exp_u_copy_eq = norm_base + sel_cr + sel_cu
+            exp_u_lead_eq = user_base + sel_lr + sel_lu
+            exp_u_copy_eq = user_base + sel_cr + sel_cu
             if abs(fnum(u_lead.get("equity")) - exp_u_lead_eq) > 0.01:
-                errors.append(f"user_aggregate lead.equity {fnum(u_lead.get('equity')):.4f} != norm_base+pnl {exp_u_lead_eq:.4f}")
+                errors.append(f"user_aggregate lead.equity {fnum(u_lead.get('equity')):.4f} != user_norm_base+pnl {exp_u_lead_eq:.4f}")
             if abs(fnum(u_copy.get("equity")) - exp_u_copy_eq) > 0.01:
-                errors.append(f"user_aggregate copy.equity {fnum(u_copy.get('equity')):.4f} != norm_base+pnl {exp_u_copy_eq:.4f}")
+                errors.append(f"user_aggregate copy.equity {fnum(u_copy.get('equity')):.4f} != user_norm_base+pnl {exp_u_copy_eq:.4f}")
             sel_fills = sum(inum(r.get("fill_count")) for r in selected_rows)
             sel_exits = sum(inum(r.get("exit_count")) for r in selected_rows)
             sel_open = sum(inum(r.get("open_position_count")) for r in selected_rows)
@@ -2465,9 +2541,9 @@ def validate_render_contract(state: Dict[str, Any]) -> List[str]:
                 errors.append(f"portfolio copy MaxDD {fnum(port_copy.get('max_drawdown')):.4f} != max timestamped summed DD {expected_max_copy_dd:.4f}")
             if abs(fnum(port.get("max_open_notional_usd")) - expected_max_exposure) > 0.01:
                 errors.append(f"portfolio max exposure {fnum(port.get('max_open_notional_usd')):.4f} != max timestamped summed exposure {expected_max_exposure:.4f}")
-            expected_req_lev = expected_max_exposure / norm_base if norm_base else 0.0
+            expected_req_lev = expected_max_exposure / user_base if user_base else 0.0
             if abs(fnum(port.get("max_required_leverage")) - expected_req_lev) > 0.001:
-                errors.append(f"portfolio req_lev {fnum(port.get('max_required_leverage')):.4f} != max summed exposure/norm_base {expected_req_lev:.4f}")
+                errors.append(f"portfolio req_lev {fnum(port.get('max_required_leverage')):.4f} != max summed exposure/user_norm_base {expected_req_lev:.4f}")
 
         # D. Header / USER row must match (both derived from selected_aggregate).
         user_rows = [r for r in rows if r.get("is_user_wallet")]
@@ -2768,10 +2844,10 @@ def render_home(state: Dict[str, Any]) -> str:
     lead = port.get("lead", {})
     delta = port.get("delta", {})
     base = fnum(ui.get("norm_base"), DEFAULT_NORM_BASE)
+    user_base = max(1.0, fnum(ui.get("user_norm_base"), base))
     rows = sorted_rows(state)
     metric_rows = [r for r in rows if not r.get("is_user_wallet")]
     included_rows = [r for r in metric_rows if r.get("include_in_portfolio", True)]
-    user_base = max(1.0, base)
     lead_total = fnum(lead.get("realized")) + fnum(lead.get("unrealized"))
     copy_total = fnum(copy.get("realized")) + fnum(copy.get("unrealized"))
     delta_total = fnum(delta.get("equity"))
@@ -2911,7 +2987,8 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
     cfg_cell = ""
     purge_cell = ""
     if r.get("is_user_wallet"):
-        cfg_cell = f'<form action="/api/ui-state" method="post" class="ajax-form user-base-form"><span class="small muted">aggregate base</span><input name="norm_base" value="{base:g}" size="5" title="aggregate normalisation base"><button title="set aggregate base">Set</button></form>'
+        user_base = max(1.0, fnum(ui.get("user_norm_base"), fnum(ui.get("norm_base"), DEFAULT_NORM_BASE)))
+        cfg_cell = f'<form action="/api/ui-state" method="post" class="ajax-form user-base-form"><span class="small muted">aggregate base</span><input name="user_norm_base" value="{user_base:g}" size="5" title="aggregate normalisation base"><button title="set aggregate base">Set</button></form>'
     else:
         inc_cell = f"""<form action="/api/wallet-include" method="post" class="inc-form" title="Include/exclude this wallet from combined graph and header cards only"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><input type="checkbox" name="included" value="1" {'checked' if included else ''} onchange="this.form.requestSubmit()"><span class="small">INC</span></form>"""
         cfg_cell = f"""<form action="/api/wallet-config" method="post" class="wallet-cfg"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><select name="copy_mode"><option value="" {'selected' if not r.get('wallet_config') else ''}>global</option><option value="proportional" {'selected' if eff_mode == 'proportional' and r.get('wallet_config') else ''}>prop</option><option value="fixed" {'selected' if eff_mode == 'fixed' and r.get('wallet_config') else ''}>fixed</option></select><input name="norm_base" value="{eff_base:g}" size="5" title="wallet normalisation base"><input name="fixed_notional" value="{eff_fixed:g}" size="4" title="wallet fixed $"><button title="save wallet override">Set</button></form>"""
@@ -3205,6 +3282,7 @@ def render_live_copy_control_panel() -> str:
       <button type="button" class="active" data-lc-tab="audit">Health & Audit</button>
       <button type="button" data-lc-tab="recon">Manual Reconciliation</button>
       <button type="button" data-lc-tab="ws">WS Detail</button>
+      <button type="button" data-lc-tab="exec">Manual Live Execution</button>
     </div>
     <div class="lc-tab-panel active" data-lc-panel="audit">
       <section class="lc-panel">
@@ -3228,6 +3306,21 @@ def render_live_copy_control_panel() -> str:
         <h3>WS Health Detail</h3>
         <div class="lc-table-wrap">
           <table><thead><tr><th>Wallet</th><th>Effective</th><th>Grade</th><th>Thread</th><th>Reconnect/min</th><th>Processed</th><th>Raw msg</th><th>Parsed msg</th><th>Snapshot seen</th><th>Snapshot recovered</th><th>Ignored snapshots</th><th>Errors</th><th>Transport stale</th><th>Data status</th><th>Last close/error</th></tr></thead><tbody id="lcHealthRows"></tbody></table>
+        </div>
+      </section>
+    </div>
+    <div class="lc-tab-panel" data-lc-panel="exec">
+      <section class="lc-panel">
+        <h3>Manual Live Execution</h3>
+        <p>Read-only. Tracked manual positions and recent send attempts from HL_Live_Copy_Service.</p>
+        <div class="lc-source-strip" id="lcExecChips"></div>
+        <h4 style="margin:8px 0 4px;font-size:13px">Manual Positions</h4>
+        <div class="lc-table-wrap">
+          <table style="min-width:680px"><thead><tr><th>Coin</th><th>Signed Size</th><th>Last OID</th><th>Last Intent ID</th><th>Last Updated</th></tr></thead><tbody id="lcManualPosRows"><tr><td colspan="5">Loading…</td></tr></tbody></table>
+        </div>
+        <h4 style="margin:12px 0 4px;font-size:13px">Recent Send Attempts</h4>
+        <div class="lc-table-wrap">
+          <table style="min-width:900px"><thead><tr><th>Time</th><th>Coin</th><th>Side</th><th>Status</th><th>Fill</th><th>Pos before→after</th><th>Price src</th><th>Size src</th><th>Error</th></tr></thead><tbody id="lcSendAttemptRows"><tr><td colspan="9">Loading…</td></tr></tbody></table>
         </div>
       </section>
     </div>
@@ -3335,6 +3428,22 @@ function renderAudit(){
  const manual=rows.filter(r=>String(first(r,['reason','status'])).toUpperCase().includes('MANUAL')).slice(0,5);
  root.querySelector('#lcReconRows').innerHTML=(manual.length?manual:[{}]).map((r,i)=>{const sev=i===0&&manual.length?'WARN':'INFO';return `<tr><td>${pill(sev,sev)}</td><td class="lc-wallet">${h(shortWallet(first(r,['leader_wallet','wallet'])||'pending'))}</td><td>${h(first(r,['coin'])||'—')}</td><td>${h(first(r,['reason'])||'pending manual review feed')}</td><td>pending</td><td>pending</td><td>${h(first(r,['action'])||'review')}</td><td><div class="lc-mini-actions"><button type="button">review</button><button type="button">ignore</button><button type="button">close</button><button type="button">align</button></div></td></tr>`;}).join('');
 }
+function renderManualExec(){
+ const positions=lcAudit.manual_positions||{};
+ const attempts=(lcAudit.recent_send_attempts||[]).slice().reverse();
+ const sCounts=lcAudit.send_attempt_counts||{};
+ const openPos=Object.values(positions).filter(p=>p&&Math.abs(parseFloat(p.signed_size||0))>1e-12).length;
+ root.querySelector('#lcExecChips').innerHTML=[
+  ['Filled',count(sCounts,'ORDER_FILLED'),'lc-green'],
+  ['Rejected',count(sCounts,'ORDER_REJECTED'),'lc-red'],
+  ['Over cap',count(sCounts,'MAX_NOTIONAL_EXCEEDED'),'lc-amber'],
+  ['Adverse diff',count(sCounts,'CLOSE_ADVERSE_DIFF_TOO_LARGE'),'lc-amber'],
+  ['No position',count(sCounts,'NO_MANUAL_POSITION_TO_CLOSE'),''],
+  ['Open positions',openPos,openPos>0?'lc-blue':''],
+ ].map(([k,v,cls])=>`<span class="lc-pill ${cls}">${h(k)}: <b>${h(v)}</b></span>`).join('');
+ root.querySelector('#lcManualPosRows').innerHTML=Object.entries(positions).sort().map(([coin,p])=>{const sz=parseFloat(p.signed_size||0);const cls=sz>0?'lc-pos':sz<0?'lc-neg':'lc-muted';return `<tr><td>${h(coin)}</td><td class="${cls}">${h(sz)}</td><td class="lc-wallet">${tiny(String(p.last_oid||'—'),32)}</td><td>${tiny(String(p.last_intent_id||'—'),36)}</td><td>${h(p.last_updated_at||'—')}</td></tr>`;}).join('')||'<tr><td colspan="5">No manual positions tracked.</td></tr>';
+ root.querySelector('#lcSendAttemptRows').innerHTML=attempts.map(a=>{const st=String(a.status||'—');const stCls=st==='ORDER_FILLED'?'lc-green':['ORDER_REJECTED','MAX_NOTIONAL_EXCEEDED','CLOSE_ADVERSE_DIFF_TOO_LARGE','NO_MANUAL_POSITION_TO_CLOSE'].includes(st)?'lc-red':'lc-amber';const fill=a.fill_avg_px?`${h(a.fill_size||'?')} @ ${h(a.fill_avg_px)}`:'—';const posMov=(a.position_before!=null&&a.position_after!=null)?`${h(a.position_before)}→${h(a.position_after)}`:'—';const err=String(a.error||'');return `<tr><td>${h(first(a,['created_at']))}</td><td>${h(a.coin||'—')}</td><td>${h(a.side||'—')}</td><td><span class="lc-pill ${stCls}">${h(st)}</span></td><td>${fill}</td><td>${posMov}</td><td>${tiny(String(a.price_source||'—'),22)}</td><td>${tiny(String(a.size_source||'—'),22)}</td><td title="${h(err)}">${tiny(err,40)}</td></tr>`;}).join('')||'<tr><td colspan="9">No send attempts recorded.</td></tr>';
+}
 function age(ms){const n=Number(ms||0);if(!n)return '—';const d=Math.max(0,Date.now()-n);return d<60000?Math.round(d/1000)+'s':Math.round(d/60000)+'m';}
 function time(ms){const n=Number(ms||0);return n?new Date(n).toLocaleTimeString():'—';}
 function renderHealth(){
@@ -3346,7 +3455,7 @@ function render(){
  root.querySelector('#lcWalletCount').textContent=active+' / 10';
  const wsOverall=String(lcHealth.overall||'OFFLINE').toUpperCase();
  root.querySelector('#lcWsOverall').textContent=(['CLOSED','DEGRADED','DISABLED','OFFLINE'].includes(wsOverall))?'OFFLINE / service not running':wsOverall;
- renderEquity(); renderWallets(); renderAudit(); renderHealth();
+ renderEquity(); renderWallets(); renderAudit(); renderHealth(); renderManualExec();
 }
 async function refresh(quiet){try{if(!quiet)msg('Loading...');const [cfg,health,audit]=await Promise.all([jget('/api/live-config'),jget('/api/live-ws-health'),jget('/api/live-audit-summary')]);lcConfig=cfg.config||{wallets:{}};lcHealth=health.health||{};lcAudit=audit||{};render();if(!quiet)msg('Loaded');}catch(e){msg(e.message||String(e),true);}}
 root.querySelector('#lcRefresh').addEventListener('click',()=>refresh());
@@ -3456,7 +3565,7 @@ async def api_set_ui_state(request: Request):
         form = await request.form()
         data = dict(form)
     patch = {}
-    for k in ("norm_base", "copy_mode", "normalisation_mode", "fixed_notional", "leader_equity_base", "fee_bps", "copy_friction_bps"):
+    for k in ("norm_base", "user_norm_base", "copy_mode", "normalisation_mode", "fixed_notional", "leader_equity_base", "fee_bps", "copy_friction_bps"):
         if k in data:
             patch[k] = data[k]
     if "ranking_column" in data or "ranking_direction" in data:
