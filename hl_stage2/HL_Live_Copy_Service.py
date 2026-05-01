@@ -58,6 +58,7 @@ APPEND_ONLY_DIR = AUDIT_DIR / "append_only"
 
 SERVICE_STATE_FILE = AUDIT_DIR / "live_service_state.json"
 LIVE_POSITIONS_FILE = AUDIT_DIR / "live_positions.json"
+MANUAL_LIVE_POSITIONS_FILE = AUDIT_DIR / "manual_live_positions.json"
 LIVE_EQUITY_HISTORY_FILE = AUDIT_DIR / "live_equity_history.json"
 LIVE_WS_HEALTH_FILE = AUDIT_DIR / "live_ws_health.json"
 
@@ -141,7 +142,7 @@ ERROR_FIELDS = ["created_at", "context", "error_type", "message", "traceback"]
 
 def configure_paths(audit_dir: Path, source_fills: Path) -> None:
     global AUDIT_DIR, APP_CONFIG_FILE, APPEND_ONLY_DIR, SERVICE_STATE_FILE
-    global LIVE_POSITIONS_FILE, LIVE_EQUITY_HISTORY_FILE, LIVE_WS_HEALTH_FILE, ORDER_INTENTS_CSV, WOULD_SEND_ORDERS_CSV, SEND_ATTEMPTS_CSV
+    global LIVE_POSITIONS_FILE, MANUAL_LIVE_POSITIONS_FILE, LIVE_EQUITY_HISTORY_FILE, LIVE_WS_HEALTH_FILE, ORDER_INTENTS_CSV, WOULD_SEND_ORDERS_CSV, SEND_ATTEMPTS_CSV
     global LIVE_FILLS_CSV, RECONCILIATION_CSV, ERRORS_CSV, RAW_LEADER_FILLS_CSV
 
     AUDIT_DIR = Path(audit_dir)
@@ -150,6 +151,7 @@ def configure_paths(audit_dir: Path, source_fills: Path) -> None:
     APPEND_ONLY_DIR = AUDIT_DIR / "append_only"
     SERVICE_STATE_FILE = AUDIT_DIR / "live_service_state.json"
     LIVE_POSITIONS_FILE = AUDIT_DIR / "live_positions.json"
+    MANUAL_LIVE_POSITIONS_FILE = AUDIT_DIR / "manual_live_positions.json"
     LIVE_EQUITY_HISTORY_FILE = AUDIT_DIR / "live_equity_history.json"
     LIVE_WS_HEALTH_FILE = AUDIT_DIR / "live_ws_health.json"
     ORDER_INTENTS_CSV = APPEND_ONLY_DIR / "order_intents.csv"
@@ -327,6 +329,34 @@ def append_send_attempt(intent_row: Dict[str, Any], status: str, confirmed: bool
     })
 
 
+def load_manual_live_positions() -> Dict[str, Any]:
+    data = load_json(MANUAL_LIVE_POSITIONS_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_manual_live_positions(positions: Dict[str, Any]) -> bool:
+    return safe_atomic_write_json(MANUAL_LIVE_POSITIONS_FILE, positions, "MANUAL_LIVE_POSITIONS_WRITE")
+
+
+def update_manual_live_position_from_fill(coin: str, side: str, fill_size: Any, oid: Any, intent_id: str) -> Dict[str, Any]:
+    positions = load_manual_live_positions()
+    key = str(coin or "").upper().strip()
+    current = positions.get(key, {}) if isinstance(positions.get(key), dict) else {}
+    before = fnum(current.get("signed_size"))
+    delta = fnum(fill_size) if str(side).upper() == "BUY" else -fnum(fill_size)
+    after = before + delta
+    if abs(after) < 1e-9:
+        after = 0.0
+    positions[key] = {
+        "signed_size": after,
+        "last_updated_at": utc_now_iso(),
+        "last_oid": str(oid or ""),
+        "last_intent_id": str(intent_id or ""),
+    }
+    save_manual_live_positions(positions)
+    return {"coin": key, "position_before": before, "position_after": after}
+
+
 def wire_safe_float(value: Any, kind: str) -> Tuple[bool, float, str]:
     try:
         from hyperliquid.utils.signing import float_to_wire  # type: ignore
@@ -396,14 +426,34 @@ def round_price_hl_perp(price: Any, sz_decimals: int) -> Decimal:
 
 
 def response_has_order_error(response: Any) -> bool:
+    return not parse_hl_order_status(response).get("ok", False)
+
+
+def parse_hl_order_status(response: Any) -> Dict[str, Any]:
     if not isinstance(response, dict):
-        return False
-    if response.get("status") == "err":
-        return True
+        return {"ok": False, "status": "ORDER_UNKNOWN"}
     statuses = (((response.get("response") or {}).get("data") or {}).get("statuses"))
-    if not isinstance(statuses, list):
-        return False
-    return any(isinstance(item, dict) and item.get("error") for item in statuses)
+    if isinstance(statuses, list):
+        for item in statuses:
+            if isinstance(item, dict) and item.get("error"):
+                return {"ok": False, "status": "ORDER_REJECTED", "error": str(item.get("error"))}
+        for item in statuses:
+            filled = item.get("filled") if isinstance(item, dict) else None
+            if isinstance(filled, dict):
+                return {
+                    "ok": True,
+                    "status": "ORDER_FILLED",
+                    "fill_avg_px": filled.get("avgPx", ""),
+                    "fill_size": filled.get("totalSz", ""),
+                    "oid": filled.get("oid", ""),
+                }
+        for item in statuses:
+            resting = item.get("resting") if isinstance(item, dict) else None
+            if isinstance(resting, dict):
+                return {"ok": True, "status": "ORDER_RESTING", "oid": resting.get("oid", "")}
+    if response.get("status") == "err":
+        return {"ok": False, "status": "ORDER_REJECTED", "error": str(response.get("response") or response)}
+    return {"ok": False, "status": "ORDER_UNKNOWN"}
 
 
 def prepare_hl_order_numbers(coin: str, size: Any, limit_px: Any, max_notional: float) -> Dict[str, Any]:
@@ -512,11 +562,15 @@ def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0)
             {"limit": {"tif": "Ioc"}},
             reduce_only=reduce_only,
         )
-        ok = not response_has_order_error(response)
+        parsed_status = parse_hl_order_status(response)
         return {
-            "ok": bool(ok),
-            "status": "ORDER_SUBMITTED" if ok else "ORDER_REJECTED",
+            "ok": bool(parsed_status.get("ok")),
+            "status": parsed_status.get("status", "ORDER_UNKNOWN"),
             "response": response,
+            "fill_avg_px": parsed_status.get("fill_avg_px", ""),
+            "fill_size": parsed_status.get("fill_size", ""),
+            "oid": parsed_status.get("oid", ""),
+            "error": parsed_status.get("error", ""),
             "coin": coin,
             "side": side,
             "size": wire_size,
@@ -548,7 +602,7 @@ def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0)
         }
 
 
-def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: float = 0.0) -> Dict[str, Any]:
+def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: float = 0.0, close_position: bool = False) -> Dict[str, Any]:
     ensure_csv_schema(SEND_ATTEMPTS_CSV, SEND_ATTEMPT_FIELDS)
     row = load_would_send_order(intent_id)
     if row is None:
@@ -584,6 +638,30 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
         "copy_notional": fnum(row.get("copy_notional")),
         "reduce_only": truthy_csv(row.get("reduce_only")),
     }
+    positions = load_manual_live_positions()
+    coin_key = str(payload.get("coin", "")).upper().strip()
+    position_before = fnum((positions.get(coin_key) or {}).get("signed_size")) if isinstance(positions.get(coin_key), dict) else 0.0
+    size_source = "payload"
+    if close_position:
+        if position_before == 0:
+            append_send_attempt(row, "NO_MANUAL_POSITION_TO_CLOSE", confirmed=confirm_send, error="manual live position is flat")
+            return {"ok": False, "status": "NO_MANUAL_POSITION_TO_CLOSE", "intent_id": intent_id, "position_before": position_before, "close_position": True}
+        payload["side"] = "SELL" if position_before > 0 else "BUY"
+        payload["copy_size"] = abs(position_before)
+        payload["reduce_only"] = True
+        size_source = "manual_position_close"
+    elif payload.get("reduce_only") and position_before != 0:
+        current_abs = abs(position_before)
+        if fnum(payload.get("copy_size")) > current_abs:
+            payload["copy_size"] = current_abs
+            size_source = "manual_position_cap"
+        payload["reduce_only"] = True
+    elif payload.get("reduce_only"):
+        payload["position_note"] = "no tracked manual live position; using payload size"
+    payload["copy_notional"] = fnum(payload.get("copy_size")) * fnum(payload.get("limit_price"))
+    payload["position_before"] = position_before
+    payload["close_position"] = bool(close_position)
+    payload["size_source"] = size_source
     marketable_bps = fnum(marketable_bps)
     if marketable_bps < 0:
         append_send_attempt(row, "MARKETABLE_BPS_INVALID", confirmed=confirm_send, error="marketable_bps must be >= 0")
@@ -604,6 +682,17 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
 
     result = send_hyperliquid_order(payload, marketable_bps=marketable_bps)
     status = str(result.get("status") or "ORDER_SENDER_NOT_IMPLEMENTED")
+    position_after = position_before
+    if status == "ORDER_FILLED":
+        updated = update_manual_live_position_from_fill(
+            str(payload.get("coin", "")),
+            str(payload.get("side", "")),
+            result.get("fill_size") or result.get("size"),
+            result.get("oid"),
+            intent_id,
+        )
+        position_after = fnum(updated.get("position_after"), position_before)
+    result.update({"position_before": position_before, "position_after": position_after, "close_position": bool(close_position), "size_source": size_source})
     append_send_attempt(row, status, confirmed=True, response=result, notes="manual one-shot sender result")
     return {"ok": bool(result.get("ok")), "status": status, "intent_id": intent_id, "payload": payload, "response": result}
 
@@ -2426,11 +2515,11 @@ def last_csv_row(path: Path) -> Dict[str, Any]:
 
 def self_test() -> bool:
     global LIVE_POLL_ENABLED, LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD
-    global HL_PERP_META_BY_COIN_CACHE, fetch_live_fills_since, fetch_public_executable_quote
+    global HL_PERP_META_BY_COIN_CACHE, fetch_live_fills_since, fetch_public_executable_quote, send_hyperliquid_order
 
     old_paths = (
         AUDIT_DIR, RAW_LEADER_FILLS_CSV, APP_CONFIG_FILE, APPEND_ONLY_DIR,
-        SERVICE_STATE_FILE, LIVE_POSITIONS_FILE, LIVE_EQUITY_HISTORY_FILE,
+        SERVICE_STATE_FILE, LIVE_POSITIONS_FILE, MANUAL_LIVE_POSITIONS_FILE, LIVE_EQUITY_HISTORY_FILE,
         LIVE_WS_HEALTH_FILE, ORDER_INTENTS_CSV, WOULD_SEND_ORDERS_CSV,
         SEND_ATTEMPTS_CSV, LIVE_FILLS_CSV, RECONCILIATION_CSV, ERRORS_CSV,
     )
@@ -2441,6 +2530,7 @@ def self_test() -> bool:
     old_account_address = os.environ.get("HL_LIVE_HL_ACCOUNT_ADDRESS")
     old_fetch_live_fills_since = fetch_live_fills_since
     old_fetch_public_executable_quote = fetch_public_executable_quote
+    old_send_hyperliquid_order = send_hyperliquid_order
     wallet = "0xabc0000000000000000000000000000000000001"
     rows = [
         {"fill_id": "hist-1", "wallet": wallet, "coin": "BTC", "side": "BUY", "price": 100, "size": 1, "timestamp_ms": 1000, "raw_json": "{}"},
@@ -2675,6 +2765,53 @@ def self_test() -> bool:
             rejected_response = {"status": "ok", "response": {"data": {"statuses": [{"error": "Order has invalid size."}]}}}
             if not response_has_order_error(rejected_response):
                 raise AssertionError(f"SDK error response was not detected: {rejected_response}")
+            rejected_parsed = parse_hl_order_status(rejected_response)
+            if rejected_parsed.get("status") != "ORDER_REJECTED" or rejected_parsed.get("ok"):
+                raise AssertionError(f"SDK error response was not labelled rejected: {rejected_parsed}")
+            filled_response = {"status": "ok", "response": {"data": {"statuses": [{"filled": {"avgPx": "0.20233", "oid": 406136339652, "totalSz": "51.8"}}]}}}
+            filled_parsed = parse_hl_order_status(filled_response)
+            if filled_parsed.get("status") != "ORDER_FILLED" or not filled_parsed.get("ok") or filled_parsed.get("fill_avg_px") != "0.20233" or filled_parsed.get("fill_size") != "51.8" or filled_parsed.get("oid") != 406136339652:
+                raise AssertionError(f"filled SDK response was not labelled filled: {filled_parsed}")
+            save_manual_live_positions({})
+            entry_intent = {
+                "created_at": utc_now_iso(), "dry_run": True, "intent_id": "manual-entry-fill",
+                "leader_wallet": wallet, "leader_fill_id": "manual-entry-fill", "source_reason": "LIVE_MANUAL_TEST",
+                "execution_decision": "WOULD_PLACE_IOC_LIMIT", "decision_reason": "LIVE_WS_FAST_PATH",
+                "coin": "FARTCOIN", "side": "BUY", "copy_size": 51.8, "copy_notional": 10.477,
+                "order_type": "IOC_LIMIT", "limit_price": 0.20233, "reduce_only": False,
+                "manual_reconcile_required": False, "status": "WOULD_SEND_DRY_RUN", "notes": "self-test",
+            }
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, entry_intent)
+            exit_intent = dict(entry_intent)
+            exit_intent.update({"intent_id": "manual-exit-fill", "side": "SELL", "copy_size": 51.5, "copy_notional": 10.46377, "limit_price": 0.20318, "reduce_only": True})
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, exit_intent)
+
+            def fake_sender(payload: Dict[str, Any], marketable_bps: float = 0.0) -> Dict[str, Any]:
+                return {
+                    "ok": True, "status": "ORDER_FILLED", "fill_avg_px": str(payload.get("limit_price")),
+                    "fill_size": str(payload.get("copy_size")), "oid": "selftest-oid",
+                    "coin": payload.get("coin"), "side": payload.get("side"), "size": payload.get("copy_size"),
+                    "limit_price": payload.get("limit_price"), "reduce_only": payload.get("reduce_only"),
+                }
+
+            send_hyperliquid_order = fake_sender
+            entry_result = manual_send_one_intent("manual-entry-fill", True)
+            if entry_result.get("response", {}).get("position_after") != 51.8:
+                raise AssertionError(f"manual BUY fill did not update position: {entry_result}")
+            exit_result = manual_send_one_intent("manual-exit-fill", True)
+            if round(fnum(exit_result.get("response", {}).get("position_after")), 8) != 0.3:
+                raise AssertionError(f"manual SELL reduce fill did not leave expected dust: {exit_result}")
+            close_intent = dict(exit_intent)
+            close_intent.update({"intent_id": "manual-close-dust", "copy_size": 99, "copy_notional": 20})
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, close_intent)
+            close_preview = manual_send_one_intent("manual-close-dust", False, close_position=True)
+            if close_preview.get("payload", {}).get("side") != "SELL" or not close_preview.get("payload", {}).get("reduce_only") or round(fnum(close_preview.get("payload", {}).get("copy_size")), 8) != 0.3:
+                raise AssertionError(f"close-position preview did not use tracked dust: {close_preview}")
+            save_manual_live_positions({})
+            no_position = manual_send_one_intent("manual-close-dust", False, close_position=True)
+            if no_position.get("status") != "NO_MANUAL_POSITION_TO_CLOSE":
+                raise AssertionError(f"close-position should refuse without tracked position: {no_position}")
+            send_hyperliquid_order = old_send_hyperliquid_order
             import builtins
             real_import = builtins.__import__
 
@@ -2851,6 +2988,7 @@ def self_test() -> bool:
                 os.environ[key] = value
         fetch_live_fills_since = old_fetch_live_fills_since
         fetch_public_executable_quote = old_fetch_public_executable_quote
+        send_hyperliquid_order = old_send_hyperliquid_order
         configure_paths(old_paths[0], old_paths[1])
 
 
@@ -2865,6 +3003,7 @@ def main() -> None:
     parser.add_argument("--send-one-intent", help="Inspect or manually send one would-send intent_id through the disabled sender skeleton.")
     parser.add_argument("--confirm-send", action="store_true", help="Confirm the manual one-shot sender path. Sender remains disabled in this skeleton.")
     parser.add_argument("--marketable-bps", type=float, default=0.0, help="Optional manual IOC marketability offset in basis points, capped at 20.")
+    parser.add_argument("--close-position", action="store_true", help="Manual sender only: size reduce-only order from tracked manual live position.")
     args = parser.parse_args()
     if args.self_test:
         raise SystemExit(0 if self_test() else 1)
@@ -2878,7 +3017,7 @@ def main() -> None:
         configure_paths(REPLAY_AUDIT_DIR, RAW_LEADER_FILLS_CSV)
     service = DryRunLiveCopyService()
     if args.send_one_intent:
-        print(json.dumps(manual_send_one_intent(args.send_one_intent, bool(args.confirm_send), marketable_bps=args.marketable_bps), indent=2, sort_keys=True))
+        print(json.dumps(manual_send_one_intent(args.send_one_intent, bool(args.confirm_send), marketable_bps=args.marketable_bps, close_position=bool(args.close_position)), indent=2, sort_keys=True))
         return
     if run_ws:
         config = service.load_config()
