@@ -69,6 +69,38 @@ LIVE_FILLS_CSV = APPEND_ONLY_DIR / "live_fills.csv"
 RECONCILIATION_CSV = APPEND_ONLY_DIR / "reconciliation.csv"
 ERRORS_CSV = APPEND_ONLY_DIR / "errors.csv"
 
+
+def load_local_env_file(path: Optional[Path] = None) -> None:
+    """Load KEY=VALUE pairs from a local .env file into os.environ.
+
+    Skips blank lines, comment lines (#), and malformed lines.
+    Never overwrites a key that is already present in os.environ.
+    Never prints loaded values.
+    """
+    if path is None:
+        path = BASE_DIR.parent / "hl_stage2.env"
+    try:
+        env_path = Path(path)
+        if not env_path.exists():
+            return
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if not key:
+                continue
+            if key not in os.environ:
+                os.environ[key] = value.strip()
+    except Exception:
+        pass
+
+
+load_local_env_file()
+
 DRY_RUN = True
 MAX_LIVE_WALLETS = 10
 DEFAULT_LEADER_EQUITY_BASE = 10_000.0
@@ -2611,6 +2643,31 @@ def self_test() -> bool:
         {"fill_id": "hist-2", "wallet": wallet, "coin": "BTC", "side": "SELL", "price": 101, "size": 1, "timestamp_ms": 2000, "raw_json": "{}"},
     ]
     try:
+        # .env loader tests (no secrets involved; test keys only)
+        os.environ["HL_SELFTEST_EXISTING"] = "original"
+        _env_content = "\n".join([
+            "HL_SELFTEST_MISSING=loaded",
+            "HL_SELFTEST_EXISTING=overwrite_attempt",
+            "# comment line",
+            "MALFORMED_NO_EQUALS",
+            "",
+        ])
+        _env_path = Path(tempfile.mktemp(suffix=".env"))
+        try:
+            _env_path.write_text(_env_content, encoding="utf-8")
+            load_local_env_file(_env_path)
+            if os.environ.get("HL_SELFTEST_MISSING") != "loaded":
+                raise AssertionError("load_local_env_file did not load missing key")
+            if os.environ.get("HL_SELFTEST_EXISTING") != "original":
+                raise AssertionError("load_local_env_file overwrote existing env key")
+        finally:
+            os.environ.pop("HL_SELFTEST_MISSING", None)
+            os.environ.pop("HL_SELFTEST_EXISTING", None)
+            try:
+                _env_path.unlink()
+            except Exception:
+                pass
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             audit_dir = root / "hl_live_copy_audit"
