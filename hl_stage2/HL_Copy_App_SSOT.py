@@ -30,6 +30,7 @@ import html
 import shutil
 import time
 import threading
+import urllib.request
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +66,12 @@ LIVE_COPY_WS_HEALTH_FILE = LIVE_COPY_AUDIT_DIR / "live_ws_health.json"
 LIVE_COPY_ORDER_INTENTS_CSV = LIVE_COPY_AUDIT_DIR / "append_only" / "order_intents.csv"
 MANUAL_POSITIONS_FILE = LIVE_COPY_AUDIT_DIR / "manual_live_positions.json"
 SEND_ATTEMPTS_CSV = LIVE_COPY_AUDIT_DIR / "append_only" / "send_attempts.csv"
+WOULD_SEND_ORDERS_CSV = LIVE_COPY_AUDIT_DIR / "append_only" / "would_send_orders.csv"
+EXCHANGE_ACCOUNT_SNAPSHOT_FILE = LIVE_COPY_AUDIT_DIR / "exchange_account_snapshot.json"
+EXCHANGE_ACCOUNT_HISTORY_FILE = LIVE_COPY_AUDIT_DIR / "exchange_account_history.json"
+LIVE_FILLS_CSV = LIVE_COPY_AUDIT_DIR / "append_only" / "live_fills.csv"
+MANUAL_RECON_BACKUP_DIR = LIVE_COPY_AUDIT_DIR / "reconciliation_backups"
+MANUAL_RECON_ACTIONS_FILE = LIVE_COPY_AUDIT_DIR / "manual_reconciliation_actions.json"
 LIVE_CONFIG_DIR = BASE_DIR / "hl_live_copy_audit"
 LIVE_CONFIG_FILE = LIVE_CONFIG_DIR / "live_config.json"
 SNAP_DIR = DATA_DIR / "snapshots"
@@ -83,6 +90,28 @@ WS_CAPTURED = "WS_CAPTURED"
 REBUILD = "REBUILD"
 
 app = FastAPI(title="HL Copy Dashboard SSOT")
+
+
+def load_local_env_file(path: Optional[Path] = None) -> None:
+    if path is None:
+        path = BASE_DIR.parent / "hl_stage2.env"
+    try:
+        env_path = Path(path)
+        if not env_path.exists():
+            return
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value.strip()
+    except Exception:
+        pass
+
+
+load_local_env_file()
 
 
 def utc_now_iso() -> str:
@@ -630,18 +659,59 @@ def _normalise_wallet_address(wallet: Any) -> str:
     return value
 
 
+def normalize_live_wallet_config(wallet: Any, cfg: Any, repair: bool = False) -> Dict[str, Any]:
+    raw = cfg if isinstance(cfg, dict) else {}
+    mode = str(raw.get("mode", "OFF")).upper()
+    if mode not in {"LIVE", "CLO", "OFF"}:
+        mode = "OFF"
+    explicit_disabled = "enabled" in raw and parse_bool(raw.get("enabled")) is False
+    if mode in {"LIVE", "CLO"}:
+        if explicit_disabled and not repair:
+            enabled = False
+            reason = "CONFIG_CONFLICT_MODE_ENABLED_FALSE"
+        else:
+            enabled = True
+            reason = "ENABLED_LIVE" if mode == "LIVE" else "ENABLED_CLO"
+    else:
+        enabled = False
+        reason = "MODE_OFF"
+    return {
+        "wallet": str(wallet or "").lower().strip(),
+        "mode": mode,
+        "enabled": enabled,
+        "service_eligible": bool(mode in {"LIVE", "CLO"} and enabled),
+        "service_eligibility_reason": reason,
+    }
+
+
+def repair_live_config_consistency(config: Dict[str, Any]) -> bool:
+    wallets = config.get("wallets", {}) if isinstance(config, dict) else {}
+    if not isinstance(wallets, dict):
+        return False
+    changed = False
+    for wallet, cfg in wallets.items():
+        if not isinstance(cfg, dict):
+            continue
+        normal = normalize_live_wallet_config(wallet, cfg, repair=True)
+        if cfg.get("mode") != normal["mode"]:
+            cfg["mode"] = normal["mode"]
+            changed = True
+        if cfg.get("enabled") is not normal["enabled"]:
+            cfg["enabled"] = normal["enabled"]
+            changed = True
+    return changed
+
+
 def _normalise_live_wallet_payload(payload: Dict[str, Any], existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     base = dict(existing or {})
-    mode = str(payload.get("mode", base.get("mode", "OFF"))).upper()
+    mode_default = base.get("mode", "OFF") if existing is not None else "OFF"
+    mode = str(payload.get("mode", mode_default)).upper()
     if mode not in {"LIVE", "CLO", "OFF"}:
         raise ValueError("BAD_MODE")
     copy_mode = str(payload.get("copy_mode", base.get("copy_mode", "proportional"))).lower()
     if copy_mode not in {"proportional", "fixed"}:
         raise ValueError("BAD_COPY_MODE")
-    enabled_default = bool(base.get("enabled", True))
-    enabled = parse_bool(payload["enabled"]) if "enabled" in payload else enabled_default
-    if mode == "OFF":
-        enabled = False
+    enabled = normalize_live_wallet_config("", {"mode": mode}, repair=True)["enabled"]
     out = {
         "mode": mode,
         "copy_mode": copy_mode,
@@ -662,7 +732,7 @@ def _active_live_copy_wallet_count(config: Dict[str, Any]) -> int:
     wallets = config.get("wallets", {}) if isinstance(config, dict) else {}
     return sum(
         1 for cfg in wallets.values()
-        if isinstance(cfg, dict) and cfg.get("enabled", True) and str(cfg.get("mode", "")).upper() in {"LIVE", "CLO"}
+        if isinstance(cfg, dict) and normalize_live_wallet_config("", cfg).get("service_eligible")
     )
 
 
@@ -709,6 +779,7 @@ def _live_audit_summary() -> Dict[str, Any]:
     manual_reconcile_required_counts: Dict[str, int] = {}
     market_data_error_counts: Dict[str, int] = {}
     last_rows: List[Dict[str, Any]] = []
+    audit_rows: List[Dict[str, Any]] = []
     rows = 0
     if path.exists():
         try:
@@ -734,14 +805,46 @@ def _live_audit_summary() -> Dict[str, Any]:
                         market_data_error_counts[market_data_error] = market_data_error_counts.get(market_data_error, 0) + 1
                     if source:
                         source_counts[source] = source_counts.get(source, 0) + 1
+                    audit_rows.append(row)
+                    if len(audit_rows) > 5000:
+                        audit_rows.pop(0)
                     last_rows.append(row)
                     if len(last_rows) > 20:
                         last_rows.pop(0)
         except Exception:
             pass
     manual_positions = _load_manual_live_positions()
-    recent_send_attempts = _load_recent_send_attempts(20)
+    recent_send_attempts = _load_recent_send_attempts(100)
+    metric_send_attempts = _load_recent_send_attempts(5000)
     send_attempt_counts = _load_send_attempt_counts()
+    exchange_snapshot = _fetch_exchange_account_snapshot()
+    manual_live_summary = _manual_live_summary(manual_positions, recent_send_attempts, exchange_snapshot)
+    _append_exchange_history(exchange_snapshot, manual_live_summary)
+    ws_health = _load_live_ws_health()
+
+    live_config = _load_live_copy_config()
+    _auto_send_enabled = os.getenv("HL_LIVE_AUTO_SEND_ENABLED", "0") == "1"
+    _auto_send_filter = os.getenv("HL_LIVE_AUTO_SEND_WALLET", "").lower().strip()
+    _cfg_wallets = live_config.get("wallets", {})
+    _auto_live_eligible: List[str] = [
+        w.lower() for w, cfg in (_cfg_wallets.items() if isinstance(_cfg_wallets, dict) else [])
+        if isinstance(cfg, dict)
+        and normalize_live_wallet_config(w, cfg).get("service_eligible")
+        and (not _auto_send_filter or w.lower() == _auto_send_filter)
+    ] if _auto_send_enabled else []
+    model_portfolio: Dict[str, Any] = {}
+    live_wallet_derived = {}
+    live_leader_performance = _build_live_leader_performance(metric_send_attempts, manual_positions, exchange_snapshot, live_config, audit_rows)
+    account_reconciliation = _build_account_reconciliation(exchange_snapshot, live_leader_performance)
+    live_wallet_rows = _build_live_wallet_rows(live_config, audit_rows, metric_send_attempts, manual_positions, manual_live_summary, ws_health, live_leader_performance)
+    real_copy_positions = _build_real_copy_positions(manual_positions, exchange_snapshot)
+    execution_quality_rows = _build_execution_quality_rows(metric_send_attempts, audit_rows)
+    execution_quality_summary = _build_execution_quality_summary(execution_quality_rows)
+    manual_reconciliation_rows = _build_manual_reconciliation_rows(manual_positions, exchange_snapshot, recent_send_attempts)
+
+    portfolio_history: List[Dict[str, Any]] = []
+    exchange_history = load_json(EXCHANGE_ACCOUNT_HISTORY_FILE, [])
+
     return {
         "ok": True,
         "rows": rows,
@@ -753,9 +856,33 @@ def _live_audit_summary() -> Dict[str, Any]:
         "manual_reconcile_required_counts": manual_reconcile_required_counts,
         "market_data_error_counts": market_data_error_counts,
         "last_rows": last_rows,
+        "audit_rows": audit_rows[-200:],
         "manual_positions": manual_positions,
         "recent_send_attempts": recent_send_attempts,
         "send_attempt_counts": send_attempt_counts,
+        "manual_live_summary": manual_live_summary,
+        "manual_reconciliation_rows": manual_reconciliation_rows,
+        "exchange_account_snapshot": exchange_snapshot,
+        "account_reconciliation": account_reconciliation,
+        "model_portfolio": model_portfolio,
+        "portfolio_history": portfolio_history,
+        "exchange_history": exchange_history,
+        "exchange_account_history": exchange_history,
+        "live_graph": {
+            "default_mode": "account",
+            "timescales": ["1d", "7d", "all"],
+            "modes": ["account", "wallet_pnl", "exposure"],
+            "account_points": exchange_history,
+        },
+        "live_wallet_derived": live_wallet_derived,
+        "live_wallet_rows": live_wallet_rows,
+        "live_leader_performance": live_leader_performance,
+        "real_copy_positions": real_copy_positions,
+        "execution_quality_rows": execution_quality_rows,
+        "execution_quality_summary": execution_quality_summary,
+        "auto_live_eligible_wallets": _auto_live_eligible,
+        "tracked_wallet_count": len(_cfg_wallets) if isinstance(_cfg_wallets, dict) else 0,
+        "auto_live_wallet_count": len(_auto_live_eligible),
     }
 
 
@@ -791,7 +918,7 @@ def _load_recent_send_attempts(limit: int = 20) -> List[Dict[str, Any]]:
                         "position_before", "position_after",
                         "price_source", "size_source",
                         "close_adverse_diff_pct", "close_adverse_diff_limit_pct",
-                        "notional_cap_reason", "error",
+                        "notional_cap_reason", "error", "auto_live", "auto_send_wallet",
                     ):
                         val = resp.get(key)
                         if val is None:
@@ -806,6 +933,1212 @@ def _load_recent_send_attempts(limit: int = 20) -> List[Dict[str, Any]]:
         return out[-limit:]
     except Exception:
         return out[-limit:] if len(out) >= limit else out
+
+
+def _local_env_value(key: str) -> str:
+    value = os.getenv(key, "").strip()
+    if value:
+        return value
+    env_file = BASE_DIR.parent / "hl_stage2.env"
+    try:
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == key:
+                    return v.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _public_account_address() -> str:
+    account = _local_env_value("HL_LIVE_HL_ACCOUNT_ADDRESS") or os.getenv("HL_USER_WALLET", "").strip() or _local_env_value("HL_USER_WALLET")
+    account = account.lower().strip()
+    if account.startswith("0x") and len(account) == 42:
+        return account
+    return ""
+
+
+def _append_exchange_history(snapshot: Dict[str, Any], manual_summary: Dict[str, Any]) -> None:
+    if not snapshot.get("ok") or not snapshot.get("available"):
+        return
+    history = load_json(EXCHANGE_ACCOUNT_HISTORY_FILE, [])
+    if not isinstance(history, list):
+        history = []
+    entry = {
+        "timestamp": snapshot.get("updated_at"),
+        "account_value": fnum(snapshot.get("account_value")),
+        "unified_portfolio_value": fnum(snapshot.get("unified_portfolio_value")) if is_present_num(snapshot.get("unified_portfolio_value")) else None,
+        "withdrawable": fnum(snapshot.get("withdrawable")),
+        "manual_live_exposure": fnum(manual_summary.get("manual_live_exposure_estimate")),
+        "open_position_count": inum(snapshot.get("open_position_count") or len(snapshot.get("open_positions", []))),
+    }
+    if history and history[-1].get("timestamp") == entry["timestamp"]:
+        return
+    history.append(entry)
+    if len(history) > 2000:
+        history = history[-2000:]
+    atomic_write_json(EXCHANGE_ACCOUNT_HISTORY_FILE, history)
+
+
+def _fetch_exchange_account_snapshot(max_age_sec: float = 15.0) -> Dict[str, Any]:
+    cached = load_json(EXCHANGE_ACCOUNT_SNAPSHOT_FILE, {})
+    now_ms = int(time.time() * 1000)
+    if (
+        isinstance(cached, dict)
+        and cached.get("ok")
+        and cached.get("account_value_source")
+        and cached.get("raw_total_usd_source")
+        and cached.get("spot_account_source")
+        and now_ms - inum(cached.get("fetched_at_ms")) <= int(max_age_sec * 1000)
+    ):
+        return cached
+    account = _public_account_address()
+    if not account:
+        unavailable = {
+            "ok": False, "available": False, "status": "UNAVAILABLE", "reason": "ACCOUNT_ADDRESS_UNAVAILABLE",
+            "updated_at": utc_now_iso(), "fetched_at_ms": now_ms,
+        }
+        try:
+            atomic_write_json(EXCHANGE_ACCOUNT_SNAPSHOT_FILE, unavailable)
+        except Exception:
+            pass
+        return unavailable
+    try:
+        payload = json.dumps({"type": "clearinghouseState", "user": account}).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.hyperliquid.xyz/info",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+        spot_raw: Dict[str, Any] = {}
+        spot_parse_status = "NOT_FETCHED"
+        try:
+            spot_payload = json.dumps({"type": "spotClearinghouseState", "user": account}).encode("utf-8")
+            spot_req = urllib.request.Request(
+                "https://api.hyperliquid.xyz/info",
+                data=spot_payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(spot_req, timeout=5) as spot_resp:
+                spot_data = json.loads(spot_resp.read().decode("utf-8"))
+            spot_raw = spot_data if isinstance(spot_data, dict) else {}
+            spot_parse_status = "OK"
+        except Exception as spot_exc:
+            spot_parse_status = f"UNAVAILABLE: {type(spot_exc).__name__}: {spot_exc}"
+        margin = raw.get("marginSummary") if isinstance(raw, dict) else {}
+        cross = raw.get("crossMarginSummary") if isinstance(raw, dict) else {}
+        withdrawable = raw.get("withdrawable") if isinstance(raw, dict) else ""
+        margin_raw_total_usd = fnum(margin.get("totalRawUsd")) if isinstance(margin, dict) and "totalRawUsd" in margin else None
+        cross_raw_total_usd = fnum(cross.get("totalRawUsd")) if isinstance(cross, dict) and "totalRawUsd" in cross else None
+        raw_total_usd = margin_raw_total_usd if margin_raw_total_usd is not None else cross_raw_total_usd
+        raw_total_usd_source = (
+            "clearinghouseState.marginSummary.totalRawUsd"
+            if margin_raw_total_usd is not None
+            else "clearinghouseState.crossMarginSummary.totalRawUsd"
+            if cross_raw_total_usd is not None
+            else ""
+        )
+        spot_balances = spot_raw.get("balances", []) if isinstance(spot_raw.get("balances"), list) else []
+        raw_spot_balances = spot_balances
+        usdc_balance = next((b for b in spot_balances if isinstance(b, dict) and str(b.get("coin", "")).upper() == "USDC"), None)
+        unified_portfolio_value: Optional[float] = None
+        unified_portfolio_value_source = ""
+        available_to_trade: Optional[float] = None
+        available_to_trade_source = ""
+        available_candidates: Dict[str, Any] = {}
+        if isinstance(usdc_balance, dict) and is_present_num(usdc_balance.get("total")):
+            unified_portfolio_value = fnum(usdc_balance.get("total"))
+            unified_portfolio_value_source = "spotClearinghouseState.balances[coin=USDC].total"
+            spot_parse_status = "OK: unified portfolio value matched spot USDC total"
+            if is_present_num(usdc_balance.get("hold")):
+                available_candidates["spotClearinghouseState.balances[coin=USDC].total_minus_hold"] = round(fnum(usdc_balance.get("total")) - fnum(usdc_balance.get("hold")), 8)
+        token_available = spot_raw.get("tokenToAvailableAfterMaintenance", [])
+        if isinstance(token_available, list):
+            for item in token_available:
+                if isinstance(item, list) and len(item) >= 2:
+                    candidate_key = f"spotClearinghouseState.tokenToAvailableAfterMaintenance[token={item[0]}]"
+                    available_candidates[candidate_key] = item[1]
+                    if str(item[0]) == "0":
+                        spot_parse_status += "; available-to-trade candidate present but not promoted without frontend match"
+        positions = []
+        position_map: Dict[str, Dict[str, Any]] = {}
+        unrealized = 0.0
+        for item in raw.get("assetPositions", []) if isinstance(raw, dict) else []:
+            pos = item.get("position", item) if isinstance(item, dict) else {}
+            if not isinstance(pos, dict):
+                continue
+            size = fnum(pos.get("szi"))
+            if abs(size) <= 1e-12:
+                continue
+            upnl = fnum(pos.get("unrealizedPnl"))
+            unrealized += upnl
+            mark_px = fnum(pos.get("positionValue")) / abs(size) if abs(size) > 1e-12 else 0.0
+            item_out = {
+                "coin": str(pos.get("coin", "")).upper(),
+                "signed_size": size,
+                "position_value": fnum(pos.get("positionValue")),
+                "entry_px": fnum(pos.get("entryPx")),
+                "mark_px": mark_px,
+                "unrealized_pnl": upnl,
+                "margin_used": fnum(pos.get("marginUsed")),
+            }
+            positions.append(item_out)
+            position_map[item_out["coin"]] = item_out
+        snapshot = {
+            "ok": True,
+            "available": True,
+            "status": "OK",
+            "account_address": account,
+            "updated_at": utc_now_iso(),
+            "fetched_at_ms": now_ms,
+            "account_value": fnum(margin.get("accountValue"), fnum(cross.get("accountValue"))),
+            "account_value_label": "Clearinghouse account value",
+            "account_value_source": "clearinghouseState.marginSummary.accountValue",
+            "total_account_value": None,
+            "total_account_value_status": "unavailable from clearinghouseState",
+            "raw_total_usd": raw_total_usd,
+            "raw_total_usd_source": raw_total_usd_source,
+            "raw_total_usd_label": "Raw USD / collateral value",
+            "margin_raw_total_usd": margin_raw_total_usd,
+            "cross_raw_total_usd": cross_raw_total_usd,
+            "unified_portfolio_value": unified_portfolio_value,
+            "unified_portfolio_value_source": unified_portfolio_value_source,
+            "available_to_trade": available_to_trade,
+            "available_to_trade_source": available_to_trade_source,
+            "available_to_trade_candidates": available_candidates,
+            "raw_spot_balances": raw_spot_balances,
+            "spot_account_source": "spotClearinghouseState",
+            "spot_parse_status": spot_parse_status,
+            "withdrawable": fnum(withdrawable),
+            "withdrawable_source": "clearinghouseState.withdrawable",
+            "margin_used": fnum(margin.get("totalMarginUsed"), fnum(cross.get("totalMarginUsed"))),
+            "margin_used_source": "clearinghouseState.marginSummary.totalMarginUsed",
+            "total_notional_position": fnum(margin.get("totalNtlPos"), fnum(cross.get("totalNtlPos"))),
+            "unrealized_pnl": unrealized,
+            "unrealized_pnl_source": "sum(assetPositions.position.unrealizedPnl)",
+            "open_positions": positions,
+            "open_positions_count": len(positions),
+            "open_position_count": len(positions),
+            "positions_by_coin": position_map,
+            "raw_margin_summary": margin if isinstance(margin, dict) else {},
+            "raw_cross_margin_summary": cross if isinstance(cross, dict) else {},
+            "raw_withdrawable": withdrawable,
+            "source": "hyperliquid_clearinghouse_state",
+        }
+        atomic_write_json(EXCHANGE_ACCOUNT_SNAPSHOT_FILE, snapshot)
+        return snapshot
+    except Exception as exc:
+        fallback = cached if isinstance(cached, dict) else {}
+        return {
+            **fallback,
+            "ok": False,
+            "available": False,
+            "status": "UNAVAILABLE",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "updated_at": utc_now_iso(),
+            "fetched_at_ms": now_ms,
+        }
+
+
+def _build_account_reconciliation(exchange_snapshot: Dict[str, Any], live_leader_performance: Dict[str, Any]) -> Dict[str, Any]:
+    raw_total_usd = exchange_snapshot.get("raw_total_usd")
+    has_raw_total = is_present_num(raw_total_usd)
+    unified_value = exchange_snapshot.get("unified_portfolio_value")
+    has_unified = is_present_num(unified_value)
+    baselines = load_json(EXCHANGE_BASELINES_JSON, {})
+    if not isinstance(baselines, dict):
+        baselines = {}
+    acct = str(exchange_snapshot.get("account_address") or _public_account_address() or "").lower()
+    all_baselines = baselines.get("account_reconciliation")
+    if not isinstance(all_baselines, dict):
+        all_baselines = {}
+    baseline = all_baselines.get(acct) if acct else None
+    if not isinstance(baseline, dict):
+        baseline = None
+    if baseline is None and acct and (has_unified or has_raw_total):
+        baseline = {
+            "account_address": acct,
+            "baseline_timestamp": exchange_snapshot.get("updated_at") or utc_now_iso(),
+            "baseline_initialized_after_bug_discovery": True,
+            "baseline_note": "Initialized from current account snapshot; deltas start from this point.",
+        }
+        if has_unified:
+            baseline["baseline_unified_portfolio_value"] = fnum(unified_value)
+            baseline["baseline_source"] = exchange_snapshot.get("unified_portfolio_value_source") or ""
+        if has_raw_total:
+            baseline["baseline_raw_total_usd"] = fnum(raw_total_usd)
+            baseline.setdefault("baseline_raw_total_usd_source", exchange_snapshot.get("raw_total_usd_source") or "")
+        all_baselines[acct] = baseline
+        baselines.setdefault("schema", "exchange_baselines.v1")
+        baselines.setdefault("important_boundary", "Baseline offsets are not trades, not PnL, and not engine positions.")
+        baselines["account_reconciliation"] = all_baselines
+        try:
+            atomic_write_json(EXCHANGE_BASELINES_JSON, baselines)
+        except Exception:
+            pass
+    elif isinstance(baseline, dict) and acct and has_unified and not is_present_num(baseline.get("baseline_unified_portfolio_value")):
+        baseline["baseline_unified_portfolio_value"] = fnum(unified_value)
+        baseline["baseline_source"] = exchange_snapshot.get("unified_portfolio_value_source") or ""
+        baseline["baseline_initialized_after_bug_discovery"] = True
+        baseline["baseline_note"] = "Unified portfolio baseline initialized from current account snapshot; deltas start from this point."
+        baseline.setdefault("baseline_timestamp", exchange_snapshot.get("updated_at") or utc_now_iso())
+        all_baselines[acct] = baseline
+        baselines.setdefault("schema", "exchange_baselines.v1")
+        baselines.setdefault("important_boundary", "Baseline offsets are not trades, not PnL, and not engine positions.")
+        baselines["account_reconciliation"] = all_baselines
+        try:
+            atomic_write_json(EXCHANGE_BASELINES_JSON, baselines)
+        except Exception:
+            pass
+
+    baseline_raw = fnum(baseline.get("baseline_raw_total_usd")) if isinstance(baseline, dict) and is_present_num(baseline.get("baseline_raw_total_usd")) else None
+    net_raw_change = round(fnum(raw_total_usd) - baseline_raw, 6) if has_raw_total and baseline_raw is not None else None
+    baseline_unified = fnum(baseline.get("baseline_unified_portfolio_value")) if isinstance(baseline, dict) and is_present_num(baseline.get("baseline_unified_portfolio_value")) else None
+    net_account_change = round(fnum(unified_value) - baseline_unified, 6) if has_unified and baseline_unified is not None else net_raw_change
+    account_value_source = exchange_snapshot.get("unified_portfolio_value_source") if has_unified else exchange_snapshot.get("raw_total_usd_source") or ""
+    attributed_open_pnl = round(sum(fnum(p.get("live_net_pnl")) for p in live_leader_performance.values() if isinstance(p, dict) and is_present_num(p.get("live_net_pnl"))), 6)
+    return {
+        "account_address": acct,
+        "baseline_unified_portfolio_value": baseline_unified,
+        "baseline_raw_total_usd": baseline_raw,
+        "baseline_timestamp": baseline.get("baseline_timestamp", "") if isinstance(baseline, dict) else "",
+        "baseline_initialized_after_bug_discovery": bool(baseline.get("baseline_initialized_after_bug_discovery")) if isinstance(baseline, dict) else False,
+        "baseline_note": baseline.get("baseline_note", "") if isinstance(baseline, dict) else "",
+        "current_account_value": fnum(unified_value) if has_unified else (fnum(raw_total_usd) if has_raw_total else None),
+        "current_account_value_source": account_value_source,
+        "current_unified_portfolio_value": fnum(unified_value) if has_unified else None,
+        "current_raw_total_usd": fnum(raw_total_usd) if has_raw_total else None,
+        "raw_total_usd_source": exchange_snapshot.get("raw_total_usd_source") or "",
+        "net_account_value_change_unadjusted": net_account_change,
+        "net_raw_usd_change_unadjusted": net_raw_change,
+        "clearinghouse_account_value": fnum(exchange_snapshot.get("account_value")) if exchange_snapshot.get("available") else None,
+        "exchange_unrealized_pnl": fnum(exchange_snapshot.get("unrealized_pnl")) if exchange_snapshot.get("available") else None,
+        "open_notional": fnum(exchange_snapshot.get("total_notional_position")) if exchange_snapshot.get("available") else None,
+        "margin_used": fnum(exchange_snapshot.get("margin_used")) if exchange_snapshot.get("available") else None,
+        "attributed_open_pnl": attributed_open_pnl,
+        "estimated_copy_pnl": attributed_open_pnl,
+        "reconciliation_gap": round(net_account_change - attributed_open_pnl, 6) if net_account_change is not None else None,
+        "updated_at": exchange_snapshot.get("updated_at") or utc_now_iso(),
+    }
+
+
+def _manual_live_summary(manual_positions: Dict[str, Any], recent_send_attempts: List[Dict[str, Any]], exchange_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    price_by_coin: Dict[str, float] = {}
+    exchange_snapshot = exchange_snapshot if isinstance(exchange_snapshot, dict) else {}
+    exchange_positions = exchange_snapshot.get("positions_by_coin", {}) if isinstance(exchange_snapshot.get("positions_by_coin"), dict) else {}
+    for coin, pos in exchange_positions.items():
+        if isinstance(pos, dict) and fnum(pos.get("mark_px")) > 0:
+            price_by_coin[str(coin).upper()] = fnum(pos.get("mark_px"))
+    last_filled: Dict[str, Any] = {}
+    last_rejected: Dict[str, Any] = {}
+    last_auto_fill_at = ""
+    auto_wallet = ""
+    auto_wallets: List[str] = []
+    for row in recent_send_attempts:
+        coin = str(row.get("coin", "")).upper()
+        px = fnum(row.get("fill_avg_px"))
+        if coin and px > 0 and coin not in price_by_coin:
+            price_by_coin[coin] = px
+        status = str(row.get("status", ""))
+        if status == "ORDER_FILLED":
+            last_filled = row
+            if "AUTO_LIVE_WS_FAST_PATH" in str(row.get("notes", "")) or row.get("auto_live"):
+                last_auto_fill_at = str(row.get("created_at", ""))
+                w = str(row.get("leader_wallet") or row.get("auto_send_wallet") or "").lower()
+                auto_wallet = w
+                if w and w not in auto_wallets:
+                    auto_wallets.append(w)
+        elif status and status not in {"CONFIRM_REQUIRED"}:
+            last_rejected = row
+    signed_by_coin: Dict[str, float] = {}
+    exposure_by_coin: Dict[str, float] = {}
+    for coin, pos in manual_positions.items():
+        if not isinstance(pos, dict):
+            continue
+        signed = fnum(pos.get("signed_size"))
+        signed_by_coin[str(coin).upper()] = signed
+        exposure_by_coin[str(coin).upper()] = abs(signed) * fnum(price_by_coin.get(str(coin).upper()))
+    open_count = sum(1 for v in signed_by_coin.values() if abs(v) > 1e-12)
+    return {
+        "open_manual_position_count": open_count,
+        "signed_size_by_coin": signed_by_coin,
+        "exposure_by_coin": exposure_by_coin,
+        "manual_live_exposure_estimate": sum(exposure_by_coin.values()),
+        "last_filled_manual_order": last_filled,
+        "last_rejected_manual_order": last_rejected,
+        "current_auto_live_wallet": auto_wallet,
+        "auto_live_wallets": auto_wallets,
+        "last_auto_live_fill_at": last_auto_fill_at,
+    }
+
+
+def _build_manual_reconciliation_rows(manual_positions: Dict[str, Any], exchange_snapshot: Dict[str, Any], recent_send_attempts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    exchange_positions = exchange_snapshot.get("positions_by_coin", {}) if isinstance(exchange_snapshot.get("positions_by_coin"), dict) else {}
+    exchange_available = bool(exchange_snapshot.get("available"))
+    seen_on_exchange: set[str] = set()
+    for coin, pos in sorted(manual_positions.items()):
+        if not isinstance(pos, dict):
+            continue
+        signed = fnum(pos.get("signed_size"))
+        if abs(signed) <= 1e-12:
+            continue
+        coin_upper = str(coin).upper()
+        wallet = str(pos.get("leader_wallet") or pos.get("wallet") or "")
+        ex = exchange_positions.get(coin_upper, {}) if isinstance(exchange_positions, dict) else {}
+        exchange_signed = fnum(ex.get("signed_size")) if isinstance(ex, dict) else 0.0
+        if ex:
+            seen_on_exchange.add(coin_upper)
+        if exchange_available:
+            diff = signed - exchange_signed
+            if abs(diff) <= 1e-8:
+                severity = "OK"
+                issue = "MATCH"
+            elif exchange_signed == 0:
+                severity = "CRITICAL"
+                issue = "MISSING_EXCHANGE"
+            else:
+                severity = "CRITICAL"
+                issue = f"SIZE_DIFF: {diff:+.6f}"
+            exchange_label = exchange_signed
+        else:
+            severity = "INFO"
+            issue = "EXCHANGE_UNAVAILABLE"
+            exchange_label = "n/a"
+        rows.append({
+            "severity": severity,
+            "wallet": wallet,
+            "coin": coin_upper,
+            "side": "LONG" if signed > 0 else "SHORT",
+            "issue": issue,
+            "manual_signed_size": signed,
+            "exchange_signed_size": exchange_label,
+            "last_intent_id": pos.get("last_intent_id", ""),
+            "last_oid": pos.get("last_oid", ""),
+            "last_updated_at": pos.get("last_updated_at", ""),
+            "count": 1,
+            "action_available": bool(issue == "MISSING_EXCHANGE" and abs(exchange_signed) <= 1e-12),
+            "action_label": "Archive ledger row" if issue == "MISSING_EXCHANGE" and abs(exchange_signed) <= 1e-12 else "",
+            "action_note": "Ledger cleanup only; does not place an exchange order." if issue == "MISSING_EXCHANGE" and abs(exchange_signed) <= 1e-12 else "",
+        })
+    if exchange_available:
+        for coin, ex in sorted(exchange_positions.items()):
+            if coin not in seen_on_exchange:
+                rows.append({
+                    "severity": "CRITICAL",
+                    "wallet": "unknown",
+                    "coin": str(coin).upper(),
+                    "issue": "MISSING_LEDGER",
+                    "manual_signed_size": 0.0,
+                    "exchange_signed_size": fnum(ex.get("signed_size")),
+                    "last_intent_id": "—",
+                    "last_oid": "—",
+                    "last_updated_at": "—",
+                    "count": 1,
+                    "action_available": False,
+                })
+    grouped_warnings: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+    for attempt in recent_send_attempts[-50:]:
+        status = str(attempt.get("status", ""))
+        if status and status not in {"ORDER_FILLED", "CONFIRM_REQUIRED"}:
+            wallet = str(attempt.get("leader_wallet") or attempt.get("auto_send_wallet") or "")
+            coin = str(attempt.get("coin", "")).upper()
+            error = str(attempt.get("error") or "")
+            key = (wallet.lower(), coin, status, error)
+            grouped = grouped_warnings.get(key)
+            if not grouped:
+                grouped = {
+                    "severity": "WARN",
+                    "wallet": wallet,
+                    "coin": coin,
+                    "issue": f"recent send attempt {status}" + (f": {error}" if error else ""),
+                    "status": status,
+                    "error": error,
+                    "manual_signed_size": "n/a",
+                    "exchange_signed_size": "n/a",
+                    "last_intent_id": "",
+                    "last_oid": "",
+                    "last_updated_at": "",
+                    "latest_error": "",
+                    "count": 0,
+                    "action_available": False,
+                }
+                grouped_warnings[key] = grouped
+            grouped["count"] = inum(grouped.get("count")) + 1
+            grouped["last_intent_id"] = attempt.get("intent_id", "") or grouped.get("last_intent_id", "")
+            grouped["last_oid"] = attempt.get("oid", "") or grouped.get("last_oid", "")
+            grouped["last_updated_at"] = attempt.get("created_at", "") or grouped.get("last_updated_at", "")
+            grouped["latest_error"] = error or grouped.get("latest_error", "")
+    rows.extend(
+        sorted(
+            grouped_warnings.values(),
+            key=lambda r: str(r.get("last_updated_at", "")),
+            reverse=True,
+        )
+    )
+    return rows[:50]
+
+
+def _archive_manual_reconciliation_ledger_row(payload: Dict[str, Any]) -> Dict[str, Any]:
+    coin_req = str(payload.get("coin", "")).upper().strip()
+    issue_req = str(payload.get("issue", "")).upper().strip()
+    wallet_req = str(payload.get("wallet", "")).lower().strip()
+    manual_req_raw = payload.get("manual_signed_size")
+    if not coin_req or issue_req != "MISSING_EXCHANGE" or not is_present_num(manual_req_raw):
+        return {"ok": False, "error": "BAD_REQUEST"}
+
+    manual_positions = _load_manual_live_positions()
+    matched_key = next((k for k in manual_positions.keys() if str(k).upper() == coin_req), None)
+    if matched_key is None:
+        return {"ok": False, "error": "MANUAL_LEDGER_ROW_NOT_FOUND"}
+    old_row = manual_positions.get(matched_key)
+    if not isinstance(old_row, dict):
+        return {"ok": False, "error": "BAD_MANUAL_LEDGER_ROW"}
+
+    old_signed = fnum(old_row.get("signed_size"))
+    if abs(old_signed - fnum(manual_req_raw)) > 1e-12:
+        return {"ok": False, "error": "MANUAL_SIGNED_SIZE_MISMATCH"}
+    old_wallet = str(old_row.get("leader_wallet") or old_row.get("wallet") or "").lower().strip()
+    if wallet_req and old_wallet and wallet_req != old_wallet:
+        return {"ok": False, "error": "WALLET_MISMATCH"}
+    if abs(old_signed) <= 1e-12:
+        return {"ok": False, "error": "MANUAL_LEDGER_ROW_ALREADY_ZERO"}
+
+    cached_snapshot = load_json(EXCHANGE_ACCOUNT_SNAPSHOT_FILE, {})
+    exchange_positions = cached_snapshot.get("positions_by_coin", {}) if isinstance(cached_snapshot, dict) and isinstance(cached_snapshot.get("positions_by_coin"), dict) else {}
+    ex = exchange_positions.get(coin_req, {})
+    exchange_signed = fnum(ex.get("signed_size")) if isinstance(ex, dict) else 0.0
+    if abs(exchange_signed) > 1e-12:
+        return {"ok": False, "error": "EXCHANGE_SIZE_NOT_ZERO", "exchange_signed_size": exchange_signed}
+
+    if not MANUAL_POSITIONS_FILE.exists():
+        return {"ok": False, "error": "MANUAL_POSITIONS_FILE_MISSING"}
+    MANUAL_RECON_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    backup_path = MANUAL_RECON_BACKUP_DIR / f"manual_live_positions_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.json"
+    shutil.copy2(MANUAL_POSITIONS_FILE, backup_path)
+
+    removed = manual_positions.pop(matched_key)
+    atomic_write_json(MANUAL_POSITIONS_FILE, manual_positions)
+
+    actions = load_json(MANUAL_RECON_ACTIONS_FILE, [])
+    if not isinstance(actions, list):
+        actions = []
+    action_record = {
+        "timestamp": utc_now_iso(),
+        "action": "ARCHIVE_MANUAL_LEDGER_ROW",
+        "coin": coin_req,
+        "wallet": old_wallet or wallet_req,
+        "old_row": removed,
+        "issue": "MISSING_EXCHANGE",
+        "manual_signed_size": old_signed,
+        "exchange_signed_size": exchange_signed,
+        "backup_path": str(backup_path),
+    }
+    actions.append(action_record)
+    atomic_write_json(MANUAL_RECON_ACTIONS_FILE, actions)
+    return {"ok": True, "archived": action_record}
+
+
+def _build_live_wallet_derived(model_state: Dict[str, Any], live_config: Dict[str, Any], last_rows: List[Dict[str, Any]], recent_send_attempts: List[Dict[str, Any]], manual_positions: Dict[str, Any], manual_summary: Dict[str, Any]) -> Dict[str, Any]:
+    model_rows = {
+        str(row.get("wallet", "")).lower(): row
+        for row in model_state.get("wallet_rows", []) if isinstance(row, dict)
+    } if isinstance(model_state, dict) else {}
+    wallets = live_config.get("wallets", {}) if isinstance(live_config.get("wallets"), dict) else {}
+    derived: Dict[str, Any] = {}
+    for wallet in wallets:
+        w = str(wallet).lower()
+        model = model_rows.get(w, {})
+        lead = model.get("lead", {}) if isinstance(model.get("lead"), dict) else {}
+        copy = model.get("copy", {}) if isinstance(model.get("copy"), dict) else {}
+        delta = model.get("delta", {}) if isinstance(model.get("delta"), dict) else {}
+        derived[w] = {
+            "wallet": w,
+            "lead_equity": lead.get("equity"),
+            "copy_equity": copy.get("equity"),
+            "lead_realized": lead.get("realized"),
+            "copy_realized": copy.get("realized"),
+            "lead_unrealized": lead.get("unrealized"),
+            "copy_unrealized": copy.get("unrealized"),
+            "lead_drawdown": lead.get("drawdown"),
+            "copy_drawdown": copy.get("drawdown"),
+            "lead_max_drawdown": lead.get("max_drawdown"),
+            "copy_max_drawdown": copy.get("max_drawdown"),
+            "real_diff": delta.get("equity", model.get("delta_equity")),
+            "ws_intent_count": 0,
+            "lead_activity_count": inum(model.get("fill_count")),
+            "copy_activity_count": inum(model.get("fill_count")),
+            "last_ws_time": "",
+            "last_coin": "",
+            "last_side": "",
+            "auto_filled_count": 0,
+            "auto_rejected_count": 0,
+            "manual_open_exposure": 0.0,
+        }
+    for row in last_rows:
+        w = str(row.get("leader_wallet") or row.get("wallet") or "").lower()
+        if w not in derived:
+            continue
+        if str(row.get("reason", "")) == "LIVE_WS_DETECTED":
+            derived[w]["ws_intent_count"] += 1
+            derived[w]["last_ws_time"] = row.get("created_at", derived[w].get("last_ws_time", ""))
+            derived[w]["last_coin"] = row.get("coin", "")
+            derived[w]["last_side"] = row.get("side", "")
+            derived[w]["copy_activity_count"] += 1
+    for attempt in recent_send_attempts:
+        w = str(attempt.get("leader_wallet") or attempt.get("auto_send_wallet") or "").lower()
+        if w not in derived:
+            continue
+        if "AUTO_LIVE_WS_FAST_PATH" not in str(attempt.get("notes", "")) and not attempt.get("auto_live"):
+            continue
+        if str(attempt.get("status", "")) == "ORDER_FILLED":
+            derived[w]["auto_filled_count"] += 1
+        elif str(attempt.get("status", "")):
+            derived[w]["auto_rejected_count"] += 1
+    exposure_by_coin = manual_summary.get("exposure_by_coin", {}) if isinstance(manual_summary.get("exposure_by_coin"), dict) else {}
+    for coin, pos in manual_positions.items():
+        if not isinstance(pos, dict) or abs(fnum(pos.get("signed_size"))) <= 1e-12:
+            continue
+        w = str(pos.get("leader_wallet") or pos.get("wallet") or "").lower()
+        if w in derived:
+            derived[w]["manual_open_exposure"] += fnum(exposure_by_coin.get(str(coin).upper()))
+    return derived
+
+
+def _build_live_wallet_rows(
+    live_config: Dict[str, Any],
+    last_rows: List[Dict[str, Any]],
+    recent_send_attempts: List[Dict[str, Any]],
+    manual_positions: Dict[str, Any],
+    manual_summary: Dict[str, Any],
+    ws_health: Dict[str, Any],
+    live_leader_performance: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    wallets = live_config.get("wallets", {})
+    if not isinstance(wallets, dict):
+        wallets = {}
+    health_wallets = ws_health.get("wallets", {}) if isinstance(ws_health.get("wallets"), dict) else {}
+    exposure_by_coin = manual_summary.get("exposure_by_coin", {}) if isinstance(manual_summary.get("exposure_by_coin"), dict) else {}
+    rows: List[Dict[str, Any]] = []
+    for wallet, cfg in sorted(wallets.items()):
+        if not isinstance(cfg, dict):
+            cfg = {}
+        w = wallet.lower()
+        wh: Dict[str, Any] = health_wallets.get(wallet) or health_wallets.get(w) or {}
+        in_health_file: bool = (wallet in health_wallets) or (w in health_wallets)
+        normal = normalize_live_wallet_config(wallet, cfg)
+        mode = str(normal.get("mode", "OFF")).upper()
+        service_eligible = bool(normal.get("service_eligible"))
+        service_reason = str(normal.get("service_eligibility_reason", "MODE_OFF"))
+        perf = (live_leader_performance or {}).get(w, {})
+
+        # WS intent activity
+        ws_intent_count = 0
+        last_intent_time = ""
+        last_intent_coin = ""
+        last_intent_side = ""
+        for row in last_rows:
+            rw = str(row.get("leader_wallet") or row.get("wallet") or "").lower()
+            if rw != w:
+                continue
+            if str(row.get("reason", "")) == "LIVE_WS_DETECTED":
+                ws_intent_count += 1
+                t = str(row.get("created_at", ""))
+                if t > last_intent_time:
+                    last_intent_time = t
+                    last_intent_coin = str(row.get("coin", ""))
+                    last_intent_side = str(row.get("side", ""))
+
+        if service_reason == "CONFIG_CONFLICT_MODE_ENABLED_FALSE":
+            eligibility = "CONFIG CONFLICT"
+        elif service_eligible and mode == "LIVE":
+            eligibility = "COPYING"
+        elif service_eligible and mode == "CLO":
+            eligibility = "CLOSE ONLY"
+        else:
+            eligibility = "DISABLED"
+
+        # Connection: OFF wallets get "copy disabled"; LIVE/CLO use real ws health.
+        if mode == "OFF" or not service_eligible:
+            conn_status = "COPY DISABLED"
+            conn_detail = service_reason if service_reason != "MODE_OFF" else ""
+        elif not in_health_file:
+            conn_status = "NO WS HEALTH"
+            conn_detail = "service not reporting this wallet"
+        else:
+            raw_status = str(wh.get("current_status") or wh.get("effective_status") or wh.get("status") or "UNKNOWN").upper()
+            conn_status = "OFFLINE" if raw_status in {"OFFLINE", "DISCONNECTED", "CLOSED"} else raw_status
+            conn_detail = wh.get("current_health_grade") or wh.get("health_grade") or wh.get("last_error") or "n/a"
+
+        open_positions = perf.get("current_open_positions", [])
+        open_exposure = perf.get("current_exposure", 0.0)
+        last_fill_d = perf.get("last_actual_fill", {})
+
+        rows.append({
+            "wallet": wallet,
+            "mode": mode,
+            "eligibility": eligibility,
+            "enabled": bool(normal.get("enabled")),
+            "service_eligible": service_eligible,
+            "service_eligibility_reason": service_reason,
+            "copy_mode": str(cfg.get("copy_mode", "proportional")),
+            "fixed_notional": cfg.get("fixed_notional"),
+            "norm_base": cfg.get("norm_base"),
+            "leader_equity_base": cfg.get("leader_equity_base"),
+            "max_diff_pct": cfg.get("max_diff_pct"),
+            "daily_loss_limit": cfg.get("daily_loss_limit"),
+            "conn_status": conn_status,
+            "conn_detail": conn_detail,
+            "ws_state": conn_status,
+            "ws_reason": conn_detail,
+            "ws_intent_count": ws_intent_count,
+            "last_intent_time": last_intent_time,
+            "last_ws_intent_at": last_intent_time,
+            "last_intent_coin": last_intent_coin,
+            "last_intent_side": last_intent_side,
+            "last_intent_coin_side": f"{last_intent_coin} {last_intent_side}".strip(),
+            "filled_count": perf.get("filled_count", 0),
+            "exits_count": perf.get("exits_count", 0),
+            "exchange_rejected_count": perf.get("exchange_rejected_count", 0),
+            "local_blocked_count": perf.get("local_blocked_count", 0),
+            "preview_count": perf.get("preview_count", 0),
+            "avg_fill_bps": perf.get("avg_fill_vs_limit_bps"),
+            "worst_fill_bps": perf.get("worst_fill_vs_limit_bps"),
+            "avg_leader_bps": perf.get("avg_leader_vs_user_bps"),
+            "realized_pnl": perf.get("realized_pnl_estimate"),
+            "unrealized_pnl": perf.get("unrealized_pnl_estimate"),
+            "net_pnl": perf.get("net_pnl_estimate"),
+            "live_realized_pnl": perf.get("live_realized_pnl"),
+            "live_unrealized_pnl": perf.get("live_unrealized_pnl"),
+            "live_net_pnl": perf.get("live_net_pnl"),
+            "live_equity_effect": perf.get("live_equity_effect"),
+            "pnl_status": perf.get("pnl_status", "N/A"),
+            "pnl_status_label": perf.get("pnl_status_label", "No live PnL"),
+            "attribution_quality": perf.get("attribution_quality", "N/A"),
+            "dry_run_fill_count": perf.get("dry_run_fill_count", 0),
+            "dry_run_realized_pnl": perf.get("dry_run_realized_pnl", 0.0),
+            "data_quality": perf.get("data_quality_notes", ""),
+            "data_quality_notes": perf.get("data_quality_notes", ""),
+            "lead_reference_price": perf.get("lead_reference_price"),
+            "copy_fill_price": perf.get("copy_fill_price"),
+            "total_diff_usd": perf.get("total_diff_usd"),
+            "avg_diff_usd": perf.get("avg_diff_usd"),
+            "avg_diff_bps": perf.get("avg_diff_bps"),
+            "worst_diff_bps": perf.get("worst_diff_bps"),
+            "fill_vs_limit_avg_bps": perf.get("avg_fill_vs_limit_bps"),
+            "fill_vs_limit_worst_bps": perf.get("worst_fill_vs_limit_bps"),
+            "open_position_count": len(open_positions),
+            "open_positions": open_positions,
+            "open_coins": perf.get("open_coins", []),
+            "open_exposure": open_exposure,
+            "current_exposure": open_exposure,
+            "max_exposure": perf.get("max_exposure"),
+            "drawdown": perf.get("drawdown"),
+            "live_dd": perf.get("drawdown"),
+            "max_drawdown": perf.get("max_drawdown"),
+            "last_fill": last_fill_d,
+        })
+    return rows
+
+
+def _build_real_copy_positions(
+    manual_positions: Dict[str, Any],
+    exchange_snapshot: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    exchange_positions = exchange_snapshot.get("positions_by_coin", {}) if isinstance(exchange_snapshot.get("positions_by_coin"), dict) else {}
+    exchange_available = bool(exchange_snapshot.get("available"))
+    seen: set = set()
+    for coin, pos in sorted(manual_positions.items()):
+        if not isinstance(pos, dict):
+            continue
+        signed = fnum(pos.get("signed_size"))
+        if abs(signed) <= 1e-12:
+            continue
+        coin_upper = coin.upper()
+        seen.add(coin_upper)
+        ex: Dict[str, Any] = exchange_positions.get(coin_upper, {}) if isinstance(exchange_positions, dict) else {}
+        ex_signed = fnum(ex.get("signed_size")) if isinstance(ex, dict) else 0.0
+        ex_mark = fnum(ex.get("mark_px")) if isinstance(ex, dict) else 0.0
+        ex_entry = fnum(ex.get("entry_px")) if isinstance(ex, dict) else 0.0
+        ex_upnl = fnum(ex.get("unrealized_pnl")) if isinstance(ex, dict) else 0.0
+        ex_pos_value = fnum(ex.get("position_value")) if isinstance(ex, dict) else 0.0
+        if exchange_available:
+            diff = signed - ex_signed
+            if abs(diff) <= 1e-8:
+                status = "MATCH"
+            elif ex_signed == 0.0:
+                status = "MISSING_EXCHANGE"
+            else:
+                status = f"SIZE_DIFF {diff:+.6f}"
+        else:
+            status = "EXCHANGE_UNAVAILABLE"
+        rows.append({
+            "coin": coin_upper,
+            "signed_size": signed,
+            "side": "LONG" if signed > 0 else "SHORT",
+            "leader_wallet": str(pos.get("leader_wallet") or pos.get("wallet") or ""),
+            "last_intent_id": pos.get("last_intent_id", ""),
+            "last_oid": pos.get("last_oid", ""),
+            "last_updated_at": pos.get("last_updated_at", ""),
+            "exchange_signed_size": ex_signed if exchange_available else None,
+            "entry_px": ex_entry if ex_entry > 0 else None,
+            "mark_px": ex_mark if ex_mark > 0 else None,
+            "position_value": ex_pos_value if ex_pos_value > 0 else None,
+            "unrealized_pnl": ex_upnl if exchange_available else None,
+            "ledger_vs_exchange": status,
+        })
+    if exchange_available:
+        for coin, ex in sorted(exchange_positions.items()):
+            if coin in seen:
+                continue
+            ex_signed = fnum(ex.get("signed_size")) if isinstance(ex, dict) else 0.0
+            if abs(ex_signed) <= 1e-12:
+                continue
+            rows.append({
+                "coin": coin.upper(),
+                "signed_size": None,
+                "side": "LONG" if ex_signed > 0 else "SHORT",
+                "leader_wallet": "—",
+                "last_intent_id": "—",
+                "last_oid": "—",
+                "last_updated_at": "—",
+                "exchange_signed_size": ex_signed,
+                "entry_px": fnum(ex.get("entry_px")) or None,
+                "mark_px": fnum(ex.get("mark_px")) or None,
+                "position_value": fnum(ex.get("position_value")) or None,
+                "unrealized_pnl": fnum(ex.get("unrealized_pnl")) or None,
+                "ledger_vs_exchange": "MISSING_LEDGER",
+            })
+    return rows
+
+
+def _build_execution_quality_rows(
+    recent_send_attempts: List[Dict[str, Any]],
+    last_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    intent_by_id: Dict[str, Dict[str, Any]] = {}
+    for row in last_rows:
+        iid = str(row.get("intent_id", "")).strip()
+        if iid:
+            intent_by_id[iid] = row
+    rows: List[Dict[str, Any]] = []
+    for attempt in reversed(recent_send_attempts):
+        intent_id = str(attempt.get("intent_id", "")).strip()
+        intent = intent_by_id.get(intent_id, {})
+        fill_px = fnum(attempt.get("fill_avg_px"))
+        limit_px = fnum(attempt.get("limit_price") or attempt.get("limit_px") or 0)
+        if limit_px == 0 and intent:
+            limit_px = fnum(intent.get("suggested_limit_price") or intent.get("target_price") or 0)
+        leader_px = fnum(intent.get("leader_price") or intent.get("target_price") or 0) if intent else 0.0
+        side = str(attempt.get("actual_side") or attempt.get("side") or "").upper()
+        fill_bps: Optional[float] = None
+        if fill_px > 0 and limit_px > 0:
+            raw = (fill_px - limit_px) / limit_px * 10000 if side == "BUY" else (limit_px - fill_px) / limit_px * 10000
+            fill_bps = round(raw, 2)
+        leader_bps: Optional[float] = None
+        if fill_px > 0 and leader_px > 0:
+            raw2 = (fill_px - leader_px) / leader_px * 10000 if side == "BUY" else (leader_px - fill_px) / leader_px * 10000
+            leader_bps = round(raw2, 2)
+        rows.append({
+            "time": attempt.get("created_at", ""),
+            "leader_wallet": str(attempt.get("leader_wallet") or attempt.get("auto_send_wallet") or ""),
+            "coin": attempt.get("coin", ""),
+            "side": side,
+            "status": attempt.get("status", ""),
+            "limit_px": limit_px if limit_px > 0 else None,
+            "fill_avg_px": fill_px if fill_px > 0 else None,
+            "fill_size": attempt.get("fill_size"),
+            "oid": attempt.get("oid"),
+            "fill_bps": fill_bps,
+            "leader_bps": leader_bps,
+            "marketable_bps": fnum(attempt.get("marketable_bps")) or None,
+            "error": attempt.get("error", ""),
+        })
+    return rows
+
+
+_EXCHANGE_REJECT_STATUSES = {"ORDER_REJECTED"}
+_PREVIEW_STATUSES = {"CONFIRM_REQUIRED"}
+_TERMINAL_IGNORE = {"", "ORDER_FILLED", "ORDER_REJECTED", "CONFIRM_REQUIRED"}
+
+
+def _is_dry_run_live_fill(row: Dict[str, Any]) -> bool:
+    return str(row.get("fill_status", "")).upper() == "DRY_RUN_FILLED" or parse_bool(row.get("dry_run"))
+
+
+def _build_live_leader_performance(
+    recent_send_attempts: List[Dict[str, Any]],
+    manual_positions: Dict[str, Any],
+    exchange_snapshot: Dict[str, Any],
+    live_config: Dict[str, Any],
+    last_rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    intent_by_id: Dict[str, Dict[str, Any]] = {}
+    for row in last_rows:
+        iid = str(row.get("intent_id", "")).strip()
+        if iid:
+            intent_by_id[iid] = row
+
+    would_send_by_id: Dict[str, Dict[str, Any]] = {}
+    if WOULD_SEND_ORDERS_CSV.exists():
+        try:
+            with WOULD_SEND_ORDERS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    iid = str(row.get("intent_id", "")).strip()
+                    if iid:
+                        would_send_by_id[iid] = row
+        except Exception:
+            pass
+
+    exchange_positions = exchange_snapshot.get("positions_by_coin", {}) if isinstance(exchange_snapshot.get("positions_by_coin"), dict) else {}
+    exchange_available = bool(exchange_snapshot.get("available"))
+    coin_wallets: Dict[str, set[str]] = {}
+    for coin, pos in manual_positions.items():
+        if not isinstance(pos, dict) or abs(fnum(pos.get("signed_size"))) <= 1e-12:
+            continue
+        pw = str(pos.get("leader_wallet") or pos.get("wallet") or "").lower()
+        if pw:
+            coin_wallets.setdefault(str(coin).upper(), set()).add(pw)
+
+    live_fills_by_wallet: Dict[str, List[Dict[str, Any]]] = {}
+    if LIVE_FILLS_CSV.exists():
+        try:
+            with LIVE_FILLS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    lw = str(row.get("leader_wallet", "")).lower()
+                    if lw:
+                        live_fills_by_wallet.setdefault(lw, []).append(row)
+        except Exception:
+            pass
+
+    wallets = live_config.get("wallets", {})
+    if not isinstance(wallets, dict):
+        wallets = {}
+
+    wallet_keys: set = set(wallets.keys())
+    for attempt in recent_send_attempts:
+        aw = str(attempt.get("leader_wallet") or attempt.get("auto_send_wallet") or "").lower()
+        if aw:
+            wallet_keys.add(aw)
+
+    perf: Dict[str, Any] = {}
+    for wallet_key in sorted(wallet_keys):
+        w = wallet_key.lower()
+        filled_attempts: List[Dict[str, Any]] = []
+        exch_rejected: List[Dict[str, Any]] = []
+        local_blocked: List[Dict[str, Any]] = []
+        previews: List[Dict[str, Any]] = []
+        gross_buy = 0.0
+        gross_sell = 0.0
+        fill_bps_vals: List[float] = []
+        leader_bps_vals: List[float] = []
+        diff_usd_vals: List[float] = []
+        friction_rows: List[Dict[str, Any]] = []
+        pnl_points: List[Dict[str, Any]] = []
+        exits_count = 0
+        last_actual_fill: Dict[str, Any] = {}
+        last_exch_reject: Dict[str, Any] = {}
+        last_local_block: Dict[str, Any] = {}
+
+        for attempt in recent_send_attempts:
+            aw = str(attempt.get("leader_wallet") or attempt.get("auto_send_wallet") or "").lower()
+            if aw != w:
+                continue
+            st = str(attempt.get("status", ""))
+            if st == "ORDER_FILLED":
+                filled_attempts.append(attempt)
+                last_actual_fill = attempt
+                fill_px = fnum(attempt.get("fill_avg_px"))
+                fill_sz = fnum(attempt.get("fill_size"))
+                side = str(attempt.get("actual_side") or attempt.get("side") or "").upper()
+                if fill_px > 0 and fill_sz > 0:
+                    notional = fill_px * abs(fill_sz)
+                    if side == "BUY":
+                        gross_buy += notional
+                    else:
+                        gross_sell += notional
+                if str(attempt.get("reduce_only", "")).lower() in {"1", "true", "yes"}:
+                    exits_count += 1
+                elif abs(fnum(attempt.get("position_after"))) < abs(fnum(attempt.get("position_before"))):
+                    exits_count += 1
+                limit_px = fnum(attempt.get("limit_price") or attempt.get("limit_px") or 0)
+                iid = str(attempt.get("intent_id", "")).strip()
+                if limit_px == 0 and iid:
+                    intent = intent_by_id.get(iid, {})
+                    limit_px = fnum(intent.get("suggested_limit_price") or intent.get("target_price") or 0)
+                if fill_px > 0 and limit_px > 0:
+                    raw = (fill_px - limit_px) / limit_px * 10000 if side == "BUY" else (limit_px - fill_px) / limit_px * 10000
+                    fill_bps_vals.append(round(raw, 2))
+                intent = intent_by_id.get(iid, {}) if iid else {}
+                would = would_send_by_id.get(iid, {}) if iid else {}
+                leader_px = fnum(
+                    intent.get("leader_price")
+                    or intent.get("target_price")
+                    or intent.get("suggested_limit_price")
+                    or would.get("limit_price")
+                    or 0
+                )
+                diff_usd: Optional[float] = None
+                diff_bps: Optional[float] = None
+                if fill_px > 0 and leader_px > 0:
+                    lb = (fill_px - leader_px) / leader_px * 10000 if side == "BUY" else (leader_px - fill_px) / leader_px * 10000
+                    diff_bps = round(lb, 2)
+                    leader_bps_vals.append(diff_bps)
+                    diff_usd = round((fill_px - leader_px) * abs(fill_sz) if side == "BUY" else (leader_px - fill_px) * abs(fill_sz), 6)
+                    diff_usd_vals.append(diff_usd)
+                friction_rows.append({
+                    "time": attempt.get("created_at", ""),
+                    "coin": attempt.get("coin", ""),
+                    "side": side,
+                    "leader_reference_px": leader_px if leader_px > 0 else None,
+                    "copy_fill_px": fill_px if fill_px > 0 else None,
+                    "size": fill_sz if fill_sz > 0 else None,
+                    "diff_usd": diff_usd,
+                    "diff_bps": diff_bps,
+                    "limit_px": limit_px if limit_px > 0 else None,
+                    "fill_vs_limit_bps": fill_bps_vals[-1] if fill_bps_vals else None,
+                    "oid": attempt.get("oid", ""),
+                    "intent_id": iid,
+                })
+            elif st == "ORDER_REJECTED":
+                exch_rejected.append(attempt)
+                last_exch_reject = attempt
+            elif st == "CONFIRM_REQUIRED":
+                previews.append(attempt)
+            elif st:
+                local_blocked.append(attempt)
+                last_local_block = attempt
+
+        avg_fill_bps: Optional[float] = round(sum(fill_bps_vals) / len(fill_bps_vals), 1) if fill_bps_vals else None
+        worst_fill_bps: Optional[float] = round(max(fill_bps_vals), 1) if fill_bps_vals else None
+        avg_leader_bps: Optional[float] = round(sum(leader_bps_vals) / len(leader_bps_vals), 1) if leader_bps_vals else None
+        total_diff_usd: Optional[float] = round(sum(diff_usd_vals), 4) if diff_usd_vals else None
+        avg_diff_usd: Optional[float] = round(sum(diff_usd_vals) / len(diff_usd_vals), 4) if diff_usd_vals else None
+        worst_diff_bps: Optional[float] = round(max(leader_bps_vals), 1) if leader_bps_vals else None
+
+        realized_pnl: Optional[float] = None
+        pnl_status = "N/A"
+        attribution_quality = "N/A"
+        data_quality_notes: List[str] = []
+        wfills = live_fills_by_wallet.get(w, [])
+        dry_run_wfills = [f for f in wfills if _is_dry_run_live_fill(f)]
+        real_wfills = [f for f in wfills if not _is_dry_run_live_fill(f)]
+        dry_run_realized_pnl = round(sum(fnum(f.get("realized_pnl", 0)) for f in dry_run_wfills), 4) if dry_run_wfills else 0.0
+        if real_wfills:
+            total_realized = sum(fnum(f.get("realized_pnl", 0)) for f in real_wfills)
+            total_fees = sum(fnum(f.get("fee", 0)) for f in real_wfills)
+            realized_pnl = round(total_realized, 4)
+            pnl_status = "EXACT"
+            attribution_quality = "ACTUAL_EXCHANGE_CLOSED_PNL"
+            running = 0.0
+            for f in real_wfills:
+                running += fnum(f.get("realized_pnl", 0))
+                pnl_points.append({
+                    "timestamp": f.get("created_at") or f.get("timestamp_iso") or f.get("time") or "",
+                    "value": round(running, 6),
+                })
+            if abs(total_fees) > 1e-8:
+                data_quality_notes.append(f"fees={round(total_fees, 4)}")
+            if dry_run_wfills:
+                data_quality_notes.append(f"dry-run fills excluded={len(dry_run_wfills)}")
+        elif not filled_attempts:
+            data_quality_notes.append("no fills yet")
+        else:
+            pnl_status = "ESTIMATED_FROM_REAL_ORDER_FILLS"
+            attribution_quality = "ORDER_FILLED_WITHOUT_CLOSED_PNL"
+            data_quality_notes.append("ORDER_FILLED send_attempts present; closed PnL unavailable")
+        if wfills and not real_wfills and dry_run_wfills:
+            data_quality_notes.append("dry-run live_fills excluded from live PnL")
+
+        open_positions: List[Dict[str, Any]] = []
+        current_exposure = 0.0
+        total_unrealized = 0.0
+        has_unrealized = False
+        has_ambiguous_coin = False
+
+        for coin, pos in manual_positions.items():
+            if not isinstance(pos, dict):
+                continue
+            pw = str(pos.get("leader_wallet") or pos.get("wallet") or "").lower()
+            if pw != w:
+                continue
+            signed = fnum(pos.get("signed_size"))
+            if abs(signed) <= 1e-12:
+                continue
+            coin_upper = coin.upper()
+            coin_shared = len(coin_wallets.get(coin_upper, set())) > 1
+            ex: Dict[str, Any] = exchange_positions.get(coin_upper, {}) if isinstance(exchange_positions, dict) else {}
+            mark = fnum(ex.get("mark_px")) if isinstance(ex, dict) else 0.0
+            entry = fnum(ex.get("entry_px")) if isinstance(ex, dict) else 0.0
+            ex_upnl = fnum(ex.get("unrealized_pnl")) if isinstance(ex, dict) else 0.0
+            pos_value = fnum(ex.get("position_value")) if isinstance(ex, dict) else 0.0
+            exp_est = pos_value if pos_value > 0 else (abs(signed) * mark if mark > 0 else 0.0)
+            current_exposure += exp_est
+            if coin_shared:
+                match = "AMBIGUOUS_COIN_SHARED"
+                has_ambiguous_coin = True
+            elif exchange_available and isinstance(ex, dict) and ex:
+                ex_signed = fnum(ex.get("signed_size"))
+                match = "MATCH" if abs(ex_signed - signed) <= 1e-8 else "MISMATCH"
+                total_unrealized += ex_upnl
+                has_unrealized = True
+            else:
+                match = "EXCHANGE_UNAVAILABLE"
+            open_positions.append({
+                "coin": coin_upper,
+                "signed_size": signed,
+                "side": "LONG" if signed > 0 else "SHORT",
+                "entry_px": entry if entry > 0 else None,
+                "mark_px": mark if mark > 0 else None,
+                "unrealized_pnl": ex_upnl if exchange_available and not coin_shared else None,
+                "exposure": round(exp_est, 4) if exp_est > 0 else None,
+                "exchange_match": match,
+            })
+
+        unrealized_pnl: Optional[float] = round(total_unrealized, 4) if has_unrealized else None
+
+        if has_ambiguous_coin:
+            pnl_status = "AMBIGUOUS_COIN_SHARED"
+            attribution_quality = "UNSAFE_SHARED_COIN_ATTRIBUTION"
+            data_quality_notes.append("shared coin across leaders; exchange open PnL not attributed")
+        elif pnl_status == "EXACT":
+            if unrealized_pnl is not None and open_positions:
+                pass  # already exact realized; unrealized is a bonus
+        elif unrealized_pnl is not None and open_positions:
+            if realized_pnl is None:
+                pnl_status = "OPEN_ONLY"
+                attribution_quality = "EXCHANGE_OPEN_UNREALIZED_ONLY"
+            elif attribution_quality == "N/A":
+                attribution_quality = "EXCHANGE_OPEN_UNREALIZED_ONLY"
+        elif pnl_status == "ESTIMATED_FROM_REAL_ORDER_FILLS":
+            pass
+        elif not has_unrealized and not real_wfills and filled_attempts:
+            pnl_status = "ESTIMATED_FROM_REAL_ORDER_FILLS"
+            attribution_quality = "ORDER_FILLED_WITHOUT_CLOSED_PNL"
+
+        net_pnl: Optional[float] = None
+        if realized_pnl is not None or unrealized_pnl is not None:
+            net_pnl = round((realized_pnl or 0.0) + (unrealized_pnl or 0.0), 4)
+
+        drawdown: Optional[float] = None
+        max_drawdown: Optional[float] = None
+        if pnl_points:
+            peak = pnl_points[0]["value"]
+            max_dd = 0.0
+            for p in pnl_points:
+                peak = max(peak, fnum(p.get("value")))
+                dd = fnum(p.get("value")) - peak
+                max_dd = min(max_dd, dd)
+            drawdown = round(fnum(pnl_points[-1].get("value")) - peak, 4)
+            max_drawdown = round(max_dd, 4)
+
+        exposure_series = [{
+            "timestamp": exchange_snapshot.get("updated_at") or utc_now_iso(),
+            "value": round(current_exposure, 4),
+        }] if current_exposure else []
+        pnl_status_labels = {
+            "EXACT": "Exact closed PnL",
+            "OPEN_ONLY": "Open PnL only",
+            "ESTIMATED_FROM_REAL_ORDER_FILLS": "Real fills / closed PnL unavailable",
+            "AMBIGUOUS_COIN_SHARED": "Shared coin attribution",
+            "N/A": "No live PnL",
+        }
+        pnl_status_label = pnl_status_labels.get(pnl_status, pnl_status or "No live PnL")
+
+        perf[w] = {
+            "wallet": wallet_key,
+            "filled_count": len(filled_attempts),
+            "exits_count": exits_count,
+            "exchange_rejected_count": len(exch_rejected),
+            "local_blocked_count": len(local_blocked),
+            "preview_count": len(previews),
+            "gross_buy_notional": round(gross_buy, 4),
+            "gross_sell_notional": round(gross_sell, 4),
+            "current_open_positions": open_positions,
+            "current_exposure": round(current_exposure, 4),
+            "open_position_count": len(open_positions),
+            "open_coins": [p.get("coin") for p in open_positions if p.get("coin")],
+            "max_exposure": None,
+            "drawdown": drawdown,
+            "max_drawdown": max_drawdown,
+            "realized_pnl_estimate": realized_pnl,
+            "unrealized_pnl_estimate": unrealized_pnl,
+            "net_pnl_estimate": net_pnl,
+            "live_realized_pnl": realized_pnl,
+            "live_unrealized_pnl": unrealized_pnl,
+            "live_net_pnl": net_pnl,
+            "live_equity_effect": net_pnl,
+            "pnl_status": pnl_status,
+            "pnl_status_label": pnl_status_label,
+            "attribution_quality": attribution_quality,
+            "dry_run_fill_count": len(dry_run_wfills),
+            "dry_run_realized_pnl": dry_run_realized_pnl,
+            "lead_reference_price": friction_rows[-1].get("leader_reference_px") if friction_rows else None,
+            "copy_fill_price": friction_rows[-1].get("copy_fill_px") if friction_rows else None,
+            "total_diff_usd": total_diff_usd,
+            "avg_diff_usd": avg_diff_usd,
+            "avg_diff_bps": avg_leader_bps,
+            "worst_diff_bps": worst_diff_bps,
+            "friction_fills": friction_rows[-50:],
+            "pnl_series": pnl_points[-500:],
+            "exposure_series": exposure_series,
+            "avg_fill_vs_limit_bps": avg_fill_bps,
+            "worst_fill_vs_limit_bps": worst_fill_bps,
+            "avg_leader_vs_user_bps": avg_leader_bps,
+            "last_actual_fill": {
+                "coin": last_actual_fill.get("coin", ""),
+                "side": last_actual_fill.get("actual_side") or last_actual_fill.get("side", ""),
+                "size": last_actual_fill.get("fill_size", ""),
+                "avg_px": last_actual_fill.get("fill_avg_px", ""),
+                "oid": last_actual_fill.get("oid", ""),
+                "time": last_actual_fill.get("created_at", ""),
+            } if last_actual_fill else {},
+            "last_exchange_reject": {
+                "coin": last_exch_reject.get("coin", ""),
+                "side": last_exch_reject.get("actual_side") or last_exch_reject.get("side", ""),
+                "time": last_exch_reject.get("created_at", ""),
+                "error": last_exch_reject.get("error", ""),
+            } if last_exch_reject else {},
+            "last_local_block": {
+                "status": last_local_block.get("status", ""),
+                "coin": last_local_block.get("coin", ""),
+                "time": last_local_block.get("created_at", ""),
+            } if last_local_block else {},
+            "data_quality_notes": "; ".join(data_quality_notes) if data_quality_notes else "",
+        }
+    return perf
+
+
+def _build_execution_quality_summary(execution_quality_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    filled = [r for r in execution_quality_rows if r.get("status") == "ORDER_FILLED"]
+    exch_rej = [r for r in execution_quality_rows if r.get("status") == "ORDER_REJECTED"]
+    local_blk = [r for r in execution_quality_rows if r.get("status") and r.get("status") not in _TERMINAL_IGNORE]
+    previews = [r for r in execution_quality_rows if r.get("status") == "CONFIRM_REQUIRED"]
+    bps_vals = [r["fill_bps"] for r in filled if r.get("fill_bps") is not None]
+    lbps_vals = [r["leader_bps"] for r in filled if r.get("leader_bps") is not None]
+    avg_bps: Optional[float] = round(sum(bps_vals) / len(bps_vals), 2) if bps_vals else None
+    worst_bps: Optional[float] = round(max(bps_vals), 2) if bps_vals else None
+    avg_lbps: Optional[float] = round(sum(lbps_vals) / len(lbps_vals), 2) if lbps_vals else None
+    last_fill = filled[0] if filled else {}
+    return {
+        "filled_count": len(filled),
+        "exchange_rejected_count": len(exch_rej),
+        "local_blocked_count": len(local_blk),
+        "preview_count": len(previews),
+        "avg_fill_vs_limit_bps": avg_bps,
+        "worst_fill_vs_limit_bps": worst_bps,
+        "avg_leader_vs_user_bps": avg_lbps,
+        "last_fill": {"coin": last_fill.get("coin", ""), "side": last_fill.get("side", ""), "time": last_fill.get("time", "")} if last_fill else {},
+    }
 
 
 def _load_send_attempt_counts() -> Dict[str, int]:
@@ -2875,10 +4208,19 @@ def render_home(state: Dict[str, Any]) -> str:
     exit_count = sum(int(r.get("exit_count") or 0) for r in included_rows)
     open_positions = sum(int(r.get("open_position_count") or 0) for r in included_rows)
     health_label, health_detail = health_status_label()
+    live_audit = _live_audit_summary()
+    account_snapshot = live_audit.get("exchange_account_snapshot", {}) if isinstance(live_audit, dict) else {}
+    manual_summary = live_audit.get("manual_live_summary", {}) if isinstance(live_audit, dict) else {}
+    clearinghouse_account_value = fnum(account_snapshot.get("account_value")) if account_snapshot.get("available") else 0.0
+    manual_live_exposure = fnum(manual_summary.get("manual_live_exposure_estimate"))
+    manual_open_count = inum(manual_summary.get("open_manual_position_count"))
+    account_updated = str(account_snapshot.get("updated_at") or account_snapshot.get("reason") or "unavailable")
     def small_metric(label: str, value: str, raw: Any = 0.0) -> str:
         return f'<div class="metric-line"><span>{label}</span><b class="{css_class(raw)}">{value}</b></div>'
     def group_card(title: str, lines: List[str], extra_cls: str = "") -> str:
         return f'<div class="card group-card {extra_cls}"><div class="label">{title}</div>' + "".join(lines) + '</div>'
+    def py_short_wallet(wallet: str) -> str:
+        return wallet[:6] + "..." + wallet[-6:] if len(wallet) > 18 else wallet
     cards = "".join([
         group_card("PNL", [small_metric("LEAD", dual(lead_total, user_base), lead_total), small_metric("COPY", dual(copy_total, user_base), copy_total), small_metric("Δ", dual(delta_total, user_base), delta_total)]),
         group_card("REALISED", [small_metric("LEAD", dual(fnum(lead.get("realized")), user_base), fnum(lead.get("realized"))), small_metric("COPY", dual(fnum(copy.get("realized")), user_base), fnum(copy.get("realized")))]),
@@ -2888,6 +4230,8 @@ def render_home(state: Dict[str, Any]) -> str:
         group_card("EXPOSURE", [small_metric("OPEN", money(open_notional), open_notional), small_metric("MAX", money(max_open_notional), max_open_notional), small_metric("BASE", f"{notional_x:.2f}x / {max_notional_x:.2f}x", notional_x)]),
         group_card("COPYABILITY", [small_metric("AVG TRADE %", pct(avg_trade_pct, 3), avg_trade_pct), small_metric("AVG TRADE $", money(avg_trade), avg_trade), small_metric("AVG POS", money(avg_pos_size), avg_pos_size), small_metric("REQ LEV", f"{max_req_lev:.2f}x", max_req_lev)]),
         group_card("ACTIVITY", [small_metric("FILLS", str(fill_count), fill_count), small_metric("EXITS", str(exit_count), exit_count), small_metric("OPEN POS", str(open_positions), open_positions), small_metric("WIN", pct(win_avg), win_avg)]),
+        group_card("LIVE ACCOUNT", [small_metric("MODEL EQUITY", money(fnum(copy.get("equity"))), fnum(copy.get("equity"))), small_metric("CLEARINGHOUSE VALUE", money(clearinghouse_account_value) if account_snapshot.get("available") else "unavailable", clearinghouse_account_value), small_metric("SNAPSHOT", html.escape(account_updated[:24]), 0)]),
+        group_card("MANUAL LIVE", [small_metric("OPEN POS", str(manual_open_count), manual_open_count), small_metric("EXPOSURE EST", money(manual_live_exposure), manual_live_exposure), small_metric("AUTO WALLET", html.escape(py_short_wallet(str(manual_summary.get("current_auto_live_wallet") or "")) or "—"), 0)]),
         group_card("DB HEALTH", [small_metric(health_label, html.escape(health_detail), -1 if "ERROR" in health_label else 0), small_metric("CACHE", str(APP_HEALTH.get("cache_hits", 0)), 0), small_metric("BUILDS", str(APP_HEALTH.get("build_count", 0)), 0)], "health-card"),
     ])
     ranking = ui.get("ranking", {}) if isinstance(ui.get("ranking"), dict) else {}
@@ -3222,86 +4566,105 @@ def render_live_copy_control_panel() -> str:
     return """
 <div class="section live-copy-centre" id="liveCopyPanel">
   <header class="lc-header">
-    <div class="lc-title">Live Copy Control Centre</div>
+    <div class="lc-title">Live Copy Command Centre</div>
     <div class="lc-header-pills">
-      <span class="lc-pill lc-blue">Mode: DRY RUN</span>
-      <span class="lc-pill lc-green">WS Fast Path</span>
-      <span class="lc-pill lc-amber">REST Fallback</span>
-      <span class="lc-pill">Active LIVE/CLO: <b id="lcWalletCount">0 / 10</b></span>
+      <span class="lc-pill">Wallets: <b id="lcWalletCount">0 / 10</b></span>
+      <span id="lcModeCounts" style="display:contents"></span>
+      <span class="lc-pill" id="lcAutoSend">Auto-send: n/a</span>
       <span class="lc-pill">WS: <b id="lcWsOverall">OFFLINE</b></span>
     </div>
     <div class="lc-header-actions">
       <button type="button" id="lcRefresh">Refresh</button>
       <button type="button" data-lc-modal="lcWalletModal">Add wallet</button>
-      <button type="button" data-lc-modal="lcGlobalModal" class="lc-soft">Global controls</button>
     </div>
   </header>
   <div class="lc-safety-strip">
-    <span class="lc-pill lc-blue">COPY STATE: DRY RUN</span>
-    <span class="lc-pill lc-green">NEW ENTRIES: ALLOWED</span>
-    <span class="lc-pill lc-green">EXITS: ALLOWED</span>
-    <span class="lc-pill lc-red">REAL ORDERS: DISABLED</span>
-    <span class="lc-pill lc-green">AUDIT: ON</span>
+    <span class="lc-pill lc-red" id="lcRealOrders">REAL ORDERS: n/a</span>
     <span id="lcStatus" class="lc-status"></span>
   </div>
+
+  <section class="lc-panel">
+    <h3>Real Account</h3>
+    <div class="lc-stat-strip" id="lcRealCards" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))"></div>
+  </section>
 
   <section class="lc-panel lc-graph-panel">
     <div class="lc-graph-top">
       <div>
-        <h3>Exchange-backed user equity</h3>
-        <p>Dry-run preview values shown. Live mode will use exchange-backed equity with real friction measured, not modelled.</p>
+        <h3>Live Account / Wallet PnL</h3>
+        <p id="lcGraphSubtitle">Unified portfolio value from exchange_account_history. Wallet PnL/exposure use live audit only.</p>
       </div>
       <div class="lc-chart-controls">
-        <button type="button" class="active">Equity</button><button type="button">PnL</button><button type="button">Exposure</button>
-        <button type="button">Drawdown</button><button type="button">Fees</button><button type="button">Realised</button>
-        <input type="date" value="2026-04-30"><input type="time" value="09:00"><input type="time" value="16:30">
-        <button type="button" class="active">1D</button><button type="button">7D</button><button type="button">All</button>
+        <button type="button" class="active" data-lc-graph-mode="account">Account</button>
+        <button type="button" data-lc-graph-mode="wallet_pnl">Selected Wallet PnL</button>
+        <button type="button" data-lc-graph-mode="exposure">Exposure</button>
+        <button type="button" class="active" data-lc-graph-scale="1d">1D</button>
+        <button type="button" data-lc-graph-scale="7d">7D</button>
+        <button type="button" data-lc-graph-scale="all">ALL</button>
       </div>
     </div>
-    <div class="lc-stat-strip" id="lcEquityCards"></div>
     <div class="lc-chart-wrap">
-      <svg viewBox="0 0 1000 320" preserveAspectRatio="none" aria-label="Exchange-backed user equity graph">
-        <polyline points="40,232 140,220 240,205 340,214 440,182 540,166 640,146 740,124 840,132 960,96" fill="none" stroke="#21c16b" stroke-width="4"/>
-        <polyline points="40,256 140,248 240,236 340,240 440,226 540,214 640,218 740,202 840,196 960,188" fill="none" stroke="#58a6ff" stroke-width="2" opacity=".72"/>
-        <path d="M40 232 L140 220 L240 205 L340 214 L440 182 L540 166 L640 146 L740 124 L840 132 L960 96 L960 300 L40 300 Z" fill="rgba(33,193,107,.12)"/>
-        <text x="42" y="34" class="lc-axis">$12.5k</text><text x="42" y="155" class="lc-axis">$12.2k</text><text x="42" y="296" class="lc-axis">$11.9k</text>
-        <text x="760" y="52" class="lc-axis">exchange-backed user equity</text><text x="810" y="78" class="lc-axis">dry-run preview values</text>
+      <svg id="lcEquityChart" viewBox="0 0 1000 320" preserveAspectRatio="none" aria-label="Unified portfolio value">
+        <path id="lcExchangeFill" fill="rgba(88,166,255,.08)" d=""/>
+        <polyline id="lcExchangePath" points="" fill="none" stroke="#58a6ff" stroke-width="1.4"/>
+        <text x="42" y="34" class="lc-axis" id="lcYMax"></text><text x="42" y="155" class="lc-axis" id="lcYMid"></text><text x="42" y="296" class="lc-axis" id="lcYMin"></text>
+        <g><rect x="750" y="40" width="12" height="12" fill="#58a6ff"/><text x="768" y="50" class="lc-axis" id="lcGraphLegend">Unified portfolio value</text></g>
       </svg>
     </div>
   </section>
 
   <section class="lc-panel lc-wallet-panel">
-    <h3>Live Wallets</h3>
-    <p>Command surface mirrors the main dashboard where practical. PnL/equity fields show pending until exchange-backed live data is wired.</p>
+    <h3>Live Copy Wallets</h3>
+    <p>Configured wallets from live_config.json. Click a row for real copy details for that leader.</p>
     <div class="lc-table-wrap">
-      <table class="lc-wallet-table">
-        <thead><tr><th>Wallet</th><th>Equity L/C</th><th>Real L/C</th><th>Unreal L/C</th><th>DD L/C</th><th>MaxDD L/C</th><th>Real diff</th><th>Efficiency</th><th>Sizing</th><th>BL</th><th>Stream</th><th title="Include this wallet in the live performance graph only. Does not affect copy execution.">Graph</th><th>Activity L/C</th><th>Controls</th></tr></thead>
-        <tbody id="lcWalletRows"><tr><td colspan="14">Loading live-copy config...</td></tr></tbody>
+      <table class="lc-wallet-table" style="min-width:1380px">
+        <thead><tr><th>Wallet</th><th>Mode / Health</th><th>Live PnL</th><th>Lead↔Copy Diff</th><th>Execution</th><th>Risk / Exposure</th><th>Last Fill</th><th>Controls</th></tr></thead>
+        <tbody id="lcWalletRows"><tr><td colspan="12">Loading live-copy config...</td></tr></tbody>
       </table>
     </div>
   </section>
 
   <section class="lc-tabs">
     <div class="lc-tabbar">
-      <button type="button" class="active" data-lc-tab="audit">Health & Audit</button>
-      <button type="button" data-lc-tab="recon">Manual Reconciliation</button>
-      <button type="button" data-lc-tab="ws">WS Detail</button>
-      <button type="button" data-lc-tab="exec">Manual Live Execution</button>
+      <button type="button" class="active" data-lc-tab="positions">Real Copy Positions</button>
+      <button type="button" data-lc-tab="execqual">Execution Quality</button>
+      <button type="button" data-lc-tab="audit">Order Intents / Audit</button>
+      <button type="button" data-lc-tab="recon">Reconciliation</button>
+      <button type="button" data-lc-tab="ws">WS Health</button>
     </div>
-    <div class="lc-tab-panel active" data-lc-panel="audit">
+    <div class="lc-tab-panel active" data-lc-panel="positions">
       <section class="lc-panel">
-        <h3>Execution / Audit</h3>
+        <h3>Real User Copy Positions</h3>
+        <p>Manual ledger vs real exchange account. All sizes signed (positive = long, negative = short). Exchange data requires HL_LIVE_HL_ACCOUNT_ADDRESS configured.</p>
+        <div class="lc-table-wrap">
+          <table style="min-width:1200px"><thead><tr><th>Coin</th><th>Side</th><th>Ledger size</th><th>Exchange size</th><th>Entry px</th><th>Mark px</th><th>Pos value</th><th>Unrealized PnL</th><th>Leader wallet</th><th>Status</th><th>Last OID</th><th>Last updated</th></tr></thead><tbody id="lcPositionRows"><tr><td colspan="12">Loading...</td></tr></tbody></table>
+        </div>
+      </section>
+    </div>
+    <div class="lc-tab-panel" data-lc-panel="execqual">
+      <section class="lc-panel">
+        <h3>Execution Quality</h3>
+        <p>Real fill quality from send_attempts.csv joined to order_intents.csv. Leader-vs-user bps requires reference price from intent.</p>
+        <div class="lc-source-strip" id="lcExecQualChips"></div>
+        <div class="lc-table-wrap">
+          <table style="min-width:1440px"><thead><tr><th>Time</th><th>Wallet</th><th>Coin</th><th>Side</th><th>Status</th><th>Limit px</th><th>Fill avg px</th><th>Size</th><th>OID</th><th>Fill-vs-limit bps</th><th>Leader-vs-user bps</th><th>Mkt bps</th><th>Error</th></tr></thead><tbody id="lcExecQualRows"><tr><td colspan="13">Loading...</td></tr></tbody></table>
+        </div>
+      </section>
+    </div>
+    <div class="lc-tab-panel" data-lc-panel="audit">
+      <section class="lc-panel">
+        <h3>Order Intents / Audit</h3>
         <div class="lc-source-strip" id="lcSourceChips"></div>
         <div class="lc-table-wrap">
-          <table><thead><tr><th>Time</th><th>Wallet</th><th>Coin</th><th>Side</th><th>Source / Reason</th><th>Status</th><th>Decision</th><th>Decision reason</th><th>Suggested order</th><th>Suggested limit</th><th>Diff %</th><th>Manual?</th><th>Notes</th></tr></thead><tbody id="lcAuditRows"><tr><td colspan="13">Loading audit summary...</td></tr></tbody></table>
+          <table><thead><tr><th>Time</th><th>Wallet</th><th>Coin</th><th>Side</th><th>Source/Reason</th><th>Status</th><th>Decision</th><th>Decision reason</th><th>Suggested limit</th><th>Diff %</th><th>Manual?</th><th>Intent note</th><th>Real order result</th></tr></thead><tbody id="lcAuditRows"><tr><td colspan="13">Loading audit summary...</td></tr></tbody></table>
         </div>
       </section>
     </div>
     <div class="lc-tab-panel" data-lc-panel="recon">
       <section class="lc-panel">
-        <h3>Manual Reconciliation Queue</h3>
+        <h3>Ledger Reconciliation</h3>
         <div class="lc-table-wrap">
-          <table><thead><tr><th>Severity</th><th>Wallet</th><th>Coin</th><th>Issue</th><th>Leader</th><th>Copy</th><th>Action</th><th>Buttons</th></tr></thead><tbody id="lcReconRows"></tbody></table>
+          <table><thead><tr><th>Severity</th><th>Wallet</th><th>Coin</th><th>Issue</th><th>Count</th><th>Manual ledger</th><th>Exchange</th><th>Last intent</th><th>Last oid</th><th>Last updated</th><th>Action</th></tr></thead><tbody id="lcReconRows"></tbody></table>
         </div>
       </section>
     </div>
@@ -3309,22 +4672,7 @@ def render_live_copy_control_panel() -> str:
       <section class="lc-panel">
         <h3>WS Health Detail</h3>
         <div class="lc-table-wrap">
-          <table><thead><tr><th>Wallet</th><th>Effective</th><th>Grade</th><th>Thread</th><th>Reconnect/min</th><th>Processed</th><th>Raw msg</th><th>Parsed msg</th><th>Snapshot seen</th><th>Snapshot recovered</th><th>Ignored snapshots</th><th>Errors</th><th>Transport stale</th><th>Data status</th><th>Last close/error</th></tr></thead><tbody id="lcHealthRows"></tbody></table>
-        </div>
-      </section>
-    </div>
-    <div class="lc-tab-panel" data-lc-panel="exec">
-      <section class="lc-panel">
-        <h3>Manual Live Execution</h3>
-        <p>Read-only. Tracked manual positions and recent send attempts from HL_Live_Copy_Service.</p>
-        <div class="lc-source-strip" id="lcExecChips"></div>
-        <h4 style="margin:8px 0 4px;font-size:13px">Manual Positions</h4>
-        <div class="lc-table-wrap">
-          <table style="min-width:680px"><thead><tr><th>Coin</th><th>Signed Size</th><th>Last OID</th><th>Last Intent ID</th><th>Last Updated</th></tr></thead><tbody id="lcManualPosRows"><tr><td colspan="5">Loading…</td></tr></tbody></table>
-        </div>
-        <h4 style="margin:12px 0 4px;font-size:13px">Recent Send Attempts</h4>
-        <div class="lc-table-wrap">
-          <table style="min-width:900px"><thead><tr><th>Time</th><th>Coin</th><th>Side</th><th>Status</th><th>Fill</th><th>Pos before→after</th><th>Price src</th><th>Size src</th><th>Error</th></tr></thead><tbody id="lcSendAttemptRows"><tr><td colspan="9">Loading…</td></tr></tbody></table>
+          <table><thead><tr><th>Wallet</th><th>Current</th><th>Grade</th><th>Thread</th><th>Reconnect/min</th><th>Processed</th><th>Raw msg</th><th>Parsed</th><th>Snap seen</th><th>Snap recovered</th><th>Ignored</th><th>Recent errors</th><th>Lifetime errors</th><th>Stale ms</th><th>Data status</th><th>Last close/error</th></tr></thead><tbody id="lcHealthRows"></tbody></table>
         </div>
       </section>
     </div>
@@ -3343,25 +4691,8 @@ def render_live_copy_control_panel() -> str:
         <label>Max diff %<input name="max_diff_pct" value="0.1"></label>
         <label>Daily loss<input name="daily_loss_limit" value="0"></label>
       </div>
-      <p>Add wallet only introduces it to the live table. Row controls manage sizing, safety limits and graph inclusion.</p>
-      <div class="lc-modal-actions"><button type="button" data-lc-close>Cancel</button><button type="submit">Add wallet to live table</button></div>
+      <div class="lc-modal-actions"><button type="button" data-lc-close>Cancel</button><button type="submit">Add wallet</button></div>
     </form>
-  </div>
-
-  <div class="lc-modal-backdrop" id="lcGlobalModal" aria-hidden="true">
-    <section class="lc-modal">
-      <div class="lc-modal-head"><h3>Global Controls</h3><button type="button" data-lc-close>close</button></div>
-      <div class="lc-form-grid">
-        <label>Mode<select><option>DRY RUN</option><option disabled>LIVE gated</option></select></label>
-        <label>Global exposure %<input value="22"></label>
-        <label>Daily loss limit<input value="50"></label>
-        <label>WS fast path<select><option>armed</option><option>off</option></select></label>
-        <label>REST fallback<select><option>armed</option><option>off</option></select></label>
-        <label>Confirmation guard<select><option>required</option><option>two-person future</option></select></label>
-      </div>
-      <p>Preview only. No backend effect and no order path is connected.</p>
-      <div class="lc-modal-actions"><button type="button" class="lc-soft">Soft kill preview</button><button type="button" class="lc-danger" disabled>Hard kill disabled</button><button type="button" data-lc-close>Close</button></div>
-    </section>
   </div>
 </div>
 <style>
@@ -3372,14 +4703,19 @@ def render_live_copy_control_panel() -> str:
 const root=document.getElementById('liveCopyPanel'); if(!root) return;
 const status=root.querySelector('#lcStatus');
 let lcConfig={wallets:{},archived_wallets:{}}, lcHealth={wallets:{}}, lcAudit={last_rows:[]};
+let lcGraphMode='account', lcGraphScale='1d', lcSelectedWallet='';
 function h(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function msg(t,bad){if(status){status.textContent=t||'';status.className='lc-status '+(bad?'lc-bad':'lc-ok');}}
 async function jget(url){const r=await fetch(url,{headers:{'x-requested-with':'fetch'}});return await r.json();}
 async function jpost(url,payload){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','x-requested-with':'fetch'},body:JSON.stringify(payload)});const j=await r.json();if(!r.ok||j.ok===false)throw new Error(j.error||r.statusText);return j;}
+// intentional blank — helpers below
 function num(v,d){const n=parseFloat(v);return Number.isFinite(n)?n:d;}
+function isNum(v){const n=parseFloat(v);return Number.isFinite(n);}
+function moneyVal(v){return isNum(v)?'$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:2}):'n/a';}
+function plainVal(v,digits=2){return isNum(v)?Number(v).toLocaleString(undefined,{maximumFractionDigits:digits}):'n/a';}
 function first(row,keys){for(const k of keys){if(row&&row[k]!=null&&row[k]!=='')return row[k];}return '';}
 function shortWallet(w){return String(w||'').length>18?String(w).slice(0,10)+'...'+String(w).slice(-6):String(w||'');}
-function pill(text,kind){const t=String(text||'pending');const token=String(kind||t).split(' ')[0].toUpperCase();const cls=['OPEN','LIVE','OK','GOOD','DRY_RUN_FILLED','ALLOWED','ACTIVE'].includes(token)?'lc-green':['STALE','DEGRADED','CLO','WATCH','QUEUED','RECONNECTING','PENDING'].includes(token)?'lc-amber':['OFF','OFFLINE','CLOSED','MISSING','DISABLED','ERROR','RECONNECT_OVERDUE'].includes(token)?'lc-red':'';
+function pill(text,kind){const t=String(text||'n/a');const token=String(kind||t).split(' ')[0].toUpperCase();const cls=['OPEN','LIVE','OK','GOOD','DRY_RUN_FILLED','ALLOWED','ACTIVE'].includes(token)?'lc-green':['STALE','DEGRADED','WARN','CLO','WATCH','QUEUED','CONNECTING','RECONNECTING','PENDING'].includes(token)?'lc-amber':['OFF','OFFLINE','CLOSED','MISSING','DISABLED','ERROR','RECONNECT_OVERDUE'].includes(token)?'lc-red':'';
  return `<span class="lc-pill ${cls}">${h(t)}</span>`;}
 function decisionPill(text){const t=String(text||'—');const u=t.toUpperCase();const cls=['WOULD_PLACE_IOC_LIMIT','WOULD_LATE_COPY','WOULD_REDUCE_OR_EXIT','WOULD_EXIT','WOULD_REDUCE'].includes(u)?'lc-green':u==='DO_NOT_MARKET_COPY'?'lc-red':u==='MANUAL_REVIEW'?'lc-amber':'';return `<span class="lc-pill ${cls}">${h(t)}</span>`;}
 function tiny(v,n){const s=String(v==null?'':v);return h(s.length>n?s.slice(0,n-1)+'…':s);}
@@ -3388,86 +4724,315 @@ function signed(v){const s=String(v||'—');return s.trim().startsWith('-')?'lc-
 function count(obj,key){return Number((obj||{})[key]||0);}
 function sourceOf(r){return first(r,['source','fill_source'])||String(first(r,['reason'])).replace('LIVE_','').replace('_DETECTED','')||'—';}
 function rowPayload(tr){return {wallet:tr.dataset.wallet,mode:tr.querySelector('[name=mode]').value,copy_mode:tr.querySelector('[name=copy_mode]').value,norm_base:num(tr.querySelector('[name=norm_base]').value,100),fixed_notional:num(tr.querySelector('[name=fixed_notional]').value,10),leader_equity_base:num(tr.querySelector('[name=leader_equity_base]').value,10000),max_diff_pct:num(tr.querySelector('[name=max_diff_pct]').value,0.1),daily_loss_limit:num(tr.querySelector('[name=daily_loss_limit]').value,0)};}
-function renderEquity(){
- const cards=[['real equity','pending exchange wiring'],['realised PnL','dry-run'],['unrealised PnL','dry-run'],['fees paid','pending'],['open exposure','pending'],['drawdown','pending']];
- root.querySelector('#lcEquityCards').innerHTML=cards.map(([label,value])=>`<div class="lc-stat"><div class="label">${h(label)}</div><div class="value">${h(value)}</div></div>`).join('');
+function age(ms){const n=Number(ms||0);if(!n)return '—';const d=Math.max(0,Date.now()-n);return d<60000?Math.round(d/1000)+'s':Math.round(d/60000)+'m';}
+function time(ms){const n=Number(ms||0);return n?new Date(n).toLocaleTimeString():'—';}
+function tsOf(p){const raw=p.fetched_at_ms||p.timestamp_ms||p.ts||p.time_ms; if(Number(raw)>0)return Number(raw); const s=p.timestamp||p.updated_at||p.created_at||p.time||''; const t=Date.parse(s); return Number.isFinite(t)?t:0;}
+function filterScale(points){if(lcGraphScale==='all')return points; const days=lcGraphScale==='7d'?7:1; const cutoff=Date.now()-days*86400000; return points.filter(p=>tsOf(p)>=cutoff);}
+function renderGraph(){
+ const sub=root.querySelector('#lcGraphSubtitle');
+ const legend=root.querySelector('#lcGraphLegend');
+ let points=[], label='Unified portfolio value', zeroBase=true;
+ if(lcGraphMode==='account'){
+  const hist=lcAudit.exchange_account_history||lcAudit.exchange_history||[];
+  const hasUnified=hist.some(p=>isNum(p.unified_portfolio_value));
+  label=hasUnified?'Unified portfolio value':'Clearinghouse account value (fallback)';
+  points=hist.map(p=>({timestamp:p.timestamp||p.updated_at||'', value:hasUnified?num(p.unified_portfolio_value,NaN):num(p.account_value,NaN)}));
+ } else {
+  const perf=(lcAudit.live_leader_performance||{})[String(lcSelectedWallet||'').toLowerCase()]||{};
+  const src=lcGraphMode==='wallet_pnl'?(perf.pnl_series||[]):(perf.exposure_series||[]);
+  label=lcGraphMode==='wallet_pnl'?'Selected wallet live PnL':'Selected wallet exposure';
+  zeroBase=false;
+  points=src.map(p=>({timestamp:p.timestamp||p.updated_at||'', value:num(p.value,0)}));
+  if(!lcSelectedWallet || !points.length){
+   if(sub) sub.textContent=lcGraphMode==='wallet_pnl'?'wallet PnL history unavailable; click a wallet with live_fills history':'wallet exposure history unavailable; click a wallet with open live exposure';
+   root.querySelector('#lcExchangePath').setAttribute('points','');
+   root.querySelector('#lcExchangeFill').setAttribute('d','');
+   if(legend) legend.textContent=label;
+   ['#lcYMax','#lcYMid','#lcYMin'].forEach(id=>{const el=root.querySelector(id);if(el)el.textContent='';});
+   return;
+  }
+ }
+ points=filterScale(points).filter(p=>isNum(p.value));
+ if(points.length<2 && lcGraphMode==='account') {
+  const hist=lcAudit.exchange_account_history||lcAudit.exchange_history||[];
+  const hasUnified=hist.some(p=>isNum(p.unified_portfolio_value));
+  label=hasUnified?'Unified portfolio value':'Clearinghouse account value (fallback)';
+  points=hist.map(p=>({timestamp:p.timestamp||p.updated_at||'', value:hasUnified?num(p.unified_portfolio_value,NaN):num(p.account_value,NaN)})).filter(p=>isNum(p.value));
+ }
+ if(points.length<2){
+  if(sub) sub.textContent=lcGraphMode==='account'?`${label} history warming up; fewer than 2 data points.`:'selected wallet series has fewer than 2 live audit points';
+  root.querySelector('#lcExchangePath').setAttribute('points','');
+  root.querySelector('#lcExchangeFill').setAttribute('d','');
+  if(legend) legend.textContent=label;
+  ['#lcYMax','#lcYMid','#lcYMin'].forEach(id=>{const el=root.querySelector(id);if(el)el.textContent='';});
+  return;
+ }
+ const vals=points.map(p=>num(p.value,0));
+ const mn=zeroBase?0:Math.min(...vals), mx=Math.max(...vals), pad=Math.max(Math.abs(mx-mn)*0.04, zeroBase?mx*0.01:1);
+ const ymin=zeroBase?0:mn-pad, ymax=mx+pad, rng=ymax-ymin||1;
+ const getY2=v=>300-((num(v)-ymin)/rng)*260;
+ const getX=(i,len)=>40+(i/(Math.max(1,len-1)))*920;
+ const pts=vals.map((v,i)=>`${getX(i,vals.length)},${getY2(v)}`).join(' ');
+ root.querySelector('#lcExchangePath').setAttribute('points',pts);
+ const fx=getX(0,vals.length),lx=getX(vals.length-1,vals.length);
+ root.querySelector('#lcExchangeFill').setAttribute('d',`M${fx} 300 L${pts} L${lx} 300 Z`);
+ root.querySelector('#lcYMax').textContent='$'+Math.round(ymax).toLocaleString();
+ root.querySelector('#lcYMid').textContent='$'+Math.round(ymin+rng/2).toLocaleString();
+ root.querySelector('#lcYMin').textContent='$'+Math.round(ymin).toLocaleString();
+ if(legend) legend.textContent=label;
+ if(sub) sub.textContent=`${label}. ${lcGraphScale.toUpperCase()} range, ${points.length} live data points.`;
 }
+function renderCards(){
+ const snap=lcAudit.exchange_account_snapshot||{}, manual=lcAudit.manual_live_summary||{}, recon=lcAudit.account_reconciliation||{};
+ const lf=manual.last_filled_manual_order||{}, lr=manual.last_rejected_manual_order||{};
+ const perf=Object.values(lcAudit.live_leader_performance||{});
+ const unified=snap.available&&snap.unified_portfolio_value!=null?('$'+Number(snap.unified_portfolio_value||0).toLocaleString(undefined,{maximumFractionDigits:2})):'Unavailable';
+ const avail=snap.available&&snap.available_to_trade!=null?('$'+Number(snap.available_to_trade||0).toLocaleString(undefined,{maximumFractionDigits:2})):'Unavailable';
+ const upnl=snap.available&&snap.unrealized_pnl!=null?('$'+Number(snap.unrealized_pnl).toLocaleString(undefined,{maximumFractionDigits:2})):'n/a';
+ const exPos=snap.available?((snap.open_positions||[]).length):'n/a';
+ const exp='$'+Number(manual.manual_live_exposure_estimate||0).toLocaleString(undefined,{maximumFractionDigits:2});
+ const attributed=Number.isFinite(Number(recon.attributed_open_pnl))?Number(recon.attributed_open_pnl):perf.reduce((a,p)=>a+num(p.live_net_pnl,0),0);
+ const gap=Number.isFinite(Number(recon.reconciliation_gap))?Number(recon.reconciliation_gap):null;
+ const lfStr=lf.coin?(h(lf.coin)+' '+h(lf.actual_side||lf.side||'?')+' '+h(lf.fill_size||'?')+' @ '+h(lf.fill_avg_px||'?')):'none yet';
+ const lrErr=lr.error||lr.response||lr.notes||'';
+ const lrStr=lr.coin?(h(lr.coin)+' '+h(lr.actual_side||lr.side||'?')+' '+h(lr.status||'?')+(lrErr?'<br><span class="lc-muted" title="'+h(lrErr)+'">'+tiny(lrErr,90)+'</span>':'')):'none';
+ const cards=[['Unified Portfolio Value',unified],['Available to Trade',avail],['Real Exchange Unrealized PnL',upnl],['Open Positions',exPos],['Open Position PnL / Attributed PnL',moneyFmt(attributed)||'n/a'],['Reconciliation Gap',gap!=null?moneyFmt(gap):'n/a'],['Live Copied Exposure',exp],['Last Actual Fill',lfStr],['Last Exchange Reject',lrStr]];
+ root.querySelector('#lcRealCards').innerHTML=cards.map(([l,v])=>`<div class="lc-stat"><div class="label">${h(l)}</div><div class="value" style="font-size:12px;word-break:break-all">${v}</div></div>`).join('');
+ renderGraph();
+}
+function moneyFmt(v){return v!=null?('$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:2})):null;}
+function signCls(v){return v!=null?(v>0?'lc-pos':v<0?'lc-neg':''):''}
+function pnlLabel(st,label){const m={'EXACT':'lc-green','ESTIMATED_FROM_REAL_ORDER_FILLS':'lc-amber','OPEN_ONLY':'lc-blue','AMBIGUOUS_COIN_SHARED':'lc-red','N/A':''}; const text=label||({'OPEN_ONLY':'Open PnL only','ESTIMATED_FROM_REAL_ORDER_FILLS':'Real fills / closed PnL unavailable','AMBIGUOUS_COIN_SHARED':'Shared coin attribution','N/A':'No live PnL','EXACT':'Exact closed PnL'}[st]||st||'No live PnL'); return `<span class="lc-pill ${m[st]||''}">${h(text)}</span>`;}
 function renderWallets(){
- const wallets=lcConfig.wallets||{}, healthWallets=lcHealth.wallets||{};
- const rows=Object.entries(wallets).sort().map(([wallet,cfg])=>{
-  const wh=healthWallets[wallet]||{}, mode=String(cfg.mode||'OFF').toUpperCase(), model=cfg.copy_mode==='fixed'?'fixed':'proportional';
-  const stream=wh.effective_status||wh.status||'OFFLINE', grade=wh.health_grade||'pending';
-  const bl=wh.last_data_ms||wh.last_msg_ms||wh.last_open_ms?'OK':'pending';
-  return `<tr class="lc-row-${h(mode)}" data-wallet="${h(wallet)}">
-    <td><div class="lc-cell-stack"><span class="lc-wallet">${h(shortWallet(wallet))}</span><span>${pill(mode,mode)} ${h(model)}</span></div></td>
-    <td>${pair('L','pending','lc-muted')}${pair('C','pending','lc-muted')}</td>
-    <td>${pair('L','pending','lc-muted')}${pair('C','pending','lc-muted')}</td>
-    <td>${pair('L','pending','lc-muted')}${pair('C','pending','lc-muted')}</td>
-    <td>${pair('L','—')}${pair('C','—')}</td>
-    <td>${pair('L','—')}${pair('C','—')}</td>
-    <td>pending</td>
-    <td>${pair('hr','—')}${pair('avg','—')}${pair('win','—')}</td>
-    <td>${pair('norm',cfg.norm_base??100)}${pair('fixed',cfg.fixed_notional??10)}${pair('base',cfg.leader_equity_base??10000)}${pair('diff',cfg.max_diff_pct??0.1)}${pair('loss',cfg.daily_loss_limit??0)}</td>
-    <td>${pill(bl,bl)}</td>
-    <td><div class="lc-cell-stack">${pill(stream,stream)}<span class="lc-muted">grade ${h(grade)}</span><span class="lc-muted">poll fallback ready</span></div></td>
-    <td><label class="lc-graph-toggle" title="Include this wallet in the live performance graph only. Does not affect copy execution."><input type="checkbox" checked>SHOW</label></td>
-    <td>${pair('fills',wh.processed_count??0)}${pair('dup',wh.duplicate_count??0)}${pair('recon/min',Number(wh.reconnects_per_min||0).toFixed(2))}</td>
-    <td><div class="lc-cell-stack"><div class="lc-inline-controls"><select name="mode"><option ${mode==='LIVE'?'selected':''}>LIVE</option><option ${mode==='CLO'?'selected':''}>CLO</option><option ${mode==='OFF'?'selected':''}>OFF</option></select><select name="copy_mode"><option value="proportional" ${model!=='fixed'?'selected':''}>proportion</option><option value="fixed" ${model==='fixed'?'selected':''}>fixed</option></select></div><div class="lc-inline-controls"><span class="lc-muted">N</span><input name="norm_base" value="${h(cfg.norm_base??100)}"><span class="lc-muted">F</span><input name="fixed_notional" value="${h(cfg.fixed_notional??10)}"><span class="lc-muted">B</span><input name="leader_equity_base" value="${h(cfg.leader_equity_base??10000)}"></div><div class="lc-inline-controls"><span class="lc-muted">diff</span><input name="max_diff_pct" value="${h(cfg.max_diff_pct??0.1)}"><span class="lc-muted">loss</span><input name="daily_loss_limit" value="${h(cfg.daily_loss_limit??0)}"></div><div class="lc-mini-actions"><button data-act="save" type="button">Save</button><button data-act="clo" type="button">CLO</button><button data-act="off" type="button">OFF</button><button data-act="archive" class="lc-danger" type="button" title="Removes wallet from active config only; does not delete audit/history.">Archive config</button></div></div></td>
+ const wrows=lcAudit.live_wallet_rows||[], autoLiveWallets=(lcAudit.auto_live_eligible_wallets||[]).map(w=>String(w).toLowerCase());
+ const rows=wrows.map(d=>{
+  const mode=String(d.mode||'OFF').toUpperCase(), isLive=autoLiveWallets.includes(String(d.wallet).toLowerCase());
+  const hasHistory=(d.filled_count>0||d.exchange_rejected_count>0||d.local_blocked_count>0);
+  const typeLabel=isLive?pill('LIVE COPY','LIVE'):pill('TRACKED','INFO');
+  const histLabel=(!isLive&&hasHistory&&mode==='OFF')?pill('HISTORICAL','INFO'):'';
+  const eligibility=d.eligibility|| (mode==='LIVE'?'COPYING':mode==='CLO'?'CLOSE ONLY':'DISABLED');
+  const model=String(d.copy_mode||'')==='fixed'?'fixed':'prop';
+  const connPill=mode==='OFF'?`<span class="lc-pill lc-red">COPY DISABLED</span>`:(pill(d.ws_state||d.conn_status||'NO WS HEALTH',d.ws_state||d.conn_status||''));
+  const connDetail=mode==='OFF'?'':`<span class="lc-muted" style="font-size:10px">${h(d.ws_reason||d.conn_detail||'')} ${d.last_ws_intent_at?'intent:'+tiny(d.last_ws_intent_at,19):''}</span>`;
+  const expStr=moneyFmt(d.current_exposure||0)||'$0';
+  const real=d.realized_pnl, unreal=d.unrealized_pnl, net=d.net_pnl, st=d.pnl_status||'N/A';
+  const pnlHtml=`<div class="lc-cell-stack"><span class="${signCls(real)}" style="font-size:11px">R: ${moneyFmt(real)||'n/a'}</span><span class="${signCls(unreal)}" style="font-size:11px">U: ${moneyFmt(unreal)||'n/a'}</span><span class="${signCls(net)}" style="font-weight:780">Net: ${moneyFmt(net)||'n/a'}</span>${pnlLabel(st,d.pnl_status_label)}</div>`;
+  const bpsCls=d.avg_fill_bps!=null&&d.avg_fill_bps>10?'lc-neg':d.avg_fill_bps!=null&&d.avg_fill_bps<=0?'lc-pos':'';
+  const wbpsCls=d.worst_fill_bps!=null&&d.worst_fill_bps>15?'lc-neg':'';
+  const diffHtml=`<div class="lc-cell-stack"><span class="${signCls(d.total_diff_usd)}">Total: ${moneyFmt(d.total_diff_usd)||'n/a'}</span><span>Avg: ${moneyFmt(d.avg_diff_usd)||'n/a'}</span><span class="${bpsCls}">Avg bps: ${d.avg_diff_bps!=null?h(d.avg_diff_bps):'n/a'}</span><span class="${wbpsCls}">Worst bps: ${d.worst_diff_bps!=null?h(d.worst_diff_bps):'n/a'}</span><span class="lc-muted" style="font-size:10px">${h(d.data_quality_notes||'')}</span></div>`;
+  const execHtml=`<div class="lc-cell-stack"><span class="lc-pos">${h(d.filled_count)} filled / ${h(d.exits_count||0)} exits</span><span class="${(d.exchange_rejected_count||0)>0?'lc-neg':'lc-muted'}">${h(d.exchange_rejected_count||0)} exch rej</span><span class="${(d.local_blocked_count||0)>0?'lc-amber':'lc-muted'}">${h(d.local_blocked_count||0)} local block</span><span class="lc-muted">${h(d.preview_count||0)} previews</span></div>`;
+  const riskHtml=`<div class="lc-cell-stack"><span>Exposure: <b>${expStr}</b></span><span>Open pos: <b>${h(d.open_position_count||0)}</b></span><span>DD: ${moneyFmt(d.drawdown)||'n/a'}</span><span>MaxDD: ${moneyFmt(d.max_drawdown)||'n/a'}</span></div>`;
+  const lf=d.last_fill||{};
+  const lfStr=lf.coin?`${h(lf.coin)} ${h(lf.side)} ${h(lf.size)} @ ${h(lf.avg_px)}<br><span class="lc-muted" style="font-size:10px">${tiny(lf.time||'',22)}</span>`:'<span class="lc-muted">none yet</span>';
+  return `<tr class="lc-wallet-row lc-row-${h(mode)}" data-wallet="${h(d.wallet)}">
+    <td style="cursor:pointer" title="Click to expand detail"><div class="lc-cell-stack"><span class="lc-wallet">${h(shortWallet(d.wallet))}</span><span>${typeLabel} ${histLabel}</span></div></td>
+    <td><div class="lc-cell-stack">${pill(mode,mode)}<span class="lc-muted" style="font-size:10px">${h(eligibility)}</span>${connPill}${connDetail}</div></td>
+    <td>${pnlHtml}</td>
+    <td>${diffHtml}</td>
+    <td>${execHtml}</td>
+    <td>${riskHtml}</td>
+    <td style="font-size:11px">${lfStr}</td>
+    <td><div class="lc-cell-stack"><div class="lc-inline-controls"><select name="mode"><option ${mode==='LIVE'?'selected':''}>LIVE</option><option ${mode==='CLO'?'selected':''}>CLO</option><option ${mode==='OFF'?'selected':''}>OFF</option></select><select name="copy_mode"><option value="proportional" ${model!=='fixed'?'selected':''}>prop</option><option value="fixed" ${model==='fixed'?'selected':''}>fixed</option></select></div><div class="lc-inline-controls"><span class="lc-muted">F</span><input name="fixed_notional" value="${h(d.fixed_notional??10)}" style="width:58px"><span class="lc-muted">N</span><input name="norm_base" value="${h(d.norm_base??100)}" style="width:52px"><span class="lc-muted">B</span><input name="leader_equity_base" value="${h(d.leader_equity_base??10000)}" style="width:70px"><input name="max_diff_pct" type="hidden" value="${h(d.max_diff_pct??0.1)}"><input name="daily_loss_limit" type="hidden" value="${h(d.daily_loss_limit??0)}"></div><div class="lc-mini-actions"><button data-act="save" type="button">Save</button><button data-act="clo" type="button">CLO</button><button data-act="off" type="button">OFF</button><button data-act="archive" class="lc-danger" type="button">Archive</button></div></div></td>
   </tr>`;
  }).join('');
- root.querySelector('#lcWalletRows').innerHTML=rows||'<tr><td colspan="14">No live-copy wallets configured.</td></tr>';
+ root.querySelector('#lcWalletRows').innerHTML=rows||'<tr><td colspan="8">No live-copy wallets configured.</td></tr>';
+}
+function walletDetailHtml(wallet){
+ const w=String(wallet).toLowerCase();
+ const perf=(lcAudit.live_leader_performance||{})[w]||{};
+ const allAttempts=(lcAudit.recent_send_attempts||[]).filter(a=>(a.leader_wallet||a.auto_send_wallet||'').toLowerCase()===w);
+ const fills=allAttempts.filter(a=>a.status==='ORDER_FILLED').slice().reverse();
+ const exchRej=allAttempts.filter(a=>a.status==='ORDER_REJECTED').slice().reverse();
+ const localBlk=allAttempts.filter(a=>a.status&&a.status!=='ORDER_FILLED'&&a.status!=='ORDER_REJECTED'&&a.status!=='CONFIRM_REQUIRED').slice().reverse();
+ const intents=(lcAudit.last_rows||[]).filter(r=>(r.leader_wallet||r.wallet||'').toLowerCase()===w).slice(-10).reverse();
+ const openPos=perf.current_open_positions||[];
+ const wCfg=(lcConfig.wallets||{})[wallet]||{}, modeNow=String(wCfg.mode||'OFF').toUpperCase();
+ const isOff=modeNow==='OFF';
+ const hasActivity=(fills.length>0||exchRej.length>0||localBlk.length>0);
+ let out='<div style="padding:6px;background:#070c11;border-top:2px solid #58a6ff;display:grid;gap:0">';
+ if(isOff&&hasActivity) out+=`<div style="padding:6px 8px;color:#f5b84b;font-size:12px;font-weight:780">Copy disabled now. Historical live-copy audit retained below.</div>`;
+
+ // A) Live Performance
+ out+=`<div style="padding:6px 8px;border-bottom:1px solid #223342"><b style="color:#58a6ff">A — Live Performance</b>`;
+ out+=`<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px">`;
+ out+=`<span>Realized: <b class="${signCls(perf.live_realized_pnl)}">${moneyFmt(perf.live_realized_pnl)||'n/a'}</b></span>`;
+ out+=`<span>Unrealized: <b class="${signCls(perf.live_unrealized_pnl)}">${moneyFmt(perf.live_unrealized_pnl)||'n/a'}</b></span>`;
+ out+=`<span>Net: <b class="${signCls(perf.live_net_pnl)}">${moneyFmt(perf.live_net_pnl)||'n/a'}</b></span>`;
+ out+=`<span>Exposure: <b>${moneyFmt(perf.current_exposure)||'n/a'}</b></span>`;
+ out+=`<span>DD: <b>${moneyFmt(perf.drawdown)||'n/a'}</b></span>`;
+ out+=`<span>MaxDD: <b>${moneyFmt(perf.max_drawdown)||'n/a'}</b></span>`;
+ out+=`<span>PnL status: ${pnlLabel(perf.pnl_status||'N/A',perf.pnl_status_label)}</span>`;
+ out+=`<span>Attribution: <b>${h(perf.attribution_quality||'N/A')}</b></span>`;
+ if(perf.data_quality_notes) out+=`<span class="lc-muted" style="font-size:10px">${h(perf.data_quality_notes)}</span>`;
+ out+='</div></div>';
+
+ // B) Open Positions
+ out+=`<div style="padding:6px 8px;border-bottom:1px solid #223342"><b style="color:#58a6ff">B — Open Positions (${openPos.length})</b>`;
+ if(openPos.length){
+  out+='<table style="margin-top:4px;min-width:auto"><thead><tr><th>Coin</th><th>Side</th><th>Size</th><th>Entry px</th><th>Mark px</th><th>Unrealized PnL</th><th>Exposure</th><th>Exchange match</th></tr></thead><tbody>';
+  out+=openPos.map(p=>{const stCls=p.exchange_match==='MATCH'?'lc-green':'lc-red';return `<tr><td><b>${h(p.coin)}</b></td><td>${pill(p.side||'—',p.side||'')}</td><td class="${p.signed_size>0?'lc-pos':'lc-neg'}">${h(p.signed_size)}</td><td>${p.entry_px!=null?h(p.entry_px):'n/a'}</td><td>${p.mark_px!=null?h(p.mark_px):'n/a'}</td><td class="${signCls(p.unrealized_pnl)}">${moneyFmt(p.unrealized_pnl)||'n/a'}</td><td>${moneyFmt(p.exposure)||'n/a'}</td><td><span class="lc-pill ${stCls}">${h(p.exchange_match||'?')}</span></td></tr>`;}).join('');
+  out+='</tbody></table>';
+ } else { out+=' <span class="lc-muted">no open positions</span>'; }
+ out+='</div>';
+
+ // C) Lead vs Copy / Friction
+ const fr=perf.friction_fills||[];
+ out+=`<div style="padding:6px 8px;border-bottom:1px solid #223342"><b style="color:#58a6ff">C — Lead vs Copy / Friction</b>`;
+ out+=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">`;
+ out+=`<span class="lc-pill">Total diff: ${moneyFmt(perf.total_diff_usd)||'n/a'}</span>`;
+ out+=`<span class="lc-pill">Avg diff: ${moneyFmt(perf.avg_diff_usd)||'n/a'}</span>`;
+ out+=perf.avg_diff_bps!=null?`<span class="lc-pill">Avg: ${h(perf.avg_diff_bps)}bps</span>`:'';
+ out+=perf.worst_diff_bps!=null?`<span class="lc-pill">Worst: ${h(perf.worst_diff_bps)}bps</span>`:'';
+ out+=perf.avg_fill_vs_limit_bps!=null?`<span class="lc-pill">Fill-vs-limit avg: ${h(perf.avg_fill_vs_limit_bps)}bps</span>`:'';
+ out+='</div>';
+ if(fr.length){
+  out+='<table style="margin-top:4px;min-width:auto"><thead><tr><th>Time</th><th>Coin</th><th>Side</th><th>Leader/ref px</th><th>Our fill px</th><th>Size</th><th>Diff $</th><th>Diff bps</th><th>Limit px</th><th>Fill-vs-limit bps</th><th>OID</th></tr></thead><tbody>';
+  out+=fr.slice(-20).reverse().map(r=>`<tr><td>${tiny(r.time||'—',22)}</td><td>${h(r.coin||'—')}</td><td>${h(r.side||'—')}</td><td>${r.leader_reference_px!=null?h(r.leader_reference_px):'n/a'}</td><td>${r.copy_fill_px!=null?h(r.copy_fill_px):'n/a'}</td><td>${r.size!=null?h(r.size):'n/a'}</td><td class="${signCls(r.diff_usd)}">${moneyFmt(r.diff_usd)||'n/a'}</td><td>${r.diff_bps!=null?h(r.diff_bps):'n/a'}</td><td>${r.limit_px!=null?h(r.limit_px):'n/a'}</td><td>${r.fill_vs_limit_bps!=null?h(r.fill_vs_limit_bps):'n/a'}</td><td class="lc-wallet">${r.oid?tiny(String(r.oid),18):'n/a'}</td></tr>`).join('');
+  out+='</tbody></table>';
+ } else { out+=' <span class="lc-muted">reference/fill comparison unavailable</span>'; }
+ out+='</div>';
+
+ // D) Execution Audit
+ out+=`<div style="padding:6px 8px;border-bottom:1px solid #223342"><b style="color:#58a6ff">D — Execution Audit</b>`;
+ out+=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px"><span class="lc-pill lc-green">Filled: ${h(perf.filled_count||0)}</span><span class="lc-pill">Exits: ${h(perf.exits_count||0)}</span><span class="lc-pill ${(perf.exchange_rejected_count||0)>0?'lc-red':''}">Exch rej: ${h(perf.exchange_rejected_count||0)}</span><span class="lc-pill ${(perf.local_blocked_count||0)>0?'lc-amber':''}">Local blocked: ${h(perf.local_blocked_count||0)}</span><span class="lc-pill">Preview: ${h(perf.preview_count||0)}</span></div>`;
+ if(fills.length){
+  out+='<table style="margin-top:4px;min-width:auto"><thead><tr><th>Time</th><th>Coin</th><th>Side</th><th>Size @ Px</th><th>Pos before→after</th><th>OID</th></tr></thead><tbody>';
+  out+=fills.slice(0,10).map(a=>{const fill=a.fill_avg_px?`${h(a.fill_size||'?')} @ ${h(a.fill_avg_px)}`:'—';const pm=(a.position_before!=null&&a.position_after!=null)?`${h(a.position_before)}→${h(a.position_after)}`:'—';return `<tr><td>${tiny(a.created_at||'—',22)}</td><td>${h(a.coin||'—')}</td><td>${h(a.actual_side||a.side||'—')}</td><td>${fill}</td><td>${pm}</td><td class="lc-wallet">${a.oid?tiny(String(a.oid),18):'n/a'}</td></tr>`;}).join('');
+  out+='</tbody></table>';
+ } else { out+=' <span class="lc-muted">no real copied fills yet</span>'; }
+ out+='</div>';
+
+ // E) Rejects / Blocks
+ out+=`<div style="padding:6px 8px;border-bottom:1px solid #223342"><b style="color:#58a6ff">E — Rejects &amp; Blocks</b>`;
+ if(exchRej.length){
+  out+=`<div style="margin-top:4px"><span class="lc-pill lc-red">Exchange rejected (${exchRej.length})</span>`;
+  out+='<table style="margin-top:4px;min-width:auto"><thead><tr><th>Time</th><th>Coin</th><th>Side</th><th>Error</th></tr></thead><tbody>';
+  out+=exchRej.slice(0,5).map(a=>`<tr><td>${tiny(a.created_at||'—',22)}</td><td>${h(a.coin||'—')}</td><td>${h(a.actual_side||a.side||'—')}</td><td title="${h(a.error||'')}">${tiny(a.error||'',50)}</td></tr>`).join('');
+  out+='</tbody></table></div>';
+ }
+ if(localBlk.length){
+  out+=`<div style="margin-top:4px"><span class="lc-pill lc-amber">Local blocked (${localBlk.length})</span>`;
+  out+='<table style="margin-top:4px;min-width:auto"><thead><tr><th>Time</th><th>Coin</th><th>Status (reason)</th></tr></thead><tbody>';
+  out+=localBlk.slice(0,5).map(a=>`<tr><td>${tiny(a.created_at||'—',22)}</td><td>${h(a.coin||'—')}</td><td>${h(a.status||'—')}</td></tr>`).join('');
+  out+='</tbody></table></div>';
+ }
+ if(!exchRej.length&&!localBlk.length) out+=' <span class="lc-muted">none</span>';
+ out+='</div>';
+
+ // F) Recent Intents
+ out+=`<div style="padding:6px 8px"><b style="color:#58a6ff">F — Recent Order Intents (${intents.length})</b>`;
+ if(intents.length){
+  out+=' ';
+  out+=intents.slice(0,10).map(r=>`<span class="lc-muted" style="font-size:10px">${h(r.coin||'?')} ${h(r.side||'?')} ${decisionPill(r.execution_decision||'—')} ${tiny(r.created_at||'',20)}</span>`).join(' · ');
+ } else { out+=' <span class="lc-muted">none in recent window</span>'; }
+ out+='</div>';
+ out+='</div>';
+ return out;
+}
+function renderPositions(){
+ const rows=lcAudit.real_copy_positions||[];
+ root.querySelector('#lcPositionRows').innerHTML=rows.map(r=>{
+  const szCls=r.signed_size!=null?(r.signed_size>0?'lc-pos':'lc-neg'):'';
+  const exCls=r.exchange_signed_size!=null?(r.exchange_signed_size>0?'lc-pos':'lc-neg'):'';
+  const stRaw=r.ledger_vs_exchange||'—';
+  const stCls=stRaw==='MATCH'?'lc-green':stRaw==='EXCHANGE_UNAVAILABLE'?'':'lc-red';
+  const upnlCls=r.unrealized_pnl!=null?(r.unrealized_pnl>0?'lc-pos':r.unrealized_pnl<0?'lc-neg':''):'';
+  const pv=r.position_value!=null?('$'+Number(r.position_value).toLocaleString(undefined,{maximumFractionDigits:2})):'n/a';
+  const upnlStr=r.unrealized_pnl!=null?('$'+Number(r.unrealized_pnl).toLocaleString(undefined,{maximumFractionDigits:2})):'n/a';
+  return `<tr><td><b>${h(r.coin||'—')}</b></td><td>${pill(r.side||'—',r.side||'')}</td><td class="${szCls}">${r.signed_size!=null?h(r.signed_size):'n/a'}</td><td class="${exCls}">${r.exchange_signed_size!=null?h(r.exchange_signed_size):'n/a'}</td><td>${r.entry_px!=null?h(r.entry_px):'n/a'}</td><td>${r.mark_px!=null?h(r.mark_px):'n/a'}</td><td>${pv}</td><td class="${upnlCls}">${upnlStr}</td><td class="lc-wallet">${h(r.leader_wallet?shortWallet(r.leader_wallet):'—')}</td><td><span class="lc-pill ${stCls}">${h(stRaw)}</span></td><td class="lc-wallet">${tiny(String(r.last_oid||'—'),24)}</td><td>${tiny(r.last_updated_at||'—',22)}</td></tr>`;
+ }).join('')||'<tr><td colspan="12">No real copy positions tracked. Positions appear here after the copy service places live orders.</td></tr>';
+}
+function renderExecQuality(){
+ const rows=lcAudit.execution_quality_rows||[];
+ const qs=lcAudit.execution_quality_summary||{};
+ const filled=rows.filter(r=>r.status==='ORDER_FILLED');
+ const exchRej=rows.filter(r=>r.status==='ORDER_REJECTED');
+ const localBlk=rows.filter(r=>r.status&&r.status!=='ORDER_FILLED'&&r.status!=='ORDER_REJECTED'&&r.status!=='CONFIRM_REQUIRED');
+ const previews=rows.filter(r=>r.status==='CONFIRM_REQUIRED');
+ const bpsVals=filled.map(r=>r.fill_bps).filter(v=>v!=null);
+ const avgBps=bpsVals.length?Math.round(bpsVals.reduce((a,b)=>a+b,0)/bpsVals.length*10)/10:null;
+ const worstBps=bpsVals.length?Math.round(Math.max(...bpsVals)*10)/10:null;
+ const lastFill=filled[0]||null;
+ root.querySelector('#lcExecQualChips').innerHTML=[
+  ['Filled',filled.length,'lc-green'],
+  ['Exchange rejected',exchRej.length,exchRej.length?'lc-red':''],
+  ['Local blocked',localBlk.length,localBlk.length?'lc-amber':''],
+  ['Previews',previews.length,''],
+  ['Avg fill-vs-limit',avgBps!=null?avgBps+'bps':'n/a',avgBps!=null&&avgBps>5?'lc-amber':''],
+  ['Worst fill-vs-limit',worstBps!=null?worstBps+'bps':'n/a',worstBps!=null&&worstBps>10?'lc-red':''],
+  ['Last fill',lastFill?(lastFill.coin+' '+lastFill.side):'none',''],
+ ].map(([k,v,cls])=>`<span class="lc-pill ${cls}">${h(k)}: <b>${h(v)}</b></span>`).join('');
+ root.querySelector('#lcExecQualRows').innerHTML=rows.map(r=>{
+  const st=String(r.status||'—');
+  const stCls=st==='ORDER_FILLED'?'lc-green':st==='ORDER_REJECTED'?'lc-red':st==='CONFIRM_REQUIRED'?'lc-blue':st?'lc-amber':'';
+  const bCls=r.fill_bps!=null?(r.fill_bps>10?'lc-neg':r.fill_bps<=0?'lc-pos':''):'';
+  const lbCls=r.leader_bps!=null?(r.leader_bps>10?'lc-neg':r.leader_bps<=0?'lc-pos':''):'';
+  return `<tr><td>${tiny(r.time||'—',22)}</td><td class="lc-wallet">${h(r.leader_wallet?shortWallet(r.leader_wallet):'—')}</td><td>${h(r.coin||'—')}</td><td>${h(r.side||'—')}</td><td><span class="lc-pill ${stCls}">${h(st)}</span></td><td>${r.limit_px!=null?h(r.limit_px):'n/a'}</td><td>${r.fill_avg_px!=null?h(r.fill_avg_px):'n/a'}</td><td>${r.fill_size!=null?h(r.fill_size):'n/a'}</td><td class="lc-wallet">${r.oid?tiny(String(r.oid),18):'n/a'}</td><td class="${bCls}">${r.fill_bps!=null?h(r.fill_bps)+'bps':'n/a'}</td><td class="${lbCls}">${r.leader_bps!=null?h(r.leader_bps)+'bps':'n/a'}</td><td>${r.marketable_bps!=null?h(r.marketable_bps)+'bps':'n/a'}</td><td title="${h(r.error||'')}">${tiny(r.error||'',28)}</td></tr>`;
+ }).join('')||'<tr><td colspan="13">No execution data. Real fills appear here after send_attempts.csv is populated.</td></tr>';
 }
 function renderAudit(){
  const rows=(lcAudit.last_rows||[]).slice(-10).reverse();
- const reason=lcAudit.reason_counts||{}, statusCounts=lcAudit.status_counts||{}, sourceCounts=lcAudit.source_counts||{}, decisionCounts=lcAudit.execution_decision_counts||{}, decisionReasonCounts=lcAudit.decision_reason_counts||{}, manualCounts=lcAudit.manual_reconcile_required_counts||{}, errorCounts=lcAudit.market_data_error_counts||{};
+ const reason=lcAudit.reason_counts||{}, decisionCounts=lcAudit.execution_decision_counts||{}, decisionReasonCounts=lcAudit.decision_reason_counts||{}, manualCounts=lcAudit.manual_reconcile_required_counts||{}, errorCounts=lcAudit.market_data_error_counts||{};
  root.querySelector('#lcSourceChips').innerHTML=[
   ['WS fast path',count(decisionCounts,'WOULD_PLACE_IOC_LIMIT'),'lc-green'],
-  ['Late copy',count(decisionCounts,'WOULD_LATE_COPY'),'lc-green'],
-  ['Do not market copy',count(decisionCounts,'DO_NOT_MARKET_COPY'),'lc-red'],
+  ['Exits/reduce',count(decisionCounts,'WOULD_REDUCE_OR_EXIT'),'lc-green'],
+  ['Late copy',count(decisionCounts,'WOULD_LATE_COPY'),''],
+  ['Do not copy',count(decisionCounts,'DO_NOT_MARKET_COPY'),'lc-red'],
   ['Manual review',count(decisionCounts,'MANUAL_REVIEW')+count(manualCounts,'True')+count(manualCounts,'true'),'lc-amber'],
-  ['Quote unavailable',count(errorCounts,'EXECUTABLE_QUOTE_UNAVAILABLE')+count(decisionReasonCounts,'RECOVERY_QUOTE_UNAVAILABLE'),'lc-amber'],
-  ['Snapshot recovery',count(reason,'LIVE_WS_SNAPSHOT_RECOVERY')+count(decisionReasonCounts,'LIVE_WS_SNAPSHOT_RECOVERY'),'lc-blue']
+  ['Quote unavail',count(errorCounts,'EXECUTABLE_QUOTE_UNAVAILABLE')+count(decisionReasonCounts,'RECOVERY_QUOTE_UNAVAILABLE'),'lc-amber'],
  ].map(([k,v,cls])=>`<span class="lc-pill ${cls}">${h(k)}: <b>${h(v)}</b></span>`).join('');
- root.querySelector('#lcAuditRows').innerHTML=rows.map(r=>`<tr><td>${h(first(r,['created_at','timestamp_iso','time']))}</td><td class="lc-wallet">${h(shortWallet(first(r,['leader_wallet','wallet'])))}</td><td>${h(first(r,['coin','asset']))}</td><td>${h(first(r,['side']))}</td><td><div class="lc-cell-stack"><span>${h(sourceOf(r))}</span><span class="lc-muted">${tiny(first(r,['reason']),32)}</span></div></td><td>${pill(first(r,['status'])||'—')}</td><td>${decisionPill(first(r,['execution_decision'])||'—')}</td><td>${tiny(first(r,['decision_reason']),34)}</td><td>${tiny(first(r,['suggested_order_type']),28)}</td><td>${h(first(r,['suggested_limit_price','target_price']))}</td><td>${h(first(r,['adverse_diff_pct','diff_pct','real_diff_pct','price_diff_pct']))}</td><td>${h(first(r,['manual_reconcile_required']))}</td><td title="${h(first(r,['notes','message']))}">${tiny(first(r,['notes','message']),60)}</td></tr>`).join('')||'<tr><td colspan="13">No audit rows found.</td></tr>';
- const manual=rows.filter(r=>String(first(r,['reason','status'])).toUpperCase().includes('MANUAL')).slice(0,5);
- root.querySelector('#lcReconRows').innerHTML=(manual.length?manual:[{}]).map((r,i)=>{const sev=i===0&&manual.length?'WARN':'INFO';return `<tr><td>${pill(sev,sev)}</td><td class="lc-wallet">${h(shortWallet(first(r,['leader_wallet','wallet'])||'pending'))}</td><td>${h(first(r,['coin'])||'—')}</td><td>${h(first(r,['reason'])||'pending manual review feed')}</td><td>pending</td><td>pending</td><td>${h(first(r,['action'])||'review')}</td><td><div class="lc-mini-actions"><button type="button">review</button><button type="button">ignore</button><button type="button">close</button><button type="button">align</button></div></td></tr>`;}).join('');
+ const sendByIntent={};for(const a of(lcAudit.recent_send_attempts||[])){const iid=String(a.intent_id||'');if(iid)sendByIntent[iid]=a;}
+ root.querySelector('#lcAuditRows').innerHTML=rows.map(r=>{const iid=String(r.intent_id||'');const attempt=iid?sendByIntent[iid]:null;const execDec=String(r.execution_decision||'');let realRes='NO_SEND_ATTEMPT';if(attempt){const st=String(attempt.status||'');realRes=st==='ORDER_FILLED'?'REAL_ORDER_FILLED':st==='ORDER_REJECTED'?'EXCHANGE_REJECTED':st||'NO_SEND_ATTEMPT';}else if(execDec==='WOULD_PLACE_IOC_LIMIT'){realRes='WOULD_SEND_ONLY';}const rawNote=first(r,['notes','message']);const displayNote=rawNote&&rawNote.indexOf('dry-run simulated fill')!==-1?'legacy intent note: leader WS fill detected; check real order result':rawNote;const rrCls=realRes==='REAL_ORDER_FILLED'?'lc-green':realRes==='EXCHANGE_REJECTED'?'lc-red':realRes==='WOULD_SEND_ONLY'?'lc-amber':'lc-muted';return `<tr><td>${h(first(r,['created_at','timestamp_iso','time']))}</td><td class="lc-wallet">${h(shortWallet(first(r,['leader_wallet','wallet'])))}</td><td>${h(first(r,['coin','asset']))}</td><td>${h(first(r,['side']))}</td><td><div class="lc-cell-stack"><span>${h(sourceOf(r))}</span><span class="lc-muted">${tiny(first(r,['reason']),32)}</span></div></td><td>${pill(first(r,['status'])||'—')}</td><td>${decisionPill(first(r,['execution_decision'])||'—')}</td><td>${tiny(first(r,['decision_reason']),34)}</td><td>${h(first(r,['suggested_limit_price','target_price']))}</td><td>${h(first(r,['adverse_diff_pct','diff_pct','real_diff_pct','price_diff_pct']))}</td><td>${h(first(r,['manual_reconcile_required']))}</td><td title="${h(displayNote)}">${tiny(displayNote,60)}</td><td><span class="lc-pill ${rrCls}">${h(realRes)}</span></td></tr>`;}).join('')||'<tr><td colspan="13">No audit rows found.</td></tr>';
+ const recon=lcAudit.manual_reconciliation_rows||[];
+ root.querySelector('#lcReconRows').innerHTML=recon.map(r=>{const sideCls=r.side==='LONG'?'lc-pos':r.side==='SHORT'?'lc-neg':'';const cnt=Number(r.count||1);const action=r.action_available?`<button type="button" data-recon-act="archive-ledger-row" data-wallet="${h(r.wallet||'')}" data-coin="${h(r.coin||'')}" data-issue="${h(r.issue||'')}" data-manual-size="${h(r.manual_signed_size??'')}">Archive ledger row</button><div class="lc-muted">Ledger cleanup only. No exchange order.</div>`:'';return `<tr><td>${pill(r.severity||'INFO',r.severity||'INFO')}</td><td class="lc-wallet" title="${h(r.wallet||'unknown')}">${h(r.wallet?shortWallet(r.wallet):'unknown')}</td><td>${h(r.coin||'—')}</td><td title="${h(r.latest_error||r.error||'')}">${h(r.issue||'n/a')}</td><td>${h(cnt>1?cnt:1)}</td><td class="${sideCls}">${h(r.side||'')} ${h(r.manual_signed_size??'n/a')}</td><td>${h(r.exchange_signed_size??'n/a')}</td><td class="lc-wallet">${tiny(String(r.last_intent_id||'—'),36)}</td><td class="lc-wallet">${tiny(String(r.last_oid||'—'),24)}</td><td>${h(r.last_updated_at||'—')}</td><td>${action}</td></tr>`;}).join('')||'<tr><td colspan="11">No reconciliation issues.</td></tr>';
 }
-function renderManualExec(){
- const positions=lcAudit.manual_positions||{};
- const attempts=(lcAudit.recent_send_attempts||[]).slice().reverse();
- const sCounts=lcAudit.send_attempt_counts||{};
- const openPos=Object.values(positions).filter(p=>p&&Math.abs(parseFloat(p.signed_size||0))>1e-12).length;
- root.querySelector('#lcExecChips').innerHTML=[
-  ['Filled',count(sCounts,'ORDER_FILLED'),'lc-green'],
-  ['Rejected',count(sCounts,'ORDER_REJECTED'),'lc-red'],
-  ['Over cap',count(sCounts,'MAX_NOTIONAL_EXCEEDED'),'lc-amber'],
-  ['Adverse diff',count(sCounts,'CLOSE_ADVERSE_DIFF_TOO_LARGE'),'lc-amber'],
-  ['No position',count(sCounts,'NO_MANUAL_POSITION_TO_CLOSE'),''],
-  ['Open positions',openPos,openPos>0?'lc-blue':''],
- ].map(([k,v,cls])=>`<span class="lc-pill ${cls}">${h(k)}: <b>${h(v)}</b></span>`).join('');
- root.querySelector('#lcManualPosRows').innerHTML=Object.entries(positions).sort().map(([coin,p])=>{const sz=parseFloat(p.signed_size||0);const cls=sz>0?'lc-pos':sz<0?'lc-neg':'lc-muted';return `<tr><td>${h(coin)}</td><td class="${cls}">${h(sz)}</td><td class="lc-wallet">${tiny(String(p.last_oid||'—'),32)}</td><td>${tiny(String(p.last_intent_id||'—'),36)}</td><td>${h(p.last_updated_at||'—')}</td></tr>`;}).join('')||'<tr><td colspan="5">No manual positions tracked.</td></tr>';
- root.querySelector('#lcSendAttemptRows').innerHTML=attempts.map(a=>{const st=String(a.status||'—');const stCls=st==='ORDER_FILLED'?'lc-green':['ORDER_REJECTED','MAX_NOTIONAL_EXCEEDED','CLOSE_ADVERSE_DIFF_TOO_LARGE','NO_MANUAL_POSITION_TO_CLOSE'].includes(st)?'lc-red':'lc-amber';const fill=a.fill_avg_px?`${h(a.fill_size||'?')} @ ${h(a.fill_avg_px)}`:'—';const posMov=(a.position_before!=null&&a.position_after!=null)?`${h(a.position_before)}→${h(a.position_after)}`:'—';const err=String(a.error||'');return `<tr><td>${h(first(a,['created_at']))}</td><td>${h(a.coin||'—')}</td><td>${h(a.actual_side||a.side||'—')}</td><td><span class="lc-pill ${stCls}">${h(st)}</span></td><td>${fill}</td><td>${posMov}</td><td>${tiny(String(a.price_source||'—'),22)}</td><td>${tiny(String(a.size_source||'—'),22)}</td><td title="${h(err)}">${tiny(err,40)}</td></tr>`;}).join('')||'<tr><td colspan="9">No send attempts recorded.</td></tr>';
-}
-function age(ms){const n=Number(ms||0);if(!n)return '—';const d=Math.max(0,Date.now()-n);return d<60000?Math.round(d/1000)+'s':Math.round(d/60000)+'m';}
-function time(ms){const n=Number(ms||0);return n?new Date(n).toLocaleTimeString():'—';}
 function renderHealth(){
- const rows=Object.entries(lcHealth.wallets||{}).sort().map(([wallet,wh])=>{const effective=String(wh.effective_status||wh.status||'OFFLINE');const alive=!!wh.thread_alive||!!wh.worker_thread_alive;const fatal=Number(wh.fatal_error_count||0);const label=(effective==='STALE'&&alive&&fatal===0)?'STALE / non-fatal; worker alive':effective;const lastErr=wh.last_error_repr||wh.last_error||wh.last_close_msg||'';return `<tr><td class="lc-wallet">${h(shortWallet(wallet))}</td><td>${pill(label,effective)}</td><td>${pill(wh.health_grade||'—',wh.health_grade||'')}</td><td>${h(alive?'alive':'down')}</td><td>${Number(wh.reconnects_per_min||0).toFixed(2)}</td><td>${h(wh.processed_count??0)}</td><td>${h(wh.raw_message_count??0)}</td><td>${h(wh.parsed_fill_message_count??0)}</td><td>${h(wh.snapshot_fill_seen_count??0)}</td><td>${h(wh.snapshot_fill_recovered_count??0)}</td><td>${h(wh.ignored_snapshot_count??0)}</td><td>${h(wh.error_count??0)}</td><td>${h(wh.transport_stale_ms??wh.stale_ms??'')}</td><td>${pill(wh.data_status||'—',wh.data_status||'')}</td><td title="${h(lastErr)}">${tiny(lastErr,70)}</td></tr>`;}).join('');
- root.querySelector('#lcHealthRows').innerHTML=rows||'<tr><td colspan="15">WS service not running or no wallet health file found.</td></tr>';
+ const rows=Object.entries(lcHealth.wallets||{}).sort().map(([wallet,wh])=>{const current=String(wh.current_status||wh.effective_status||wh.status||'OFFLINE');const effective=String(wh.effective_status||wh.status||current);const grade=String(wh.current_health_grade||wh.health_grade||'—');const alive=!!wh.thread_alive||!!wh.worker_thread_alive;const fatal=Number(wh.fatal_error_count||0);const label=(current==='STALE'&&alive&&fatal===0)?'STALE / current idle':current;const lastErr=wh.last_error_repr||wh.last_error||wh.last_close_msg||'';const recentErr=Number(wh.recent_error_count||0);const lifeErr=Number(wh.lifetime_error_count??wh.error_count??0);return `<tr><td class="lc-wallet">${h(shortWallet(wallet))}</td><td title="effective: ${h(effective)}">${pill(label,current)}</td><td>${pill(grade,grade)}</td><td>${h(alive?'alive':'down')}</td><td>${Number(wh.reconnects_per_min||0).toFixed(2)}</td><td>${h(wh.processed_count??0)}</td><td>${h(wh.raw_message_count??0)}</td><td>${h(wh.parsed_fill_message_count??0)}</td><td>${h(wh.snapshot_fill_seen_count??0)}</td><td>${h(wh.snapshot_fill_recovered_count??0)}</td><td>${h(wh.ignored_snapshot_count??0)}</td><td>${h(recentErr)}</td><td>${h(lifeErr)}</td><td>${h(wh.transport_stale_ms??wh.stale_ms??'')}</td><td>${pill(wh.data_status||'—',wh.data_status||'')}</td><td title="${h(lastErr)}">${tiny(lastErr,70)}</td></tr>`;}).join('');
+ root.querySelector('#lcHealthRows').innerHTML=rows||'<tr><td colspan="16">WS service not running or no wallet health file found.</td></tr>';
 }
 function render(){
- const wallets=lcConfig.wallets||{}, active=Object.values(wallets).filter(w=>w&&w.enabled!==false&&['LIVE','CLO'].includes(String(w.mode||'').toUpperCase())).length;
- root.querySelector('#lcWalletCount').textContent=active+' / 10';
+ const wallets=lcConfig.wallets||{}, walletEntries=Object.values(wallets);
+ const tracked=walletEntries.length;
+ const liveCount=walletEntries.filter(w=>w&&String(w.mode||'').toUpperCase()==='LIVE').length;
+ const cloCount=walletEntries.filter(w=>w&&String(w.mode||'').toUpperCase()==='CLO').length;
+ const offCount=walletEntries.filter(w=>w&&String(w.mode||'').toUpperCase()==='OFF').length;
+ const autoLiveCount=lcAudit.auto_live_wallet_count||0;
+ root.querySelector('#lcWalletCount').textContent=`${tracked} / 10`;
+ const mc=root.querySelector('#lcModeCounts');
+ if(mc) mc.innerHTML=pill('LIVE '+liveCount,'LIVE')+' '+pill('CLO '+cloCount,'CLO')+' '+pill('OFF '+offCount,'OFF');
+ const as=root.querySelector('#lcAutoSend');
+ if(as) as.innerHTML='Auto-send: '+(autoLiveCount>0?pill(autoLiveCount+' wallet'+(autoLiveCount>1?'s':''),'LIVE'):pill('OFF','OFF'));
  const wsOverall=String(lcHealth.overall||'OFFLINE').toUpperCase();
- root.querySelector('#lcWsOverall').textContent=(['CLOSED','DEGRADED','DISABLED','OFFLINE'].includes(wsOverall))?'OFFLINE / service not running':wsOverall;
- renderEquity(); renderWallets(); renderAudit(); renderHealth(); renderManualExec();
+ root.querySelector('#lcWsOverall').textContent=(['CLOSED','DEGRADED','DISABLED','OFFLINE'].includes(wsOverall))?'OFFLINE':wsOverall;
+ const ro=root.querySelector('#lcRealOrders');
+ if(ro){const hasRealFills=(lcAudit.execution_quality_rows||[]).some(r=>r.status==='ORDER_FILLED');ro.className='lc-pill '+(hasRealFills?'lc-green':'lc-red');ro.textContent=hasRealFills?'REAL ORDERS: SERVICE ACTIVE':'REAL ORDERS: APP DISABLED';}
+ renderCards(); renderWallets(); renderAudit(); renderHealth(); renderPositions(); renderExecQuality();
 }
 async function refresh(quiet){try{if(!quiet)msg('Loading...');const [cfg,health,audit]=await Promise.all([jget('/api/live-config'),jget('/api/live-ws-health'),jget('/api/live-audit-summary')]);lcConfig=cfg.config||{wallets:{}};lcHealth=health.health||{};lcAudit=audit||{};render();if(!quiet)msg('Loaded');}catch(e){msg(e.message||String(e),true);}}
 root.querySelector('#lcRefresh').addEventListener('click',()=>refresh());
 root.querySelectorAll('[data-lc-modal]').forEach(btn=>btn.addEventListener('click',()=>{const m=root.querySelector('#'+btn.dataset.lcModal);if(m){m.classList.add('active');m.setAttribute('aria-hidden','false');}}));
 root.querySelectorAll('[data-lc-close]').forEach(btn=>btn.addEventListener('click',()=>{const m=btn.closest('.lc-modal-backdrop');if(m){m.classList.remove('active');m.setAttribute('aria-hidden','true');}}));
 root.querySelectorAll('[data-lc-tab]').forEach(btn=>btn.addEventListener('click',()=>{root.querySelectorAll('[data-lc-tab]').forEach(b=>b.classList.remove('active'));root.querySelectorAll('[data-lc-panel]').forEach(p=>p.classList.remove('active'));btn.classList.add('active');root.querySelector(`[data-lc-panel="${btn.dataset.lcTab}"]`).classList.add('active');}));
+root.querySelectorAll('[data-lc-graph-mode]').forEach(btn=>btn.addEventListener('click',()=>{lcGraphMode=btn.dataset.lcGraphMode;root.querySelectorAll('[data-lc-graph-mode]').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderGraph();}));
+root.querySelectorAll('[data-lc-graph-scale]').forEach(btn=>btn.addEventListener('click',()=>{lcGraphScale=btn.dataset.lcGraphScale;root.querySelectorAll('[data-lc-graph-scale]').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderGraph();}));
 root.querySelector('#lcAddForm').addEventListener('submit',async e=>{e.preventDefault();const fd=new FormData(e.currentTarget);const payload=Object.fromEntries(fd.entries());try{msg('Updating...');await jpost('/api/live-config/add-wallet',payload);e.currentTarget.reset();const m=e.currentTarget.closest('.lc-modal-backdrop');if(m)m.classList.remove('active');await refresh(true);msg('Updated: '+shortWallet(payload.wallet)+' -> SAVED');}catch(err){msg(err.message,true);}});
-root.querySelector('#lcWalletRows').addEventListener('click',async e=>{const btn=e.target.closest('button[data-act]');if(!btn)return;const tr=btn.closest('tr');const wallet=tr.dataset.wallet;const short=shortWallet(wallet);try{if(btn.dataset.act==='archive'&&!window.confirm('Archive disables/removes config only. Permanent audit/history is preserved.')){msg('Archive cancelled');return;}msg('Updating...');if(btn.dataset.act==='save'){await jpost('/api/live-config/set-wallet',rowPayload(tr));await refresh(true);msg('Updated: '+short+' -> SAVED');}if(btn.dataset.act==='clo'){await jpost('/api/live-config/set-mode',{wallet,mode:'CLO'});await refresh(true);msg('Updated: '+short+' -> CLO');}if(btn.dataset.act==='off'){await jpost('/api/live-config/set-mode',{wallet,mode:'OFF'});await refresh(true);msg('Updated: '+short+' -> OFF');}if(btn.dataset.act==='archive'){await jpost('/api/live-config/remove-wallet',{wallet,archive:true});await refresh(true);msg('Updated: '+short+' -> ARCHIVED');}}catch(err){msg(err.message,true);}});
+root.querySelector('#lcReconRows').addEventListener('click',async e=>{const btn=e.target.closest('button[data-recon-act="archive-ledger-row"]');if(!btn)return;const payload={wallet:btn.dataset.wallet||'',coin:btn.dataset.coin||'',issue:btn.dataset.issue||'',manual_signed_size:btn.dataset.manualSize||''};if(!window.confirm('Archive this stale app ledger row only? This will not place an exchange order.'))return;try{msg('Archiving ledger row...');await jpost('/api/manual-reconciliation/archive-ledger-row',payload);await refresh(true);msg('Archived ledger row for '+payload.coin+'. No exchange order was placed.');}catch(err){msg(err.message||String(err),true);}});
+root.querySelector('#lcWalletRows').addEventListener('click',async e=>{
+ const btn=e.target.closest('button[data-act]');
+ if(btn){const tr=btn.closest('tr');const wallet=tr.dataset.wallet;const short=shortWallet(wallet);try{if(btn.dataset.act==='archive'&&!window.confirm('Archive removes from config only. Audit/history preserved.')){msg('Cancelled');return;}msg('Updating...');if(btn.dataset.act==='save'){await jpost('/api/live-config/set-wallet',rowPayload(tr));await refresh(true);msg('Updated: '+short+' -> SAVED');}if(btn.dataset.act==='clo'){await jpost('/api/live-config/set-mode',{wallet,mode:'CLO'});await refresh(true);msg('Updated: '+short+' -> CLO');}if(btn.dataset.act==='off'){await jpost('/api/live-config/set-mode',{wallet,mode:'OFF'});await refresh(true);msg('Updated: '+short+' -> OFF');}if(btn.dataset.act==='archive'){await jpost('/api/live-config/remove-wallet',{wallet,archive:true});await refresh(true);msg('Updated: '+short+' -> ARCHIVED');}}catch(err){msg(err.message,true);}return;}
+ const tr=e.target.closest('tr.lc-wallet-row');
+ if(!tr||!tr.dataset.wallet) return;
+ const wallet=tr.dataset.wallet;
+ lcSelectedWallet=wallet;
+ renderGraph();
+ const detailId='lcdet-'+wallet.replace(/[^a-z0-9]/gi,'');
+ const existing=root.querySelector('#'+detailId);
+ if(existing){existing.remove();return;}
+ const detRow=document.createElement('tr');
+ detRow.id=detailId;
+ detRow.innerHTML=`<td colspan="12" style="padding:0">${walletDetailHtml(wallet)}</td>`;
+ tr.insertAdjacentElement('afterend',detRow);
+});
 refresh();
 })();
 </script>
@@ -3691,6 +5256,7 @@ async def add_live_config_wallet(req: Request):
         archived = config["archived_wallets"]
         existing = config["wallets"].get(wallet) or archived.pop(wallet, {})
         config["wallets"][wallet] = _normalise_live_wallet_payload(body, existing)
+        repair_live_config_consistency(config)
         _enforce_live_copy_cap(config)
         _save_live_copy_config(config)
         return JSONResponse(_live_copy_config_response(config))
@@ -3714,6 +5280,7 @@ async def set_live_config_wallet(req: Request):
             wallets[wallet] = _normalise_live_wallet_payload(body, archived.pop(wallet))
         else:
             raise ValueError("WALLET_NOT_FOUND")
+        repair_live_config_consistency(config)
         _enforce_live_copy_cap(config)
         _save_live_copy_config(config)
         return JSONResponse(_live_copy_config_response(config))
@@ -3741,6 +5308,7 @@ async def remove_live_config_wallet(req: Request):
             archived[wallet] = existing
         else:
             wallets[wallet] = existing
+        repair_live_config_consistency(config)
         _save_live_copy_config(config)
         return JSONResponse(_live_copy_config_response(config))
     except ValueError as exc:
@@ -3768,6 +5336,7 @@ async def set_live_config_mode(req: Request):
         else:
             raise ValueError("WALLET_NOT_FOUND")
         wallets[wallet] = _normalise_live_wallet_payload({"mode": mode, "enabled": mode != "OFF"}, existing)
+        repair_live_config_consistency(config)
         _enforce_live_copy_cap(config)
         _save_live_copy_config(config)
         return JSONResponse(_live_copy_config_response(config))
@@ -3775,6 +5344,16 @@ async def set_live_config_mode(req: Request):
         return _live_config_error(str(exc))
     except Exception as exc:
         return _live_config_error(type(exc).__name__)
+
+
+@app.post("/api/manual-reconciliation/archive-ledger-row")
+async def archive_manual_reconciliation_ledger_row(req: Request):
+    try:
+        body = await req.json()
+        result = _archive_manual_reconciliation_ledger_row(body if isinstance(body, dict) else {})
+        return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": type(exc).__name__}, status_code=400)
 
 
 if __name__ == "__main__":

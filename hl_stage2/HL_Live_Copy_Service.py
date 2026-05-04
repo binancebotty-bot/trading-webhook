@@ -31,7 +31,7 @@ import time
 import traceback
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -130,6 +130,15 @@ LIVE_QUOTE_CACHE_TTL_MS = int(os.getenv("HL_LIVE_QUOTE_CACHE_TTL_MS", "1000"))
 LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = float(os.getenv("HL_LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD", "25"))
 LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT = float(os.getenv("HL_LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT", "0.25"))
 LIVE_ORDER_ENDPOINT = os.getenv("HL_LIVE_ORDER_ENDPOINT", "https://api.hyperliquid.xyz/exchange")
+LIVE_AUTO_SEND_ENABLED = os.getenv("HL_LIVE_AUTO_SEND_ENABLED", "0") == "1"
+LIVE_AUTO_SEND_WALLET = os.getenv("HL_LIVE_AUTO_SEND_WALLET", "").lower().strip()
+LIVE_AUTO_SEND_MAX_PER_RUN = int(os.getenv("HL_LIVE_AUTO_SEND_MAX_PER_RUN", "1"))
+LIVE_AUTO_SEND_MARKETABLE_BPS = float(os.getenv("HL_LIVE_AUTO_SEND_MARKETABLE_BPS", "5"))
+LIVE_AUTO_CLOSE_WITH_CURRENT_QUOTE = os.getenv(
+    "HL_LIVE_AUTO_CLOSE_WITH_CURRENT_QUOTE",
+    os.getenv("HL_LIVE_AUTO_SEND_USE_CURRENT_QUOTE_FOR_CLOSE", "1"),
+) == "1"
+LIVE_AUTO_SEND_USE_CURRENT_QUOTE_FOR_CLOSE = LIVE_AUTO_CLOSE_WITH_CURRENT_QUOTE
 LIVE_JSON_WRITE_LOCK = threading.RLock()
 HL_PERP_META_BY_COIN_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
 
@@ -333,6 +342,20 @@ def load_csv_ids(path: Path, id_field: str) -> set:
         return set()
 
 
+def load_auto_send_attempt_ids() -> set:
+    if not SEND_ATTEMPTS_CSV.exists() or SEND_ATTEMPTS_CSV.stat().st_size <= 0:
+        return set()
+    try:
+        with SEND_ATTEMPTS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
+            return {
+                str(row.get("intent_id", "")).strip()
+                for row in csv.DictReader(f)
+                if str(row.get("intent_id", "")).strip() and "AUTO_LIVE_WS_FAST_PATH" in str(row.get("notes", ""))
+            }
+    except Exception:
+        return set()
+
+
 def should_write_would_send(decision: Dict[str, Any], row: Dict[str, Any]) -> bool:
     execution_decision = str((decision or {}).get("execution_decision") or row.get("execution_decision") or "").strip()
     return execution_decision in {"WOULD_PLACE_IOC_LIMIT", "WOULD_LATE_COPY", "WOULD_REDUCE_OR_EXIT"}
@@ -385,7 +408,7 @@ def save_manual_live_positions(positions: Dict[str, Any]) -> bool:
     return safe_atomic_write_json(MANUAL_LIVE_POSITIONS_FILE, positions, "MANUAL_LIVE_POSITIONS_WRITE")
 
 
-def update_manual_live_position_from_fill(coin: str, side: str, fill_size: Any, oid: Any, intent_id: str) -> Dict[str, Any]:
+def update_manual_live_position_from_fill(coin: str, side: str, fill_size: Any, oid: Any, intent_id: str, leader_wallet: str = "") -> Dict[str, Any]:
     positions = load_manual_live_positions()
     key = str(coin or "").upper().strip()
     current = positions.get(key, {}) if isinstance(positions.get(key), dict) else {}
@@ -396,6 +419,7 @@ def update_manual_live_position_from_fill(coin: str, side: str, fill_size: Any, 
         after = 0.0
     positions[key] = {
         "signed_size": after,
+        "leader_wallet": str(leader_wallet or current.get("leader_wallet", "") or "").lower().strip(),
         "last_updated_at": utc_now_iso(),
         "last_oid": str(oid or ""),
         "last_intent_id": str(intent_id or ""),
@@ -462,6 +486,23 @@ def floor_decimal_to_places(value: Any, places: int) -> Decimal:
     return Decimal(str(value)).quantize(quant, rounding=ROUND_DOWN)
 
 
+def size_increment_for_places(places: int) -> Decimal:
+    return Decimal("1").scaleb(-max(0, int(places)))
+
+
+def round_size_hl_perp(size: Any, sz_decimals: int) -> Tuple[Decimal, str, str]:
+    original = Decimal(str(size))
+    quantum = size_increment_for_places(sz_decimals)
+    floored = original.quantize(quantum, rounding=ROUND_DOWN)
+    if floored > 0:
+        return floored, "floor_to_szDecimals", ""
+    nearest = original.quantize(quantum, rounding=ROUND_HALF_UP)
+    snap_tolerance = max(abs(original) * Decimal("1e-9"), quantum * Decimal("1e-8"))
+    if nearest > 0 and abs(nearest - original) <= snap_tolerance:
+        return nearest, "snap_float_dust_to_szDecimals", ""
+    return floored, "floor_to_szDecimals", f"size rounds to {floored} at szDecimals={sz_decimals}; original_size={original} below minimum increment {quantum}"
+
+
 def round_price_hl_perp(price: Any, sz_decimals: int) -> Decimal:
     max_decimals = max(0, 6 - int(sz_decimals))
     candidate = floor_decimal_to_places(price, max_decimals)
@@ -513,16 +554,31 @@ def prepare_hl_order_numbers(coin: str, size: Any, limit_px: Any, max_notional: 
         sz_decimals = inum(item.get("szDecimals"))
         original_size = Decimal(str(size))
         original_limit_price = Decimal(str(limit_px))
-        wire_size_dec = floor_decimal_to_places(original_size, sz_decimals)
+        size_increment = size_increment_for_places(sz_decimals)
+        price_max_decimals = max(0, 6 - int(sz_decimals))
+        wire_size_dec, size_rounding_mode, size_rounding_warning = round_size_hl_perp(original_size, sz_decimals)
         wire_limit_dec = round_price_hl_perp(original_limit_price, sz_decimals)
         if wire_size_dec <= 0 or wire_limit_dec <= 0:
+            validation_failure = (
+                size_rounding_warning
+                if wire_size_dec <= 0
+                else f"price rounds to {wire_limit_dec}; original_limit_price={original_limit_price}"
+            )
             return {
                 "ok": False,
                 "status": "WIRE_NUMBER_UNSAFE",
-                "error": "size/price rounded to non-positive value",
+                "error": validation_failure,
+                "validation_failure": validation_failure,
                 "szDecimals": sz_decimals,
+                "size_increment": str(size_increment),
+                "price_max_decimals": price_max_decimals,
                 "original_size": float(original_size),
+                "wire_size": float(wire_size_dec),
+                "rounded_size": float(wire_size_dec),
+                "size_rounding_mode": size_rounding_mode,
                 "original_limit_price": float(original_limit_price),
+                "wire_limit_price": float(wire_limit_dec),
+                "rounded_price": float(wire_limit_dec),
             }
         wire_notional_dec = wire_size_dec * wire_limit_dec
         if wire_notional_dec < Decimal("10.0"):
@@ -535,6 +591,9 @@ def prepare_hl_order_numbers(coin: str, size: Any, limit_px: Any, max_notional: 
                 "original_limit_price": float(original_limit_price),
                 "wire_limit_price": float(wire_limit_dec),
                 "wire_notional": float(wire_notional_dec),
+                "size_increment": str(size_increment),
+                "price_max_decimals": price_max_decimals,
+                "size_rounding_mode": size_rounding_mode,
             }
         if wire_notional_dec > Decimal(str(max_notional)):
             return {
@@ -548,6 +607,9 @@ def prepare_hl_order_numbers(coin: str, size: Any, limit_px: Any, max_notional: 
                 "original_limit_price": float(original_limit_price),
                 "wire_limit_price": float(wire_limit_dec),
                 "wire_notional": float(wire_notional_dec),
+                "size_increment": str(size_increment),
+                "price_max_decimals": price_max_decimals,
+                "size_rounding_mode": size_rounding_mode,
             }
         float_to_wire(float(wire_size_dec))
         float_to_wire(float(wire_limit_dec))
@@ -560,9 +622,12 @@ def prepare_hl_order_numbers(coin: str, size: Any, limit_px: Any, max_notional: 
             "original_limit_price": float(original_limit_price),
             "wire_limit_price": float(wire_limit_dec),
             "wire_notional": float(wire_notional_dec),
+            "size_increment": str(size_increment),
+            "price_max_decimals": price_max_decimals,
+            "size_rounding_mode": size_rounding_mode,
         }
     except Exception as exc:
-        return {"ok": False, "status": "WIRE_NUMBER_UNSAFE", "error": repr(exc)}
+        return {"ok": False, "status": "WIRE_NUMBER_UNSAFE", "error": repr(exc), "validation_failure": repr(exc)}
 
 
 def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0, use_current_quote: bool = False, max_notional: Optional[float] = None) -> Dict[str, Any]:
@@ -593,7 +658,25 @@ def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0,
         _effective_max_notional = max_notional if max_notional is not None else LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD
         prepared = prepare_hl_order_numbers(coin, size, adjusted_limit_px, _effective_max_notional)
         if not prepared.get("ok"):
-            _out = {"ok": False, "marketable_bps": marketable_bps, "adjusted_limit_price": adjusted_limit_px, **prepared}
+            _out = {
+                "ok": False,
+                "coin": coin,
+                "side": side,
+                "order_type": payload.get("order_type", "IOC_LIMIT"),
+                "reduce_only": reduce_only,
+                "marketable_bps": marketable_bps,
+                "adjusted_limit_price": adjusted_limit_px,
+                "original_price": limit_px,
+                "rounded_price": prepared.get("rounded_price", prepared.get("wire_limit_price")),
+                "original_size": size,
+                "rounded_size": prepared.get("rounded_size", prepared.get("wire_size")),
+                "tick_info": {
+                    "szDecimals": prepared.get("szDecimals"),
+                    "size_increment": prepared.get("size_increment"),
+                    "price_max_decimals": prepared.get("price_max_decimals"),
+                },
+                **prepared,
+            }
             if prepared.get("status") == "MAX_NOTIONAL_EXCEEDED":
                 _out["notional_cap_reason"] = "manual_open_cap"
             return _out
@@ -659,7 +742,7 @@ def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0,
         }
 
 
-def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: float = 0.0, close_position: bool = False, use_current_quote: bool = False) -> Dict[str, Any]:
+def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: float = 0.0, close_position: bool = False, use_current_quote: bool = False, auto_live: bool = False, auto_send_wallet: str = "") -> Dict[str, Any]:
     ensure_csv_schema(SEND_ATTEMPTS_CSV, SEND_ATTEMPT_FIELDS)
     row = load_would_send_order(intent_id)
     if row is None:
@@ -720,7 +803,10 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
     if close_position:
         if position_before == 0:
             append_send_attempt(row, "NO_MANUAL_POSITION_TO_CLOSE", confirmed=confirm_send, error="manual live position is flat")
-            return {"ok": False, "status": "NO_MANUAL_POSITION_TO_CLOSE", "intent_id": intent_id, "position_before": position_before, "close_position": True}
+            out = {"ok": False, "status": "NO_MANUAL_POSITION_TO_CLOSE", "intent_id": intent_id, "position_before": position_before, "close_position": True}
+            if auto_live:
+                out.update({"auto_live": True, "auto_send_wallet": auto_send_wallet})
+            return out
         payload["side"] = "SELL" if position_before > 0 else "BUY"
         payload["copy_size"] = abs(position_before)
         payload["reduce_only"] = True
@@ -729,7 +815,10 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
             quote = fetch_public_executable_quote(str(payload.get("coin", "")), str(payload.get("side", "")))
             if not quote.get("ok") or fnum(quote.get("executable_price")) <= 0:
                 append_send_attempt(row, "CURRENT_QUOTE_UNAVAILABLE", confirmed=confirm_send, error=str(quote.get("error") or "quote unavailable"))
-                return {"ok": False, "status": "CURRENT_QUOTE_UNAVAILABLE", "intent_id": intent_id, "quote": quote, "position_before": position_before, "close_position": True}
+                out = {"ok": False, "status": "CURRENT_QUOTE_UNAVAILABLE", "intent_id": intent_id, "quote": quote, "position_before": position_before, "close_position": True}
+                if auto_live:
+                    out.update({"auto_live": True, "auto_send_wallet": auto_send_wallet})
+                return out
             payload["limit_price"] = fnum(quote.get("executable_price"))
             payload["current_quote_price"] = fnum(quote.get("executable_price"))
             payload["price_source"] = "current_quote"
@@ -829,11 +918,31 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
             result.get("fill_size") or result.get("size"),
             result.get("oid"),
             intent_id,
+            str(row.get("leader_wallet", "")),
         )
         position_after = fnum(updated.get("position_after"), position_before)
     result.update({"position_before": position_before, "position_after": position_after, "close_position": bool(close_position), "size_source": size_source})
-    append_send_attempt(row, status, confirmed=True, response=result, notes="manual one-shot sender result")
-    return {"ok": bool(result.get("ok")), "status": status, "intent_id": intent_id, "payload": payload, "response": result}
+    if auto_live:
+        result.update({"auto_live": True, "auto_send_wallet": auto_send_wallet})
+    notes = f"AUTO_LIVE_WS_FAST_PATH auto_live=True auto_send_wallet={auto_send_wallet}" if auto_live else "manual one-shot sender result"
+    if status == "WIRE_NUMBER_UNSAFE":
+        notes = notes + " wire_validation=" + json.dumps({
+            "coin": result.get("coin"),
+            "side": result.get("side"),
+            "order_type": result.get("order_type"),
+            "reduce_only": result.get("reduce_only"),
+            "original_price": result.get("original_price", result.get("original_limit_price")),
+            "rounded_price": result.get("rounded_price", result.get("wire_limit_price")),
+            "original_size": result.get("original_size"),
+            "rounded_size": result.get("rounded_size", result.get("wire_size")),
+            "tick_info": result.get("tick_info"),
+            "validation_failure": result.get("validation_failure", result.get("error")),
+        }, sort_keys=True)
+    append_send_attempt(row, status, confirmed=True, response=result, error=str(result.get("error", "")), notes=notes)
+    out = {"ok": bool(result.get("ok")), "status": status, "intent_id": intent_id, "payload": payload, "response": result}
+    if auto_live:
+        out.update({"auto_live": True, "auto_send_wallet": auto_send_wallet})
+    return out
 
 
 def side_from_signed(value: float) -> str:
@@ -860,6 +969,31 @@ def weighted_entry_price(old_size: float, old_entry: float, add_size: float, add
     return ((old_entry * old_abs) + (add_price * add_abs)) / (old_abs + add_abs)
 
 
+def normalize_live_wallet_config(wallet: Any, cfg: Any) -> Dict[str, Any]:
+    raw = cfg if isinstance(cfg, dict) else {}
+    mode = str(raw.get("mode", "OFF")).upper()
+    if mode not in {"LIVE", "CLO", "OFF"}:
+        mode = "OFF"
+    explicit_disabled = "enabled" in raw and str(raw.get("enabled", "")).strip().lower() in {"0", "false", "no", "off"}
+    if mode in {"LIVE", "CLO"}:
+        if explicit_disabled:
+            enabled = False
+            reason = "CONFIG_CONFLICT_MODE_ENABLED_FALSE"
+        else:
+            enabled = True
+            reason = "ENABLED_LIVE" if mode == "LIVE" else "ENABLED_CLO"
+    else:
+        enabled = False
+        reason = "MODE_OFF"
+    return {
+        "wallet": str(wallet or "").lower().strip(),
+        "mode": mode,
+        "enabled": enabled,
+        "service_eligible": bool(mode in {"LIVE", "CLO"} and enabled),
+        "service_eligibility_reason": reason,
+    }
+
+
 @dataclass(frozen=True)
 class LiveWalletConfig:
     wallet: str
@@ -875,9 +1009,8 @@ class LiveWalletConfig:
     @staticmethod
     def from_raw(wallet: str, raw: Any) -> "LiveWalletConfig":
         raw = raw if isinstance(raw, dict) else {}
-        mode = str(raw.get("mode", "OFF")).upper()
-        if mode not in {"LIVE", "CLO", "OFF"}:
-            mode = "OFF"
+        normal = normalize_live_wallet_config(wallet, raw)
+        mode = str(normal.get("mode", "OFF"))
         copy_mode = str(raw.get("copy_mode", "proportional")).lower()
         if copy_mode not in {"proportional", "fixed"}:
             copy_mode = "proportional"
@@ -890,7 +1023,7 @@ class LiveWalletConfig:
             leader_equity_base=max(1.0, fnum(raw.get("leader_equity_base"), DEFAULT_LEADER_EQUITY_BASE)),
             max_diff_pct=max(0.0, fnum(raw.get("max_diff_pct"), 0.10)),
             daily_loss_limit=max(0.0, fnum(raw.get("daily_loss_limit"), 0.0)),
-            enabled=str(raw.get("enabled", "true")).lower() not in {"0", "false", "no", "off"},
+            enabled=bool(normal.get("enabled")),
         )
 
 
@@ -1177,15 +1310,15 @@ def audit_reason_for_fill(fill: LeaderFill, replay_history: bool = False) -> str
 
 def audit_notes_for_fill(fill: LeaderFill, replay_history: bool = False) -> str:
     if replay_history:
-        return "dry-run replay; source=replay_history; no exchange order placed"
+        return "audit replay only; source=replay_history; no exchange order placed"
     source = str(getattr(fill, "source", "") or "").lower()
     if source == "live_poll":
-        return f"dry-run simulated fill; source=live_poll; no exchange order placed; ws_coverage={ws_coverage_for_fill(fill)}"
+        return f"leader poll event; source=live_poll; copy requires recovery/late-copy decision; no order implied by this note; ws_coverage={ws_coverage_for_fill(fill)}"
     if source == "live_ws_snapshot":
-        return "dry-run simulated fill; source=live_ws_snapshot; guarded snapshot recovery; no exchange order placed"
+        return "leader WS snapshot recovery event; source=live_ws_snapshot; guarded recovery; no order implied by this note"
     if source in {"ws", "live_ws"}:
-        return "dry-run simulated fill; source=live_ws; no exchange order placed"
-    return "dry-run simulated fill; source=source_csv_forward; no exchange order placed"
+        return "leader WS fill detected; source=live_ws; real copy result is recorded in send_attempts/live_fills"
+    return "leader source CSV event; source=source_csv_forward; no order implied by this note"
 
 
 def executable_price_from_fill_payload(fill: LeaderFill) -> float:
@@ -1511,6 +1644,11 @@ class DryRunLiveCopyService:
         ]:
             ensure_csv_schema(path, fields)
         self.would_send_intent_ids = load_csv_ids(WOULD_SEND_ORDERS_CSV, "intent_id")
+        self.auto_send_intent_ids = load_auto_send_attempt_ids()
+        self.auto_send_attempted = 0
+        self.auto_send_filled = 0
+        self.auto_send_rejected = 0
+        self.auto_send_skipped = 0
 
     def bump(self, key: str, amount: int = 1) -> None:
         counters = self.state.setdefault("counters", {})
@@ -1537,15 +1675,15 @@ class DryRunLiveCopyService:
         if not isinstance(wallets, dict):
             wallets = {}
         out: Dict[str, LiveWalletConfig] = {}
-        live_count = 0
+        eligible_count = 0
         for wallet, cfg in wallets.items():
             item = LiveWalletConfig.from_raw(wallet, cfg)
             if not item.wallet:
                 continue
-            if item.mode == "LIVE":
-                live_count += 1
-                if live_count > MAX_LIVE_WALLETS:
-                    item = LiveWalletConfig(**{**asdict(item), "mode": "OFF"})
+            if item.enabled and item.mode in {"LIVE", "CLO"}:
+                eligible_count += 1
+                if eligible_count > MAX_LIVE_WALLETS:
+                    item = LiveWalletConfig(**{**asdict(item), "mode": "OFF", "enabled": False})
             out[item.wallet] = item
         return out
 
@@ -1686,14 +1824,16 @@ class DryRunLiveCopyService:
         }
         append_csv(ORDER_INTENTS_CSV, ORDER_INTENT_FIELDS, row)
         if should_write_would_send(decision, row):
-            self.append_would_send_order(row)
+            wrote_would_send = self.append_would_send_order(row)
+            if wrote_would_send:
+                self.maybe_auto_send_would_send(cfg, row)
 
-    def append_would_send_order(self, intent_row: Dict[str, Any]) -> None:
+    def append_would_send_order(self, intent_row: Dict[str, Any]) -> bool:
         if not should_write_would_send(intent_row, intent_row):
-            return
+            return False
         intent_id = str(intent_row.get("intent_id", "")).strip()
         if not intent_id or intent_id in self.would_send_intent_ids:
-            return
+            return False
         execution_decision = str(intent_row.get("execution_decision", ""))
         row = {
             "created_at": utc_now_iso(),
@@ -1717,6 +1857,71 @@ class DryRunLiveCopyService:
         }
         append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, row)
         self.would_send_intent_ids.add(intent_id)
+        return True
+
+    def auto_send_summary(self) -> Dict[str, Any]:
+        return {
+            "auto_send_enabled": bool(LIVE_AUTO_SEND_ENABLED),
+            "auto_send_wallet": LIVE_AUTO_SEND_WALLET,
+            "auto_send_attempted": int(self.auto_send_attempted),
+            "auto_send_filled": int(self.auto_send_filled),
+            "auto_send_rejected": int(self.auto_send_rejected),
+            "auto_send_skipped": int(self.auto_send_skipped),
+            "auto_send_max_per_run": int(LIVE_AUTO_SEND_MAX_PER_RUN),
+        }
+
+    def maybe_auto_send_would_send(self, cfg: LiveWalletConfig, intent_row: Dict[str, Any]) -> Dict[str, Any]:
+        intent_id = str(intent_row.get("intent_id", "")).strip()
+        reason = str(intent_row.get("reason", "")).strip()
+        execution_decision = str(intent_row.get("execution_decision", "")).strip()
+        wallet = str(intent_row.get("leader_wallet", "")).lower().strip()
+        eligible_decisions = {"WOULD_PLACE_IOC_LIMIT", "WOULD_REDUCE_OR_EXIT"}
+
+        def skip(why: str) -> Dict[str, Any]:
+            self.auto_send_skipped += 1
+            return {"auto_sent": False, "status": "SKIPPED", "reason": why, "intent_id": intent_id}
+
+        if not LIVE_AUTO_SEND_ENABLED:
+            return skip("AUTO_SEND_DISABLED")
+        if LIVE_AUTO_SEND_WALLET and wallet != LIVE_AUTO_SEND_WALLET:
+            return skip("AUTO_SEND_WALLET_MISMATCH")
+        if not intent_id:
+            return skip("MISSING_INTENT_ID")
+        if intent_id in self.auto_send_intent_ids:
+            return skip("DUPLICATE_AUTO_SEND_INTENT")
+        if self.auto_send_attempted >= max(0, int(LIVE_AUTO_SEND_MAX_PER_RUN)):
+            return skip("AUTO_SEND_MAX_PER_RUN_REACHED")
+        if reason != "LIVE_WS_DETECTED":
+            return skip("NOT_WS_FAST_PATH")
+        if execution_decision not in eligible_decisions:
+            return skip("INELIGIBLE_EXECUTION_DECISION")
+        if truthy_csv(intent_row.get("manual_reconcile_required")):
+            return skip("MANUAL_RECONCILE_REQUIRED")
+        if not os.environ.get("HL_LIVE_HL_PRIVATE_KEY"):
+            return skip("CREDENTIALS_MISSING")
+        if cfg.wallet != wallet or not cfg.enabled or cfg.mode not in {"LIVE", "CLO"}:
+            return skip("WALLET_NOT_ACTIVE")
+        if cfg.mode == "CLO" and execution_decision == "WOULD_PLACE_IOC_LIMIT":
+            return skip("CLO_BLOCKS_ENTRY")
+
+        close_position = execution_decision == "WOULD_REDUCE_OR_EXIT"
+        result = manual_send_one_intent(
+            intent_id,
+            True,
+            marketable_bps=LIVE_AUTO_SEND_MARKETABLE_BPS,
+            close_position=close_position,
+            use_current_quote=bool(close_position and LIVE_AUTO_CLOSE_WITH_CURRENT_QUOTE),
+            auto_live=True,
+            auto_send_wallet=wallet,
+        )
+        self.auto_send_attempted += 1
+        self.auto_send_intent_ids.add(intent_id)
+        status = str(result.get("status", ""))
+        if status == "ORDER_FILLED":
+            self.auto_send_filled += 1
+        else:
+            self.auto_send_rejected += 1
+        return {"auto_sent": bool(result.get("ok")), "status": status, "intent_id": intent_id, "result": result}
 
     def append_live_fill(self, cfg: LiveWalletConfig, fill: LeaderFill, intent_id: str, status: str, copy_notional: float, copy_size: float, pos: Dict[str, Any], realized_pnl: float, notes: str = "") -> None:
         append_csv(LIVE_FILLS_CSV, LIVE_FILL_FIELDS, {
@@ -2013,6 +2218,7 @@ class DryRunLiveCopyService:
             "poll_rows_fetched": poll_rows_fetched,
             "poll_rows_selected": poll_rows_selected,
             "audit_dir": str(AUDIT_DIR),
+            **self.auto_send_summary(),
         }
 
 
@@ -2048,6 +2254,8 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
             transport_stale_ms = (now - transport_ref) if transport_ref else 10**12
             last_data_ms = int(status.get("last_data_ms") or 0)
             data_stale_ms = (now - last_data_ms) if last_data_ms else 0
+            last_data_or_snapshot_ms = int(status.get("last_data_or_snapshot_ms") or last_data_ms or 0)
+            data_or_snapshot_stale_ms = (now - last_data_or_snapshot_ms) if last_data_or_snapshot_ms else 0
             next_reconnect_ms = int(status.get("next_reconnect_ms") or 0)
             next_proactive_recycle_ms = int(status.get("next_proactive_recycle_ms") or 0)
             last_open_ms = int(status.get("last_open_ms") or 0)
@@ -2063,20 +2271,22 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
             effective_status = status_name
             if reconnect_overdue:
                 effective_status = "RECONNECT_OVERDUE"
+            elif status_name == "INIT":
+                effective_status = "SUBSCRIBED"
             elif status_name == "OPEN" and (LIVE_WS_STALE_MS <= 0 or transport_stale_ms <= LIVE_WS_STALE_MS):
                 effective_status = "OPEN"
             elif status_name == "OPEN":
                 effective_status = "STALE"
             elif status_name in {"CONNECTING", "RECONNECTING", "THREAD_ERROR", "THREAD_EXITED", "RESTARTING"}:
                 effective_status = status_name
-            if last_data_ms == 0:
+            if effective_status == "SUBSCRIBED":
+                data_status = "WAITING_FOR_DATA"
+            elif last_data_or_snapshot_ms == 0:
                 data_status = "IDLE_NO_FILLS"
-            elif LIVE_WS_STALE_MS > 0 and data_stale_ms > LIVE_WS_STALE_MS:
+            elif LIVE_WS_STALE_MS > 0 and data_or_snapshot_stale_ms > LIVE_WS_STALE_MS:
                 data_status = "IDLE"
             else:
                 data_status = "ACTIVE"
-            if effective_status != "OPEN":
-                overall = "DEGRADED"
             reconnect_in_ms = max(0, next_reconnect_ms - now) if next_reconnect_ms else 0
             proactive_recycle_due_ms = max(0, next_proactive_recycle_ms - now) if next_proactive_recycle_ms else 0
             uptime_ms = (now - last_open_ms) if status_name == "OPEN" and last_open_ms else int(status.get("uptime_ms") or 0)
@@ -2086,36 +2296,72 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
             reconnect_count = int(status.get("reconnect_count") or 0)
             close_count = int(status.get("close_count") or 0)
             error_count = int(status.get("error_count") or 0)
+            recent_error_count = int(status.get("recent_error_count") or 0)
             processed_count = int(status.get("processed_count") or 0)
             reconnects_per_min = reconnect_count / observed_min
             closes_per_min = close_count / observed_min
-            if effective_status == "OPEN" and reconnects_per_min <= 2 and error_count == 0:
-                health_grade = "GOOD"
-            elif effective_status == "OPEN" and reconnects_per_min <= 5 and error_count == 0:
-                health_grade = "WATCH"
+
+            current_status = effective_status
+            if not thread_alive and status_name not in {"INIT", "SUBSCRIBED"}:
+                current_status = "OFFLINE"
+            elif status_name == "OPEN":
+                if LIVE_WS_STALE_MS > 0 and transport_stale_ms > LIVE_WS_STALE_MS:
+                    current_status = "STALE"
+                else:
+                    current_status = "OPEN"
+            elif status_name in {"CONNECTING", "RECONNECTING"} and not reconnect_overdue:
+                current_status = status_name
+
+            if current_status == "SUBSCRIBED":
+                current_health_grade = "WAITING"
+            elif current_status == "OPEN":
+                open_age_ms = (now - last_open_ms) if last_open_ms else 0
+                has_recent_data_or_snapshot = bool(
+                    last_data_or_snapshot_ms
+                    and (LIVE_WS_STALE_MS <= 0 or data_or_snapshot_stale_ms <= LIVE_WS_STALE_MS)
+                )
+                open_recently = bool(last_open_ms and (LIVE_WS_STALE_MS <= 0 or open_age_ms <= LIVE_WS_STALE_MS))
+                if recent_error_count <= 0 and (has_recent_data_or_snapshot or open_recently):
+                    current_health_grade = "OK"
+                elif LIVE_WS_STALE_MS > 0 and data_or_snapshot_stale_ms > LIVE_WS_STALE_MS:
+                    current_health_grade = "DEGRADED"
+                    current_status = "STALE"
+                else:
+                    current_health_grade = "WARN"
+            elif current_status in {"CONNECTING", "RECONNECTING"} and not reconnect_overdue:
+                current_health_grade = "WARN"
+            elif current_status in {"CLOSED", "OFFLINE", "THREAD_ERROR", "THREAD_EXITED", "RESTARTING", "RECONNECT_OVERDUE", "STALE", "ERROR"}:
+                current_health_grade = "DEGRADED"
             else:
-                health_grade = "DEGRADED"
-            grade_score = {"GOOD": 0, "WATCH": 1, "DEGRADED": 2}[health_grade]
+                current_health_grade = "WARN"
+            health_grade = current_health_grade
+            if current_health_grade == "DEGRADED":
+                overall = "DEGRADED"
+            elif current_health_grade == "WARN" and overall != "DEGRADED":
+                overall = "WARN"
+            grade_score = {"GOOD": 0, "OK": 0, "WAITING": 0, "WATCH": 1, "WARN": 1, "DEGRADED": 2}.get(current_health_grade, 2)
             worst_grade_score = max(worst_grade_score, grade_score)
             total_reconnects_per_min += reconnects_per_min
             summary["wallet_count"] += 1
-            if effective_status == "OPEN":
+            if current_status == "OPEN":
                 summary["open_count"] += 1
-            elif effective_status == "RECONNECTING":
+            elif current_status == "RECONNECTING":
                 summary["reconnecting_count"] += 1
-            elif effective_status == "CLOSED":
+            elif current_status in {"CLOSED", "OFFLINE"}:
                 summary["closed_count"] += 1
-            elif effective_status == "STALE":
+            elif current_status == "STALE":
                 summary["stale_count"] += 1
             summary["total_processed_count"] += processed_count
             summary["total_reconnect_count"] += reconnect_count
             wallets[wallet] = {
                 **status,
                 "effective_status": effective_status,
+                "current_status": current_status,
                 "data_status": data_status,
                 "stale_ms": transport_stale_ms,
                 "transport_stale_ms": transport_stale_ms,
                 "data_stale_ms": data_stale_ms,
+                "data_or_snapshot_stale_ms": data_or_snapshot_stale_ms,
                 "reconnect_in_ms": reconnect_in_ms,
                 "proactive_recycle_due_ms": proactive_recycle_due_ms,
                 "uptime_ms": uptime_ms,
@@ -2124,17 +2370,26 @@ def build_ws_health_snapshot(manager: Any) -> Dict[str, Any]:
                 "reconnects_per_min": reconnects_per_min,
                 "closes_per_min": closes_per_min,
                 "health_grade": health_grade,
+                "current_health_grade": current_health_grade,
+                "lifetime_error_count": error_count,
+                "recent_error_count": recent_error_count,
+                "last_successful_open_at": status.get("last_successful_open_at") or (datetime.fromtimestamp(last_open_ms / 1000, tz=timezone.utc).isoformat() if last_open_ms else ""),
+                "last_data_or_snapshot_at": status.get("last_data_or_snapshot_at") or (datetime.fromtimestamp(last_data_or_snapshot_ms / 1000, tz=timezone.utc).isoformat() if last_data_or_snapshot_ms else ""),
                 "thread_alive": thread_alive,
                 "reconnect_overdue": reconnect_overdue,
+                "notes": "subscribed; waiting for first message" if effective_status == "SUBSCRIBED" else str(status.get("notes") or ""),
             }
         if summary["wallet_count"]:
             summary["avg_reconnects_per_min"] = total_reconnects_per_min / summary["wallet_count"]
-        summary["worst_health_grade"] = {0: "GOOD", 1: "WATCH", 2: "DEGRADED"}[worst_grade_score]
+        summary["worst_health_grade"] = {0: "OK", 1: "WARN", 2: "DEGRADED"}[worst_grade_score]
+    subscribed_wallets = list(getattr(manager, "wallets", []) if manager is not None else [])
     return {
         "enabled": bool(manager is not None),
         "updated_at": utc_now_iso(),
         "overall": overall,
         "ws_summary": summary,
+        "wallet_count": len(wallets),
+        "subscribed_wallets": subscribed_wallets,
         "wallets": wallets,
         "health_write_error_count": int(getattr(manager, "health_write_error_count", 0) or 0) if manager is not None else 0,
         "last_health_write_error": str(getattr(manager, "last_health_write_error", "") or "") if manager is not None else "",
@@ -2161,6 +2416,49 @@ def write_ws_health(manager: Any) -> None:
             pass
 
 
+def write_ws_health_initial(wallets: List[str], dry_run: bool) -> None:
+    """Write health file before sockets open so every subscribed wallet has an entry."""
+    now_ms = utc_now_ms()
+    existing = load_json(LIVE_WS_HEALTH_FILE, {})
+    existing_wallets: Dict[str, Any] = (
+        existing.get("wallets", {}) if isinstance(existing, dict) and isinstance(existing.get("wallets"), dict) else {}
+    )
+    wallet_entries: Dict[str, Any] = {}
+    for wallet in wallets:
+        prev = existing_wallets.get(wallet) or {}
+        wallet_entries[wallet] = {
+            "wallet": wallet,
+            "effective_status": "SUBSCRIBED",
+            "current_status": "SUBSCRIBED",
+            "health_grade": "WAITING",
+            "current_health_grade": "WAITING",
+            "data_status": "WAITING_FOR_DATA",
+            "last_msg_ms": int(prev.get("last_msg_ms") or 0),
+            "last_data_ms": int(prev.get("last_data_ms") or 0),
+            "last_data_or_snapshot_ms": int(prev.get("last_data_or_snapshot_ms") or prev.get("last_data_ms") or 0),
+            "last_data_or_snapshot_at": str(prev.get("last_data_or_snapshot_at") or ""),
+            "first_seen_ms": int(prev.get("first_seen_ms") or now_ms),
+            "last_successful_open_at": str(prev.get("last_successful_open_at") or ""),
+            "last_error_at": str(prev.get("last_error_at") or ""),
+            "last_error": str(prev.get("last_error") or ""),
+            "last_error_repr": str(prev.get("last_error_repr") or ""),
+            "recent_error_count": int(prev.get("recent_error_count") or 0),
+            "lifetime_error_count": int(prev.get("lifetime_error_count") or prev.get("error_count") or 0),
+            "notes": "subscribed; waiting for first message",
+        }
+    payload: Dict[str, Any] = {
+        "updated_at": utc_now_iso(),
+        "enabled": True,
+        "dry_run": dry_run,
+        "mode": "DEDICATED_SOCKET_PER_WALLET",
+        "max_wallets": LIVE_WS_MAX_WALLETS,
+        "wallet_count": len(wallets),
+        "subscribed_wallets": list(wallets),
+        "wallets": wallet_entries,
+    }
+    safe_atomic_write_json(LIVE_WS_HEALTH_FILE, payload, "WS_HEALTH_INITIAL_WRITE")
+
+
 class DedicatedLiveWSManager:
     def __init__(self, service: DryRunLiveCopyService, wallets: List[str]) -> None:
         self.service = service
@@ -2177,9 +2475,12 @@ class DedicatedLiveWSManager:
                 "status": "INIT",
                 "first_seen_ms": utc_now_ms(),
                 "last_open_ms": 0,
+                "last_successful_open_at": "",
                 "last_close_ms": 0,
                 "last_msg_ms": 0,
                 "last_data_ms": 0,
+                "last_data_or_snapshot_ms": 0,
+                "last_data_or_snapshot_at": "",
                 "last_ping_ms": 0,
                 "last_pong_ms": 0,
                 "last_heartbeat_ms": 0,
@@ -2197,7 +2498,9 @@ class DedicatedLiveWSManager:
                 "duplicate_count": 0,
                 "ignored_count": 0,
                 "error_count": 0,
+                "recent_error_count": 0,
                 "reconnect_count": 0,
+                "last_error_at": "",
                 "last_error": "",
                 "last_error_repr": "",
                 "benign_event_count": 0,
@@ -2366,6 +2669,8 @@ class DedicatedLiveWSManager:
                 status = self.wallet_status[wallet]
                 status["status"] = "THREAD_ERROR"
                 status["fatal_error_count"] += 1
+                status["recent_error_count"] = int(status.get("recent_error_count") or 0) + 1
+                status["last_error_at"] = utc_now_iso()
                 status["last_fatal_error"] = str(exc)
                 status["last_fatal_error_repr"] = repr(exc)
                 status["worker_thread_alive"] = False
@@ -2382,7 +2687,7 @@ class DedicatedLiveWSManager:
 
     def wallet_loop_body(self, wallet: str) -> None:
         if websocket is None:
-            self.update_status(wallet, status="ERROR", error_count=1, last_error="websocket-client unavailable")
+            self.update_status(wallet, status="ERROR", error_count=1, recent_error_count=1, last_error_at=utc_now_iso(), last_error="websocket-client unavailable")
             write_ws_health(self)
             return
 
@@ -2438,8 +2743,12 @@ class DedicatedLiveWSManager:
                 patch = {
                     "status": "OPEN",
                     "last_open_ms": now,
+                    "last_successful_open_at": utc_now_iso(),
                     "last_msg_ms": now,
                     "last_heartbeat_ms": now,
+                    "recent_error_count": 0,
+                    "last_error": "",
+                    "last_error_repr": "",
                     "reconnect_backoff_sec": backoff,
                     "next_reconnect_ms": 0,
                     "next_proactive_recycle_ms": next_proactive_recycle_ms,
@@ -2475,6 +2784,11 @@ class DedicatedLiveWSManager:
                     with self.status_lock:
                         status = self.wallet_status[wallet]
                         status["last_data_ms"] = now
+                        status["last_data_or_snapshot_ms"] = now
+                        status["last_data_or_snapshot_at"] = utc_now_iso()
+                        status["recent_error_count"] = 0
+                        status["last_error"] = ""
+                        status["last_error_repr"] = ""
                 else:
                     reason = classify_ignored_ws_message(message)
                     with self.status_lock:
@@ -2484,8 +2798,18 @@ class DedicatedLiveWSManager:
                         status["last_ignored_message_preview"] = preview
                         if reason == "SNAPSHOT":
                             status["ignored_snapshot_count"] += 1
+                            status["last_data_or_snapshot_ms"] = now
+                            status["last_data_or_snapshot_at"] = utc_now_iso()
+                            status["recent_error_count"] = 0
+                            status["last_error"] = ""
+                            status["last_error_repr"] = ""
                         elif reason == "EMPTY_FILLS":
                             status["ignored_empty_message_count"] += 1
+                            status["last_data_or_snapshot_ms"] = now
+                            status["last_data_or_snapshot_at"] = utc_now_iso()
+                            status["recent_error_count"] = 0
+                            status["last_error"] = ""
+                            status["last_error_repr"] = ""
                         elif reason == "JSON_ERROR":
                             status["ignored_parse_error_count"] += 1
                     return
@@ -2559,6 +2883,8 @@ class DedicatedLiveWSManager:
                         return
                     status["status"] = "ERROR"
                     status["error_count"] += 1
+                    status["recent_error_count"] = int(status.get("recent_error_count") or 0) + 1
+                    status["last_error_at"] = utc_now_iso()
                     status["last_error"] = str(error)
                     status["last_error_repr"] = repr(error)
 
@@ -2598,6 +2924,8 @@ class DedicatedLiveWSManager:
                     status = self.wallet_status[wallet]
                     status["status"] = "ERROR"
                     status["error_count"] += 1
+                    status["recent_error_count"] = int(status.get("recent_error_count") or 0) + 1
+                    status["last_error_at"] = utc_now_iso()
                     status["last_error"] = str(exc)
                     status["last_error_repr"] = repr(exc)
             finally:
@@ -2654,6 +2982,8 @@ def last_csv_row(path: Path) -> Dict[str, Any]:
 
 def self_test() -> bool:
     global LIVE_POLL_ENABLED, LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD, LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT
+    global LIVE_AUTO_SEND_ENABLED, LIVE_AUTO_SEND_WALLET, LIVE_AUTO_SEND_MAX_PER_RUN
+    global LIVE_AUTO_SEND_MARKETABLE_BPS, LIVE_AUTO_CLOSE_WITH_CURRENT_QUOTE, LIVE_AUTO_SEND_USE_CURRENT_QUOTE_FOR_CLOSE
     global HL_PERP_META_BY_COIN_CACHE, fetch_live_fills_since, fetch_public_executable_quote, send_hyperliquid_order
 
     old_paths = (
@@ -2665,6 +2995,14 @@ def self_test() -> bool:
     old_poll_enabled = LIVE_POLL_ENABLED
     old_max_manual_order_notional = LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD
     old_max_close_adverse_diff = LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT
+    old_auto_send = (
+        LIVE_AUTO_SEND_ENABLED,
+        LIVE_AUTO_SEND_WALLET,
+        LIVE_AUTO_SEND_MAX_PER_RUN,
+        LIVE_AUTO_SEND_MARKETABLE_BPS,
+        LIVE_AUTO_CLOSE_WITH_CURRENT_QUOTE,
+        LIVE_AUTO_SEND_USE_CURRENT_QUOTE_FOR_CLOSE,
+    )
     old_meta_cache = HL_PERP_META_BY_COIN_CACHE
     old_private_key = os.environ.get("HL_LIVE_HL_PRIVATE_KEY")
     old_account_address = os.environ.get("HL_LIVE_HL_ACCOUNT_ADDRESS")
@@ -3143,6 +3481,105 @@ def self_test() -> bool:
             save_manual_live_positions({})
             # --- end close adverse diff guard tests ---
 
+            def make_auto_intent(intent_id: str, *, wallet_id: str = wallet, reason: str = "LIVE_WS_DETECTED", decision: str = "WOULD_PLACE_IOC_LIMIT", coin: str = "BTC", side: str = "BUY", manual: bool = False) -> Dict[str, Any]:
+                return {
+                    "created_at": utc_now_iso(), "intent_id": intent_id, "dry_run": True,
+                    "leader_wallet": wallet_id, "leader_fill_id": intent_id,
+                    "linked_leader_fill_ids": intent_id, "mode": "LIVE", "copy_mode": "fixed",
+                    "coin": coin, "side": side, "intent_type": "ENTRY", "reason": reason,
+                    "status": "DRY_RUN_FILLED", "leader_price": 1000.0, "target_price": 1000.0,
+                    "leader_size": 0.01, "leader_notional": 10.0, "copy_notional": 10.0,
+                    "copy_size": 0.01, "min_notional_policy": "DIRECT_EXECUTABLE",
+                    "diff_pct": 0.0, "max_diff_pct": 0.1, "daily_loss_limit": 0.0,
+                    "notes": "self-test auto-live row", "execution_decision": decision,
+                    "decision_reason": "LIVE_WS_FAST_PATH", "executable_price": 1000.0,
+                    "adverse_diff_pct": 0.0, "suggested_order_type": "IOC_LIMIT",
+                    "suggested_limit_price": 1000.0, "manual_reconcile_required": manual,
+                    "market_data_source": "LEADER_FILL_PRICE", "market_data_error": "",
+                }
+
+            def stage_auto_row(svc: DryRunLiveCopyService, row: Dict[str, Any]) -> None:
+                if not svc.append_would_send_order(row):
+                    raise AssertionError(f"failed to stage auto would-send row: {row}")
+
+            auto_cfg_live = LiveWalletConfig(wallet=wallet, mode="LIVE", enabled=True, copy_mode="fixed", fixed_notional=20.0)
+            auto_cfg_clo = LiveWalletConfig(wallet=wallet, mode="CLO", enabled=True, copy_mode="fixed", fixed_notional=20.0)
+            auto_cfg_off = LiveWalletConfig(wallet=wallet, mode="OFF", enabled=False, copy_mode="fixed", fixed_notional=20.0)
+            os.environ["HL_LIVE_HL_PRIVATE_KEY"] = "0x" + ("2" * 64)
+
+            LIVE_AUTO_SEND_ENABLED = False
+            LIVE_AUTO_SEND_WALLET = wallet
+            LIVE_AUTO_SEND_MAX_PER_RUN = 1
+            LIVE_AUTO_SEND_MARKETABLE_BPS = 0.0
+            LIVE_AUTO_CLOSE_WITH_CURRENT_QUOTE = True
+            LIVE_AUTO_SEND_USE_CURRENT_QUOTE_FOR_CLOSE = True
+            auto_disabled = DryRunLiveCopyService()
+            disabled_row = make_auto_intent("auto-disabled")
+            stage_auto_row(auto_disabled, disabled_row)
+            auto_disabled.maybe_auto_send_would_send(auto_cfg_live, disabled_row)
+            if auto_disabled.auto_send_attempted != 0:
+                raise AssertionError(f"disabled auto-send should not attempt: {auto_disabled.auto_send_summary()}")
+
+            LIVE_AUTO_SEND_ENABLED = True
+            LIVE_AUTO_SEND_WALLET = "0x9999999999999999999999999999999999999999"
+            wrong_wallet = DryRunLiveCopyService()
+            wrong_wallet_row = make_auto_intent("auto-wrong-wallet")
+            stage_auto_row(wrong_wallet, wrong_wallet_row)
+            wrong_wallet.maybe_auto_send_would_send(auto_cfg_live, wrong_wallet_row)
+            if wrong_wallet.auto_send_attempted != 0:
+                raise AssertionError(f"wrong wallet auto-send should not attempt: {wrong_wallet.auto_send_summary()}")
+
+            LIVE_AUTO_SEND_WALLET = wallet
+            off_service = DryRunLiveCopyService()
+            off_row = make_auto_intent("auto-off")
+            stage_auto_row(off_service, off_row)
+            off_service.maybe_auto_send_would_send(auto_cfg_off, off_row)
+            if off_service.auto_send_attempted != 0:
+                raise AssertionError(f"OFF wallet auto-send should not attempt: {off_service.auto_send_summary()}")
+
+            clo_entry_service = DryRunLiveCopyService()
+            clo_entry_row = make_auto_intent("auto-clo-entry")
+            stage_auto_row(clo_entry_service, clo_entry_row)
+            clo_entry_service.maybe_auto_send_would_send(auto_cfg_clo, clo_entry_row)
+            if clo_entry_service.auto_send_attempted != 0:
+                raise AssertionError(f"CLO entry auto-send should be blocked: {clo_entry_service.auto_send_summary()}")
+
+            def fake_auto_quote(coin: str, side: str) -> Dict[str, Any]:
+                return {"ok": True, "coin": coin, "side": side, "bid": 999.0, "ask": 1001.0, "executable_price": 1001.0 if side == "BUY" else 999.0, "source": "test", "error": ""}
+
+            fetch_public_executable_quote = fake_auto_quote
+            save_manual_live_positions({"BTC": {"signed_size": 0.01, "last_updated_at": utc_now_iso(), "last_oid": "auto", "last_intent_id": "auto"}})
+            clo_reduce_service = DryRunLiveCopyService()
+            clo_reduce_row = make_auto_intent("auto-clo-reduce", decision="WOULD_REDUCE_OR_EXIT", side="SELL")
+            stage_auto_row(clo_reduce_service, clo_reduce_row)
+            clo_reduce_service.maybe_auto_send_would_send(auto_cfg_clo, clo_reduce_row)
+            if clo_reduce_service.auto_send_attempted != 1 or clo_reduce_service.auto_send_filled != 1:
+                raise AssertionError(f"CLO reduce auto-send should fill through fake sender: {clo_reduce_service.auto_send_summary()}")
+
+            live_service = DryRunLiveCopyService()
+            live_row = make_auto_intent("auto-live-one")
+            stage_auto_row(live_service, live_row)
+            live_service.maybe_auto_send_would_send(auto_cfg_live, live_row)
+            if live_service.auto_send_attempted != 1 or live_service.auto_send_filled != 1:
+                raise AssertionError(f"LIVE auto-send should allow one eligible WS row: {live_service.auto_send_summary()}")
+            live_service.maybe_auto_send_would_send(auto_cfg_live, live_row)
+            if live_service.auto_send_attempted != 1:
+                raise AssertionError(f"duplicate auto intent should not re-send: {live_service.auto_send_summary()}")
+            second_live_row = make_auto_intent("auto-live-two")
+            stage_auto_row(live_service, second_live_row)
+            live_service.maybe_auto_send_would_send(auto_cfg_live, second_live_row)
+            if live_service.auto_send_attempted != 1 or live_service.auto_send_skipped <= 0:
+                raise AssertionError(f"auto max-per-run should block second send: {live_service.auto_send_summary()}")
+
+            poll_service = DryRunLiveCopyService()
+            poll_row = make_auto_intent("auto-poll", reason="LIVE_POLL_DETECTED", decision="WOULD_LATE_COPY")
+            poll_service.append_would_send_order(poll_row)
+            poll_service.maybe_auto_send_would_send(auto_cfg_live, poll_row)
+            if poll_service.auto_send_attempted != 0:
+                raise AssertionError(f"poll/recovery row must not auto-send: {poll_service.auto_send_summary()}")
+            fetch_public_executable_quote = old_fetch_public_executable_quote
+            save_manual_live_positions({})
+
             send_hyperliquid_order = old_send_hyperliquid_order
             import builtins
             real_import = builtins.__import__
@@ -3310,6 +3747,14 @@ def self_test() -> bool:
         LIVE_POLL_ENABLED = old_poll_enabled
         LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD = old_max_manual_order_notional
         LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT = old_max_close_adverse_diff
+        (
+            LIVE_AUTO_SEND_ENABLED,
+            LIVE_AUTO_SEND_WALLET,
+            LIVE_AUTO_SEND_MAX_PER_RUN,
+            LIVE_AUTO_SEND_MARKETABLE_BPS,
+            LIVE_AUTO_CLOSE_WITH_CURRENT_QUOTE,
+            LIVE_AUTO_SEND_USE_CURRENT_QUOTE_FOR_CLOSE,
+        ) = old_auto_send
         HL_PERP_META_BY_COIN_CACHE = old_meta_cache
         for key, value in {
             "HL_LIVE_HL_PRIVATE_KEY": old_private_key,
@@ -3359,6 +3804,7 @@ def main() -> None:
             wallet for wallet, cfg in sorted(config.items())
             if cfg.enabled and cfg.mode in {"LIVE", "CLO"}
         ][:LIVE_WS_MAX_WALLETS]
+        write_ws_health_initial(active_wallets, dry_run=True)
         service.run_once(replay_history=False)
         manager = DedicatedLiveWSManager(service, active_wallets)
 
