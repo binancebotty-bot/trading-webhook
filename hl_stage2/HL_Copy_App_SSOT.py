@@ -1036,6 +1036,23 @@ def _today_start_ms() -> int:
     return int(start.timestamp() * 1000)
 
 
+def _earliest_real_order_filled_ms() -> int:
+    earliest = 0
+    if not SEND_ATTEMPTS_CSV.exists():
+        return earliest
+    try:
+        with SEND_ATTEMPTS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                if str(row.get("status") or "").upper() != "ORDER_FILLED":
+                    continue
+                ts = _iso_to_ms(row.get("created_at") or row.get("timestamp") or row.get("time"))
+                if ts > 0 and (earliest <= 0 or ts < earliest):
+                    earliest = ts
+    except Exception:
+        return 0
+    return earliest
+
+
 def _summarize_exchange_closed_pnl_rows(rows: List[Dict[str, Any]], start_ms: int, end_ms: int) -> Dict[str, Any]:
     deduped: Dict[str, Dict[str, Any]] = {}
     for row in rows:
@@ -1063,12 +1080,21 @@ def _fetch_user_realized_pnl_snapshot(account: Optional[str] = None, baseline_ti
     account = (account or _public_account_address()).lower().strip()
     now_ms = int(time.time() * 1000)
     today_start_ms = _today_start_ms()
+    last_24h_start_ms = now_ms - 24 * 60 * 60 * 1000
+    seven_day_start_ms = now_ms - 7 * 24 * 60 * 60 * 1000
+    first_live_order_ms = _earliest_real_order_filled_ms()
     if not account:
         return {
             "ok": False,
             "status": "UNAVAILABLE",
             "reason": "ACCOUNT_ADDRESS_UNAVAILABLE",
             "realized_pnl_total": None,
+            "realized_pnl_today": None,
+            "realized_pnl_24h": None,
+            "realized_pnl_7d": None,
+            "realized_pnl_since_first_live_order": None,
+            "realized_pnl_selected": None,
+            "realized_pnl_selected_label": "",
             "realized_pnl_since_baseline": None,
             "realized_pnl_total_source": "",
             "realized_pnl_since_baseline_source": "",
@@ -1078,8 +1104,12 @@ def _fetch_user_realized_pnl_snapshot(account: Optional[str] = None, baseline_ti
         }
     baseline_timestamp = baseline_timestamp or _account_reconciliation_baseline_timestamp(account)
     baseline_ms = _iso_to_ms(baseline_timestamp)
-    seven_day_start_ms = now_ms - 7 * 24 * 60 * 60 * 1000
-    fetch_start_ms = min(x for x in (today_start_ms, seven_day_start_ms, baseline_ms if baseline_ms > 0 else today_start_ms) if x > 0)
+    fetch_candidates = [today_start_ms, last_24h_start_ms, seven_day_start_ms]
+    if baseline_ms > 0:
+        fetch_candidates.append(baseline_ms)
+    if first_live_order_ms > 0:
+        fetch_candidates.append(first_live_order_ms)
+    fetch_start_ms = min(x for x in fetch_candidates if x > 0)
     rows = _fetch_user_fills_by_time(account, fetch_start_ms, now_ms)
     if rows is None:
         return {
@@ -1091,6 +1121,18 @@ def _fetch_user_realized_pnl_snapshot(account: Optional[str] = None, baseline_ti
             "realized_pnl_total_source": "",
             "realized_pnl_today": None,
             "realized_pnl_today_source": "",
+            "realized_pnl_24h": None,
+            "realized_pnl_24h_source": "",
+            "realized_pnl_7d": None,
+            "realized_pnl_7d_source": "",
+            "realized_pnl_since_first_live_order": None,
+            "realized_pnl_since_first_live_order_source": "",
+            "realized_pnl_selected": None,
+            "realized_pnl_selected_source": "",
+            "realized_pnl_selected_label": "",
+            "realized_pnl_selected_start": "",
+            "realized_pnl_selected_end": datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).isoformat(),
+            "realized_pnl_selected_fill_count": 0,
             "realized_pnl_since_baseline": None,
             "realized_pnl_since_baseline_source": "",
             "realized_pnl_all_available_window": None,
@@ -1103,20 +1145,53 @@ def _fetch_user_realized_pnl_snapshot(account: Optional[str] = None, baseline_ti
             "fee_policy": "exchange_closedPnl_as_reported",
         }
     today = _summarize_exchange_closed_pnl_rows(rows, today_start_ms, now_ms)
+    last_24h = _summarize_exchange_closed_pnl_rows(rows, last_24h_start_ms, now_ms)
+    last_7d = _summarize_exchange_closed_pnl_rows(rows, seven_day_start_ms, now_ms)
+    since_first_live_order = (
+        _summarize_exchange_closed_pnl_rows(rows, first_live_order_ms, now_ms)
+        if first_live_order_ms > 0
+        else {"closed_pnl_sum": None, "fee_sum": None, "fill_count": 0, "nonzero_closed_pnl_count": 0, "rows": []}
+    )
     since_baseline = _summarize_exchange_closed_pnl_rows(rows, baseline_ms, now_ms) if baseline_ms > 0 else {"closed_pnl_sum": 0.0, "fee_sum": 0.0, "fill_count": 0, "nonzero_closed_pnl_count": 0, "rows": []}
     all_available = _summarize_exchange_closed_pnl_rows(rows, fetch_start_ms, now_ms)
     latest_rows = all_available["rows"][-250:] if isinstance(all_available.get("rows"), list) else []
     source = "hyperliquid.info.userFillsByTime.closedPnl"
+    selected = since_first_live_order if first_live_order_ms > 0 and since_first_live_order.get("fill_count", 0) else last_24h
+    selected_label = "since first live order" if selected is since_first_live_order else "last 24h"
+    selected_start_ms = first_live_order_ms if selected is since_first_live_order else last_24h_start_ms
+    if not selected.get("fill_count", 0):
+        selected = today
+        selected_label = "today"
+        selected_start_ms = today_start_ms
     return {
         "ok": True,
         "status": "OK",
         "account_address": account,
-        "realized_pnl_total": today["closed_pnl_sum"],
-        "realized_pnl_total_source": f"{source}; today_default",
+        "realized_pnl_total": selected["closed_pnl_sum"],
+        "realized_pnl_total_source": f"{source}; selected={selected_label}",
         "realized_pnl_today": today["closed_pnl_sum"],
         "realized_pnl_today_source": f"{source}; today Europe/London",
         "realized_pnl_today_fill_count": today["fill_count"],
         "realized_pnl_today_nonzero_count": today["nonzero_closed_pnl_count"],
+        "realized_pnl_24h": last_24h["closed_pnl_sum"],
+        "realized_pnl_24h_source": f"{source}; last 24h",
+        "realized_pnl_24h_fill_count": last_24h["fill_count"],
+        "realized_pnl_24h_nonzero_count": last_24h["nonzero_closed_pnl_count"],
+        "realized_pnl_7d": last_7d["closed_pnl_sum"],
+        "realized_pnl_7d_source": f"{source}; last 7d",
+        "realized_pnl_7d_fill_count": last_7d["fill_count"],
+        "realized_pnl_7d_nonzero_count": last_7d["nonzero_closed_pnl_count"],
+        "realized_pnl_since_first_live_order": since_first_live_order["closed_pnl_sum"],
+        "realized_pnl_since_first_live_order_source": f"{source}; start=earliest send_attempts ORDER_FILLED",
+        "realized_pnl_since_first_live_order_start": datetime.fromtimestamp(first_live_order_ms / 1000, tz=timezone.utc).isoformat() if first_live_order_ms > 0 else "",
+        "realized_pnl_since_first_live_order_fill_count": since_first_live_order["fill_count"],
+        "realized_pnl_since_first_live_order_nonzero_count": since_first_live_order["nonzero_closed_pnl_count"],
+        "realized_pnl_selected": selected["closed_pnl_sum"],
+        "realized_pnl_selected_source": f"{source}; selected={selected_label}",
+        "realized_pnl_selected_label": selected_label,
+        "realized_pnl_selected_start": datetime.fromtimestamp(selected_start_ms / 1000, tz=timezone.utc).isoformat() if selected_start_ms > 0 else "",
+        "realized_pnl_selected_end": datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).isoformat(),
+        "realized_pnl_selected_fill_count": selected["fill_count"],
         "realized_pnl_since_baseline": since_baseline["closed_pnl_sum"],
         "realized_pnl_since_baseline_source": f"{source}; start=account_reconciliation.baseline_timestamp",
         "realized_pnl_since_baseline_fill_count": since_baseline["fill_count"],
@@ -1129,6 +1204,10 @@ def _fetch_user_realized_pnl_snapshot(account: Optional[str] = None, baseline_ti
         "closed_pnl_sum": today["closed_pnl_sum"],
         "fee_sum": today["fee_sum"],
         "fee_sum_today": today["fee_sum"],
+        "fee_sum_24h": last_24h["fee_sum"],
+        "fee_sum_7d": last_7d["fee_sum"],
+        "fee_sum_since_first_live_order": since_first_live_order["fee_sum"],
+        "fee_sum_selected": selected["fee_sum"],
         "fee_sum_since_baseline": since_baseline["fee_sum"],
         "fee_sum_all_available_window": all_available["fee_sum"],
         "fee_policy": "exchange_closedPnl_as_reported",
@@ -1149,6 +1228,11 @@ def _append_exchange_history(snapshot: Dict[str, Any], manual_summary: Dict[str,
         "unified_portfolio_value": fnum(snapshot.get("unified_portfolio_value")) if is_present_num(snapshot.get("unified_portfolio_value")) else None,
         "realized_pnl_since_baseline": fnum(snapshot.get("realized_pnl_since_baseline")) if is_present_num(snapshot.get("realized_pnl_since_baseline")) else None,
         "realized_pnl_today": fnum(snapshot.get("realized_pnl_today")) if is_present_num(snapshot.get("realized_pnl_today")) else None,
+        "realized_pnl_selected": fnum(snapshot.get("realized_pnl_selected")) if is_present_num(snapshot.get("realized_pnl_selected")) else None,
+        "realized_pnl_selected_label": snapshot.get("realized_pnl_selected_label", ""),
+        "realized_pnl_24h": fnum(snapshot.get("realized_pnl_24h")) if is_present_num(snapshot.get("realized_pnl_24h")) else None,
+        "realized_pnl_7d": fnum(snapshot.get("realized_pnl_7d")) if is_present_num(snapshot.get("realized_pnl_7d")) else None,
+        "realized_pnl_since_first_live_order": fnum(snapshot.get("realized_pnl_since_first_live_order")) if is_present_num(snapshot.get("realized_pnl_since_first_live_order")) else None,
         "withdrawable": fnum(snapshot.get("withdrawable")),
         "manual_live_exposure": fnum(manual_summary.get("manual_live_exposure_estimate")),
         "open_position_count": inum(snapshot.get("open_position_count") or len(snapshot.get("open_positions", []))),
@@ -1171,6 +1255,7 @@ def _fetch_exchange_account_snapshot(max_age_sec: float = 15.0) -> Dict[str, Any
         and cached.get("raw_total_usd_source")
         and cached.get("spot_account_source")
         and cached.get("realized_pnl_since_baseline_source") is not None
+        and cached.get("realized_pnl_selected_source") is not None
         and now_ms - inum(cached.get("fetched_at_ms")) <= int(max_age_sec * 1000)
     ):
         return cached
@@ -1309,6 +1394,25 @@ def _fetch_exchange_account_snapshot(max_age_sec: float = 15.0) -> Dict[str, Any
             "realized_pnl_today_source": realized_snapshot.get("realized_pnl_today_source", ""),
             "realized_pnl_today_fill_count": realized_snapshot.get("realized_pnl_today_fill_count", 0),
             "realized_pnl_today_nonzero_count": realized_snapshot.get("realized_pnl_today_nonzero_count", 0),
+            "realized_pnl_24h": realized_snapshot.get("realized_pnl_24h"),
+            "realized_pnl_24h_source": realized_snapshot.get("realized_pnl_24h_source", ""),
+            "realized_pnl_24h_fill_count": realized_snapshot.get("realized_pnl_24h_fill_count", 0),
+            "realized_pnl_24h_nonzero_count": realized_snapshot.get("realized_pnl_24h_nonzero_count", 0),
+            "realized_pnl_7d": realized_snapshot.get("realized_pnl_7d"),
+            "realized_pnl_7d_source": realized_snapshot.get("realized_pnl_7d_source", ""),
+            "realized_pnl_7d_fill_count": realized_snapshot.get("realized_pnl_7d_fill_count", 0),
+            "realized_pnl_7d_nonzero_count": realized_snapshot.get("realized_pnl_7d_nonzero_count", 0),
+            "realized_pnl_since_first_live_order": realized_snapshot.get("realized_pnl_since_first_live_order"),
+            "realized_pnl_since_first_live_order_source": realized_snapshot.get("realized_pnl_since_first_live_order_source", ""),
+            "realized_pnl_since_first_live_order_start": realized_snapshot.get("realized_pnl_since_first_live_order_start", ""),
+            "realized_pnl_since_first_live_order_fill_count": realized_snapshot.get("realized_pnl_since_first_live_order_fill_count", 0),
+            "realized_pnl_since_first_live_order_nonzero_count": realized_snapshot.get("realized_pnl_since_first_live_order_nonzero_count", 0),
+            "realized_pnl_selected": realized_snapshot.get("realized_pnl_selected"),
+            "realized_pnl_selected_source": realized_snapshot.get("realized_pnl_selected_source", ""),
+            "realized_pnl_selected_label": realized_snapshot.get("realized_pnl_selected_label", ""),
+            "realized_pnl_selected_start": realized_snapshot.get("realized_pnl_selected_start", ""),
+            "realized_pnl_selected_end": realized_snapshot.get("realized_pnl_selected_end", ""),
+            "realized_pnl_selected_fill_count": realized_snapshot.get("realized_pnl_selected_fill_count", 0),
             "realized_pnl_since_baseline": realized_snapshot.get("realized_pnl_since_baseline"),
             "realized_pnl_since_baseline_source": realized_snapshot.get("realized_pnl_since_baseline_source", ""),
             "realized_pnl_since_baseline_fill_count": realized_snapshot.get("realized_pnl_since_baseline_fill_count", 0),
@@ -1321,6 +1425,10 @@ def _fetch_exchange_account_snapshot(max_age_sec: float = 15.0) -> Dict[str, Any
             "closed_pnl_sum": realized_snapshot.get("closed_pnl_sum"),
             "fee_sum": realized_snapshot.get("fee_sum"),
             "fee_sum_today": realized_snapshot.get("fee_sum_today"),
+            "fee_sum_24h": realized_snapshot.get("fee_sum_24h"),
+            "fee_sum_7d": realized_snapshot.get("fee_sum_7d"),
+            "fee_sum_since_first_live_order": realized_snapshot.get("fee_sum_since_first_live_order"),
+            "fee_sum_selected": realized_snapshot.get("fee_sum_selected"),
             "fee_sum_since_baseline": realized_snapshot.get("fee_sum_since_baseline"),
             "fee_sum_all_available_window": realized_snapshot.get("fee_sum_all_available_window"),
             "fee_policy": realized_snapshot.get("fee_policy", "exchange_closedPnl_as_reported"),
@@ -2010,44 +2118,35 @@ def _exchange_fill_match_id(row: Dict[str, Any]) -> str:
     return str(row.get("hash") or row.get("tid") or row.get("oid") or f"{row.get('time')}:{row.get('coin')}:{row.get('side')}:{row.get('sz')}:{row.get('px')}")
 
 
+def _row_client_id(row: Dict[str, Any]) -> str:
+    return str(
+        row.get("cloid")
+        or row.get("client_order_id")
+        or row.get("clientOrderId")
+        or row.get("client_id")
+        or row.get("cid")
+        or ""
+    ).strip()
+
+
 def _match_exchange_fill_to_attempt(attempt: Dict[str, Any], fills: List[Dict[str, Any]], used: set[str]) -> Optional[Dict[str, Any]]:
     attempt_oid = str(attempt.get("oid") or "").strip()
-    if attempt_oid:
-        for fill in fills:
-            mid = _exchange_fill_match_id(fill)
-            if mid in used:
-                continue
-            if str(fill.get("oid") or "").strip() == attempt_oid:
-                used.add(mid)
-                return fill
-    attempt_ms = _send_attempt_time_ms(attempt)
-    coin = str(attempt.get("coin") or "").upper()
-    side = str(attempt.get("actual_side") or attempt.get("side") or "").upper()
-    size = fnum(attempt.get("fill_size"))
-    best: Optional[Dict[str, Any]] = None
-    best_delta = 10**18
+    attempt_client_id = _row_client_id(attempt)
+    if not attempt_oid and not attempt_client_id:
+        return None
     for fill in fills:
         mid = _exchange_fill_match_id(fill)
         if mid in used:
             continue
-        if coin and str(fill.get("coin") or "").upper() != coin:
-            continue
-        if side and _exchange_fill_side(fill) != side:
-            continue
-        fill_ms = inum(fill.get("time") or fill.get("timestamp") or fill.get("ts"))
-        if attempt_ms and abs(fill_ms - attempt_ms) > 5 * 60 * 1000:
-            continue
-        if size > 0:
-            fsz = fnum(fill.get("sz") or fill.get("size"))
-            if abs(fsz - size) > max(1e-9, abs(size) * 0.02):
-                continue
-        delta = abs(fill_ms - attempt_ms) if attempt_ms and fill_ms else 0
-        if delta < best_delta:
-            best = fill
-            best_delta = delta
-    if best is not None:
-        used.add(_exchange_fill_match_id(best))
-    return best
+        fill_oid = str(fill.get("oid") or "").strip()
+        fill_client_id = _row_client_id(fill)
+        if attempt_oid and fill_oid and fill_oid == attempt_oid:
+            used.add(mid)
+            return fill
+        if attempt_client_id and fill_client_id and fill_client_id == attempt_client_id:
+            used.add(mid)
+            return fill
+    return None
 
 
 def _build_live_leader_performance(
@@ -2215,28 +2314,20 @@ def _build_live_leader_performance(
         real_wfills = [f for f in wfills if not _is_dry_run_live_fill(f)]
         dry_run_realized_pnl = round(sum(fnum(f.get("realized_pnl", 0)) for f in dry_run_wfills), 4) if dry_run_wfills else 0.0
         if real_wfills:
-            total_realized = sum(fnum(f.get("realized_pnl", 0)) for f in real_wfills)
             total_fees = sum(fnum(f.get("fee", 0)) for f in real_wfills)
-            realized_pnl = round(total_realized, 4)
-            pnl_status = "EXACT"
-            attribution_quality = "ACTUAL_EXCHANGE_CLOSED_PNL"
-            running = 0.0
-            for f in real_wfills:
-                running += fnum(f.get("realized_pnl", 0))
-                pnl_points.append({
-                    "timestamp": f.get("created_at") or f.get("timestamp_iso") or f.get("time") or "",
-                    "value": round(running, 6),
-                })
+            pnl_status = "ACCOUNT_LEVEL_ONLY"
+            attribution_quality = "WALLET_REALIZED_REQUIRES_EXACT_EXCHANGE_FILL_ID"
+            data_quality_notes.append("account realised PnL is shown in header; wallet attribution unavailable")
             if abs(total_fees) > 1e-8:
-                data_quality_notes.append(f"fees={round(total_fees, 4)}")
+                data_quality_notes.append(f"live_fills fees diagnostic={round(total_fees, 4)}")
             if dry_run_wfills:
                 data_quality_notes.append(f"dry-run fills excluded={len(dry_run_wfills)}")
         elif not filled_attempts:
             data_quality_notes.append("no fills yet")
         else:
-            pnl_status = "ESTIMATED_FROM_REAL_ORDER_FILLS"
-            attribution_quality = "ORDER_FILLED_WITHOUT_CLOSED_PNL"
-            data_quality_notes.append("ORDER_FILLED send_attempts present; closed PnL unavailable")
+            pnl_status = "ACCOUNT_LEVEL_ONLY"
+            attribution_quality = "WALLET_REALIZED_REQUIRES_EXACT_EXCHANGE_FILL_ID"
+            data_quality_notes.append("account realised PnL is shown in header; wallet attribution unavailable")
         if wfills and not real_wfills and dry_run_wfills:
             data_quality_notes.append("dry-run live_fills excluded from live PnL")
 
@@ -2251,9 +2342,13 @@ def _build_live_leader_performance(
         matched_closed_count = sum(1 for fill in matched_exchange_fills if abs(fnum(fill.get("closedPnl") if "closedPnl" in fill else fill.get("closed_pnl"))) > 1e-12)
         if matched_exchange_fills:
             confirmed_realized_pnl = round(sum(fnum(fill.get("closedPnl") if "closedPnl" in fill else fill.get("closed_pnl")) for fill in matched_exchange_fills), 8)
-            realized_match_status = "MATCHED_EXCHANGE_USER_FILLS" if matched_closed_count else "MATCHED_USER_FILLS_CLOSEDPNL_ZERO"
+            realized_match_status = "EXACT_ID_MATCHED_EXCHANGE_USER_FILLS" if matched_closed_count else "EXACT_ID_MATCHED_USER_FILLS_CLOSEDPNL_ZERO"
             if realized_pnl is None and abs(confirmed_realized_pnl) > 1e-12:
                 realized_pnl = confirmed_realized_pnl
+                pnl_status = "EXACT"
+                attribution_quality = "EXACT_ID_EXCHANGE_CLOSED_PNL"
+        elif filled_attempts:
+            realized_match_status = "ACCOUNT_LEVEL_ONLY"
 
         open_positions: List[Dict[str, Any]] = []
         current_exposure = 0.0
@@ -2309,6 +2404,9 @@ def _build_live_leader_performance(
         elif pnl_status == "EXACT":
             if unrealized_pnl is not None and open_positions:
                 pass  # already exact realized; unrealized is a bonus
+        elif pnl_status == "ACCOUNT_LEVEL_ONLY":
+            if unrealized_pnl is not None and open_positions:
+                attribution_quality = "ACCOUNT_LEVEL_REALIZED_OPEN_PNL_SAFE"
         elif unrealized_pnl is not None and open_positions:
             if realized_pnl is None:
                 pnl_status = "OPEN_ONLY"
@@ -2318,8 +2416,8 @@ def _build_live_leader_performance(
         elif pnl_status == "ESTIMATED_FROM_REAL_ORDER_FILLS":
             pass
         elif not has_unrealized and not real_wfills and filled_attempts:
-            pnl_status = "ESTIMATED_FROM_REAL_ORDER_FILLS"
-            attribution_quality = "ORDER_FILLED_WITHOUT_CLOSED_PNL"
+            pnl_status = "ACCOUNT_LEVEL_ONLY"
+            attribution_quality = "WALLET_REALIZED_REQUIRES_EXACT_EXCHANGE_FILL_ID"
 
         net_pnl: Optional[float] = None
         if realized_pnl is not None or unrealized_pnl is not None:
@@ -2345,6 +2443,7 @@ def _build_live_leader_performance(
             "EXACT": "Exact closed PnL",
             "OPEN_ONLY": "Open PnL",
             "ESTIMATED_FROM_REAL_ORDER_FILLS": "Real fills",
+            "ACCOUNT_LEVEL_ONLY": "Account-level only",
             "AMBIGUOUS_COIN_SHARED": "Shared coin",
             "N/A": "No PnL yet",
         }
@@ -4901,19 +5000,24 @@ def render_live_copy_control_panel() -> str:
         <button type="button" class="active" data-lc-graph-mode="account">Account</button>
         <button type="button" data-lc-graph-mode="wallet_pnl">Selected Wallet PnL</button>
         <button type="button" data-lc-graph-mode="exposure">Exposure</button>
-        <button type="button" class="active" data-lc-graph-scale="1d">1D</button>
+        <button type="button" data-lc-graph-scale="1d">1D</button>
         <button type="button" data-lc-graph-scale="7d">7D</button>
-        <button type="button" data-lc-graph-scale="all">ALL</button>
+        <button type="button" class="active" data-lc-graph-scale="all">ALL</button>
+        <input id="lcGraphStart" type="datetime-local" title="Start datetime">
+        <input id="lcGraphEnd" type="datetime-local" title="End datetime">
+        <button type="button" id="lcGraphApplyRange">Apply</button>
+        <button type="button" id="lcGraphResetRange">Reset</button>
       </div>
     </div>
     <div class="lc-chart-wrap">
       <svg id="lcEquityChart" viewBox="0 0 1000 320" preserveAspectRatio="none" aria-label="Portfolio value change">
         <line id="lcZeroLine" x1="40" y1="300" x2="960" y2="300" stroke="rgba(148,163,184,.45)" stroke-width="1" stroke-dasharray="4 4"/>
-        <path id="lcExchangeFill" fill="rgba(88,166,255,.08)" d=""/>
-        <polyline id="lcExchangePath" points="" fill="none" stroke="#58a6ff" stroke-width="1.4"/>
-        <polyline id="lcRealizedPath" points="" fill="none" stroke="#3fb950" stroke-width="1.4"/>
+        <path id="lcExchangeFill" fill="rgba(33,193,107,.08)" d=""/>
+        <polyline id="lcExchangePath" points="" fill="none" stroke="#3fb950" stroke-width="1.5"/>
+        <polyline id="lcRealizedPath" points="" fill="none" stroke="#58a6ff" stroke-width="1.4"/>
+        <polyline id="lcDrawdownPath" points="" fill="none" stroke="#ff5263" stroke-width="1.4"/>
         <text x="42" y="34" class="lc-axis" id="lcYMax"></text><text x="42" y="155" class="lc-axis" id="lcYMid"></text><text x="42" y="296" class="lc-axis" id="lcYMin"></text>
-        <g><rect x="705" y="40" width="12" height="12" fill="#58a6ff"/><text x="723" y="50" class="lc-axis" id="lcGraphLegend">Portfolio value change</text><rect x="705" y="58" width="12" height="12" fill="#3fb950"/><text x="723" y="68" class="lc-axis" id="lcGraphLegend2">Realized PnL</text></g>
+        <g><rect x="665" y="40" width="12" height="12" fill="#3fb950"/><text x="683" y="50" class="lc-axis" id="lcGraphLegend">Total account PnL</text><rect x="665" y="58" width="12" height="12" fill="#58a6ff"/><text x="683" y="68" class="lc-axis" id="lcGraphLegend2">Realized PnL</text><rect x="665" y="76" width="12" height="12" fill="#ff5263"/><text x="683" y="86" class="lc-axis" id="lcGraphLegend3">Drawdown</text></g>
       </svg>
     </div>
   </section>
@@ -5008,7 +5112,7 @@ def render_live_copy_control_panel() -> str:
 const root=document.getElementById('liveCopyPanel'); if(!root) return;
 const status=root.querySelector('#lcStatus');
 let lcConfig={wallets:{},archived_wallets:{}}, lcHealth={wallets:{}}, lcAudit={last_rows:[]};
-let lcGraphMode='account', lcGraphScale='1d', lcSelectedWallet='';
+let lcGraphMode='account', lcGraphScale='all', lcSelectedWallet='', lcGraphStartMs=0, lcGraphEndMs=0;
 function h(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function msg(t,bad){if(status){status.textContent=t||'';status.className='lc-status '+(bad?'lc-bad':'lc-ok');}}
 async function jget(url){const r=await fetch(url,{headers:{'x-requested-with':'fetch'}});return await r.json();}
@@ -5032,100 +5136,103 @@ function rowPayload(tr){return {wallet:tr.dataset.wallet,mode:tr.querySelector('
 function age(ms){const n=Number(ms||0);if(!n)return '—';const d=Math.max(0,Date.now()-n);return d<60000?Math.round(d/1000)+'s':Math.round(d/60000)+'m';}
 function time(ms){const n=Number(ms||0);return n?new Date(n).toLocaleTimeString():'—';}
 function tsOf(p){const raw=p.fetched_at_ms||p.timestamp_ms||p.ts||p.time_ms; if(Number(raw)>0)return Number(raw); const s=p.timestamp||p.updated_at||p.created_at||p.time||''; const t=Date.parse(s); return Number.isFinite(t)?t:0;}
-function filterScale(points){if(lcGraphScale==='all')return points; const days=lcGraphScale==='7d'?7:1; const cutoff=Date.now()-days*86400000; return points.filter(p=>tsOf(p)>=cutoff);}
+function localInputMs(v){const t=Date.parse(v||'');return Number.isFinite(t)?t:0;}
+function graphRangeLabel(){if(lcGraphScale==='custom'){const s=lcGraphStartMs?new Date(lcGraphStartMs).toLocaleString():'start';const e=lcGraphEndMs?new Date(lcGraphEndMs).toLocaleString():'now';return `${s} to ${e}`;}return lcGraphScale.toUpperCase();}
+function filterScale(points){let start=0,end=0;if(lcGraphScale==='custom'){start=lcGraphStartMs;end=lcGraphEndMs;}else if(lcGraphScale!=='all'){const days=lcGraphScale==='7d'?7:1;start=Date.now()-days*86400000;}return points.filter(p=>{const t=tsOf(p);if(!t)return false;if(start&&t<start)return false;if(end&&t>end)return false;return true;});}
+function linePts(series,xOf,yOf){return series.map(p=>`${xOf(p)},${yOf(p.value)}`).join(' ');}
+function clearGraphText(message,label){
+ const realizedPath=root.querySelector('#lcRealizedPath'), drawdownPath=root.querySelector('#lcDrawdownPath');
+ if(message&&root.querySelector('#lcGraphSubtitle')) root.querySelector('#lcGraphSubtitle').textContent=message;
+ root.querySelector('#lcExchangePath').setAttribute('points','');
+ root.querySelector('#lcExchangeFill').setAttribute('d','');
+ if(realizedPath) realizedPath.setAttribute('points','');
+ if(drawdownPath) drawdownPath.setAttribute('points','');
+ ['#lcYMax','#lcYMid','#lcYMin'].forEach(id=>{const el=root.querySelector(id);if(el)el.textContent='';});
+ const legend=root.querySelector('#lcGraphLegend'), legend2=root.querySelector('#lcGraphLegend2'), legend3=root.querySelector('#lcGraphLegend3');
+ if(legend) legend.textContent=label||'Total account PnL';
+ if(legend2) legend2.textContent='';
+ if(legend3) legend3.textContent='';
+}
 function renderGraph(){
  const sub=root.querySelector('#lcGraphSubtitle');
  const legend=root.querySelector('#lcGraphLegend');
  const legend2=root.querySelector('#lcGraphLegend2');
  const realizedPath=root.querySelector('#lcRealizedPath');
+ const drawdownPath=root.querySelector('#lcDrawdownPath');
  const zeroLine=root.querySelector('#lcZeroLine');
- let points=[], realizedPoints=[], label='Portfolio value change', zeroBase=false;
+ let points=[], realizedPoints=[], drawdownPoints=[], label='Total account PnL';
  if(lcGraphMode==='account'){
   const hist=lcAudit.exchange_account_history||lcAudit.exchange_history||[];
   const hasUnified=hist.some(p=>isNum(p.unified_portfolio_value));
-  label=hasUnified?'Portfolio value change':'Clearinghouse value change (fallback)';
-  const raw=filterScale(hist.map(p=>({timestamp:p.timestamp||p.updated_at||'', value:hasUnified?num(p.unified_portfolio_value,NaN):num(p.account_value,NaN), realized:isNum(p.realized_pnl_today)?num(p.realized_pnl_today,NaN):num(p.realized_pnl_since_baseline,NaN)}))).filter(p=>isNum(p.value));
-  const base=raw.length?raw[0].value:NaN;
-  points=raw.map(p=>({timestamp:p.timestamp, value:p.value-base}));
-  realizedPoints=raw.filter(p=>isNum(p.realized)).map(p=>({timestamp:p.timestamp, value:p.realized}));
-  const snap=lcAudit.exchange_account_snapshot||{};
-  if(!realizedPoints.length && (isNum(snap.realized_pnl_today)||isNum(snap.realized_pnl_since_baseline)) && raw.length){
-   realizedPoints=raw.map(p=>({timestamp:p.timestamp, value:isNum(snap.realized_pnl_today)?num(snap.realized_pnl_today,0):num(snap.realized_pnl_since_baseline,0)}));
-  }
+  label=hasUnified?'Total account PnL / portfolio value change':'Clearinghouse value change (fallback)';
+  const visible=filterScale(hist.map(p=>({timestamp:p.timestamp||p.updated_at||'', timestamp_ms:tsOf(p), value:hasUnified?num(p.unified_portfolio_value,NaN):num(p.account_value,NaN), realized:isNum(p.realized_pnl_selected)?num(p.realized_pnl_selected,NaN):isNum(p.realized_pnl_since_first_live_order)?num(p.realized_pnl_since_first_live_order,NaN):isNum(p.realized_pnl_24h)?num(p.realized_pnl_24h,NaN):isNum(p.realized_pnl_today)?num(p.realized_pnl_today,NaN):NaN}))).filter(p=>isNum(p.value)).sort((a,b)=>a.timestamp_ms-b.timestamp_ms);
+  if(visible.length<2){clearGraphText(`Not enough points in selected range (${graphRangeLabel()}).`,label);return;}
+  const realizedFallback=lcAudit.exchange_account_snapshot||{};
+  const fallbackRealized=isNum(realizedFallback.realized_pnl_selected)?num(realizedFallback.realized_pnl_selected,0):isNum(realizedFallback.realized_pnl_since_first_live_order)?num(realizedFallback.realized_pnl_since_first_live_order,0):isNum(realizedFallback.realized_pnl_24h)?num(realizedFallback.realized_pnl_24h,0):isNum(realizedFallback.realized_pnl_today)?num(realizedFallback.realized_pnl_today,0):NaN;
+  const base=visible[0].value;
+  let peak=0;
+  points=visible.map(p=>({timestamp:p.timestamp,timestamp_ms:p.timestamp_ms,value:p.value-base}));
+  realizedPoints=visible.map(p=>({timestamp:p.timestamp,timestamp_ms:p.timestamp_ms,value:isNum(p.realized)?p.realized:fallbackRealized})).filter(p=>isNum(p.value));
+  drawdownPoints=points.map(p=>{peak=Math.max(peak,p.value);return {timestamp:p.timestamp,timestamp_ms:p.timestamp_ms,value:p.value-peak};});
  } else {
   const perf=(lcAudit.live_leader_performance||{})[String(lcSelectedWallet||'').toLowerCase()]||{};
   const src=lcGraphMode==='wallet_pnl'?(perf.pnl_series||[]):(perf.exposure_series||[]);
   label=lcGraphMode==='wallet_pnl'?'Selected wallet live PnL':'Selected wallet exposure';
-  points=src.map(p=>({timestamp:p.timestamp||p.updated_at||'', value:num(p.value,0)}));
+  points=src.map(p=>({timestamp:p.timestamp||p.updated_at||'', timestamp_ms:tsOf(p), value:num(p.value,0)}));
   if(!lcSelectedWallet || !points.length){
-   if(sub) sub.textContent=lcGraphMode==='wallet_pnl'?'wallet PnL history unavailable; click a wallet with live_fills history':'wallet exposure history unavailable; click a wallet with open live exposure';
-   root.querySelector('#lcExchangePath').setAttribute('points','');
-   root.querySelector('#lcExchangeFill').setAttribute('d','');
-   if(realizedPath) realizedPath.setAttribute('points','');
-   if(legend) legend.textContent=label;
-   if(legend2) legend2.textContent='';
-   ['#lcYMax','#lcYMid','#lcYMin'].forEach(id=>{const el=root.querySelector(id);if(el)el.textContent='';});
+   clearGraphText(lcGraphMode==='wallet_pnl'?'wallet PnL history unavailable; click a wallet with live_fills history':'wallet exposure history unavailable; click a wallet with open live exposure',label);
    return;
   }
  }
- if(lcGraphMode!=='account') points=filterScale(points).filter(p=>isNum(p.value));
- if(points.length<2 && lcGraphMode==='account') {
-  const hist=lcAudit.exchange_account_history||lcAudit.exchange_history||[];
-  const hasUnified=hist.some(p=>isNum(p.unified_portfolio_value));
-  label=hasUnified?'Portfolio value change':'Clearinghouse value change (fallback)';
-  const raw=hist.map(p=>({timestamp:p.timestamp||p.updated_at||'', value:hasUnified?num(p.unified_portfolio_value,NaN):num(p.account_value,NaN), realized:isNum(p.realized_pnl_today)?num(p.realized_pnl_today,NaN):num(p.realized_pnl_since_baseline,NaN)})).filter(p=>isNum(p.value));
-  const base=raw.length?raw[0].value:NaN;
-  points=raw.map(p=>({timestamp:p.timestamp, value:p.value-base}));
-  realizedPoints=raw.filter(p=>isNum(p.realized)).map(p=>({timestamp:p.timestamp, value:p.realized}));
- }
+ if(lcGraphMode!=='account') points=filterScale(points).filter(p=>isNum(p.value)).sort((a,b)=>a.timestamp_ms-b.timestamp_ms);
  if(points.length<2){
-  if(sub) sub.textContent=lcGraphMode==='account'?'Portfolio value change from exchange snapshots; realised PnL from actual user closedPnl. History warming up.':'selected wallet series has fewer than 2 live audit points';
-  root.querySelector('#lcExchangePath').setAttribute('points','');
-  root.querySelector('#lcExchangeFill').setAttribute('d','');
-  if(realizedPath) realizedPath.setAttribute('points','');
-  if(legend) legend.textContent=label;
-  if(legend2) legend2.textContent=lcGraphMode==='account'?'Realized PnL':'';
-  ['#lcYMax','#lcYMid','#lcYMin'].forEach(id=>{const el=root.querySelector(id);if(el)el.textContent='';});
+  clearGraphText(`Not enough points in selected range (${graphRangeLabel()}).`,label);
   return;
  }
- const vals=points.map(p=>num(p.value,0));
- const rvals=realizedPoints.map(p=>num(p.value,0));
- const allVals=vals.concat(rvals).concat([0]);
+ const allSeries=points.concat(realizedPoints).concat(drawdownPoints);
+ const allVals=allSeries.map(p=>num(p.value,0)).concat([0]);
  const mn=Math.min(...allVals), mx=Math.max(...allVals), pad=Math.max(Math.abs(mx-mn)*0.08, 1);
  const ymin=mn-pad, ymax=mx+pad, rng=ymax-ymin||1;
  const getY2=v=>300-((num(v)-ymin)/rng)*260;
- const getX=(i,len)=>40+(i/(Math.max(1,len-1)))*920;
- const pts=vals.map((v,i)=>`${getX(i,vals.length)},${getY2(v)}`).join(' ');
+ const minTs=Math.min(...points.map(p=>p.timestamp_ms).filter(Boolean)), maxTs=Math.max(...points.map(p=>p.timestamp_ms).filter(Boolean)), trng=maxTs-minTs||1;
+ const getX=p=>40+(((p.timestamp_ms||minTs)-minTs)/trng)*920;
+ const pts=linePts(points,getX,getY2);
  root.querySelector('#lcExchangePath').setAttribute('points',pts);
- const fx=getX(0,vals.length),lx=getX(vals.length-1,vals.length);
+ const fx=getX(points[0]),lx=getX(points[points.length-1]);
  root.querySelector('#lcExchangeFill').setAttribute('d',`M${fx} 300 L${pts} L${lx} 300 Z`);
- if(realizedPath) realizedPath.setAttribute('points',rvals.length?rvals.map((v,i)=>`${getX(i,rvals.length)},${getY2(v)}`).join(' '):'');
+ if(realizedPath) realizedPath.setAttribute('points',realizedPoints.length?linePts(realizedPoints,getX,getY2):'');
+ if(drawdownPath) drawdownPath.setAttribute('points',drawdownPoints.length?linePts(drawdownPoints,getX,getY2):'');
  if(zeroLine){const zy=getY2(0);zeroLine.setAttribute('y1',zy);zeroLine.setAttribute('y2',zy);}
  root.querySelector('#lcYMax').textContent='$'+Number(ymax).toLocaleString(undefined,{maximumFractionDigits:0});
  root.querySelector('#lcYMid').textContent='$'+Number(ymin+rng/2).toLocaleString(undefined,{maximumFractionDigits:0});
  root.querySelector('#lcYMin').textContent='$'+Number(ymin).toLocaleString(undefined,{maximumFractionDigits:0});
  if(legend) legend.textContent=label;
- if(legend2) legend2.textContent=lcGraphMode==='account'?(rvals.length?'Realized PnL':''):'';
- if(sub) sub.textContent=lcGraphMode==='account'?`Portfolio value change from exchange snapshots; realised PnL from actual user closedPnl. ${lcGraphScale.toUpperCase()} range, ${points.length} points.`:`${label}. ${lcGraphScale.toUpperCase()} range, ${points.length} live data points.`;
+ if(legend2) legend2.textContent=lcGraphMode==='account'?'Realized PnL':'';
+ const legend3=root.querySelector('#lcGraphLegend3'); if(legend3) legend3.textContent=lcGraphMode==='account'?'Drawdown':'';
+ if(sub) sub.textContent=lcGraphMode==='account'?`Exchange account graph. ${graphRangeLabel()} range, ${points.length} visible points.`:`${label}. ${graphRangeLabel()} range, ${points.length} live data points.`;
 }
 function renderCards(){
  const snap=lcAudit.exchange_account_snapshot||{}, manual=lcAudit.manual_live_summary||{};
  const lf=manual.last_filled_manual_order||{}, lr=manual.last_rejected_manual_order||{};
  const unified=snap.available&&snap.unified_portfolio_value!=null?('$'+Number(snap.unified_portfolio_value||0).toLocaleString(undefined,{maximumFractionDigits:2})):'Unavailable';
  const upnl=snap.available&&snap.unrealized_pnl!=null?('$'+Number(snap.unrealized_pnl).toLocaleString(undefined,{maximumFractionDigits:2})):'n/a';
- const rpnl=snap.realized_pnl_today!=null?('$'+Number(snap.realized_pnl_today||0).toLocaleString(undefined,{maximumFractionDigits:2})+' today'):'Unavailable';
+ const rpnl=snap.realized_pnl_selected!=null?('$'+Number(snap.realized_pnl_selected||0).toLocaleString(undefined,{maximumFractionDigits:2})+' '+h(snap.realized_pnl_selected_label||'')):'Unavailable';
+ const upnlCls=signCls(snap.unrealized_pnl);
+ const rpnlCls=signCls(snap.realized_pnl_selected);
  const exPos=snap.available?((snap.open_positions||[]).length):'n/a';
  const exp='$'+Number(manual.manual_live_exposure_estimate||0).toLocaleString(undefined,{maximumFractionDigits:2});
  const lfStr=lf.coin?(h(lf.coin)+' '+h(lf.actual_side||lf.side||'?')+' '+h(lf.fill_size||'?')+' @ '+h(lf.fill_avg_px||'?')):'none yet';
  const lrErr=lr.error||lr.response||lr.notes||'';
- const lrStr=lr.coin?(h(lr.coin)+' '+h(lr.actual_side||lr.side||'?')+' '+h(lr.status||'?')+(lrErr?'<br><span class="lc-muted" title="'+h(lrErr)+'">'+tiny(lrErr,90)+'</span>':'')):'none';
- const cards=[['Portfolio Value',unified],['Unrealized PnL',upnl],['Realized PnL',rpnl],['Open Positions',exPos],['Live Exposure',exp],['Last Fill',lfStr],['Last Reject',lrStr]];
- root.querySelector('#lcRealCards').innerHTML=cards.map(([l,v])=>`<div class="lc-stat"><div class="label">${h(l)}</div><div class="value" style="font-size:12px;word-break:break-all">${v}</div></div>`).join('');
+ const lrStatusRaw=String(lr.status||'?');
+ const lrStatusLabel={'SYMBOL_UNAVAILABLE':'symbol not found after fresh universe refresh','META_UNAVAILABLE':'could not fetch Hyperliquid universe','SDK_SYMBOL_MAP_UNAVAILABLE':'symbol in meta but SDK map unavailable'}[lrStatusRaw]||lrStatusRaw;
+ const lrStr=lr.coin?(h(lr.coin)+' '+h(lr.actual_side||lr.side||'?')+' '+h(lrStatusLabel)+(lrErr?'<br><span class="lc-muted" title="'+h(lrErr)+'">'+tiny(lrErr,90)+'</span>':'')):'none';
+ const cards=[['Portfolio Value',unified,''],['Unrealized PnL',upnl,upnlCls],['Realized PnL',rpnl,rpnlCls],['Open Positions',exPos,''],['Live Exposure',exp,''],['Last Fill',lfStr,''],['Last Reject',lrStr,'']];
+ root.querySelector('#lcRealCards').innerHTML=cards.map(([l,v,cls])=>`<div class="lc-stat"><div class="label">${h(l)}</div><div class="value ${cls||''}" style="font-size:12px;word-break:break-all">${v}</div></div>`).join('');
  renderGraph();
 }
 function moneyFmt(v){return v!=null?('$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:2})):null;}
 function signCls(v){return v!=null?(v>0?'lc-pos':v<0?'lc-neg':''):''}
-function pnlLabel(st,label){const m={'EXACT':'lc-green','ESTIMATED_FROM_REAL_ORDER_FILLS':'lc-amber','OPEN_ONLY':'lc-blue','AMBIGUOUS_COIN_SHARED':'lc-red','N/A':''}; const text=label||({'OPEN_ONLY':'Open PnL','ESTIMATED_FROM_REAL_ORDER_FILLS':'Real fills','AMBIGUOUS_COIN_SHARED':'Shared coin','N/A':'No PnL yet','EXACT':'Exact closed PnL'}[st]||st||'No PnL yet'); return `<span class="lc-pill ${m[st]||''}">${h(text)}</span>`;}
+function pnlLabel(st,label){const m={'EXACT':'lc-green','ESTIMATED_FROM_REAL_ORDER_FILLS':'lc-amber','OPEN_ONLY':'lc-blue','ACCOUNT_LEVEL_ONLY':'lc-amber','AMBIGUOUS_COIN_SHARED':'lc-red','N/A':''}; const text=label||({'OPEN_ONLY':'Open PnL','ESTIMATED_FROM_REAL_ORDER_FILLS':'Real fills','ACCOUNT_LEVEL_ONLY':'Account-level only','AMBIGUOUS_COIN_SHARED':'Shared coin','N/A':'No PnL yet','EXACT':'Exact closed PnL'}[st]||st||'No PnL yet'); return `<span class="lc-pill ${m[st]||''}">${h(text)}</span>`;}
 function renderWallets(){
  const wrows=lcAudit.live_wallet_rows||[], autoLiveWallets=(lcAudit.auto_live_eligible_wallets||[]).map(w=>String(w).toLowerCase());
  const rows=wrows.map(d=>{
@@ -5219,7 +5326,7 @@ function walletDetailHtml(wallet){
 
  // D) Execution Audit
  out+=`<div style="padding:6px 8px;border-bottom:1px solid #223342"><b style="color:#58a6ff">D — Execution Audit</b>`;
- out+=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px"><span class="lc-pill lc-green">Filled: ${h(perf.filled_count||0)}</span><span class="lc-pill">Exits: ${h(perf.exits_count||0)}</span><span class="lc-pill ${(perf.recent_reject_count||0)>0?'lc-red':''}">Recent rejects: ${h(perf.recent_reject_count||0)}</span><span class="lc-pill ${(perf.recent_block_count||0)>0?'lc-amber':''}">Recent blocks: ${h(perf.recent_block_count||0)}</span><span class="lc-pill">Queued previews / would-send records: ${h(perf.preview_count||0)}</span></div>`;
+  out+=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px"><span class="lc-pill lc-green">Filled: ${h(perf.filled_count||0)}</span><span class="lc-pill">Exits: ${h(perf.exits_count||0)}</span><span class="lc-pill ${(perf.recent_reject_count||0)>0?'lc-red':''}">Recent rejects: ${h(perf.recent_reject_count||0)}</span><span class="lc-pill ${(perf.recent_block_count||0)>0?'lc-amber':''}">Recent blocks: ${h(perf.recent_block_count||0)}</span></div>`;
  if(fills.length){
   out+='<table style="margin-top:4px;min-width:auto"><thead><tr><th>Time</th><th>Coin</th><th>Side</th><th>Size @ Px</th><th>Pos before→after</th><th>OID</th></tr></thead><tbody>';
   out+=fills.slice(0,10).map(a=>{const fill=a.fill_avg_px?`${h(a.fill_size||'?')} @ ${h(a.fill_avg_px)}`:'—';const pm=(a.position_before!=null&&a.position_after!=null)?`${h(a.position_before)}→${h(a.position_after)}`:'—';return `<tr><td>${tiny(a.created_at||'—',22)}</td><td>${h(a.coin||'—')}</td><td>${h(a.actual_side||a.side||'—')}</td><td>${fill}</td><td>${pm}</td><td class="lc-wallet">${a.oid?tiny(String(a.oid),18):'n/a'}</td></tr>`;}).join('');
@@ -5340,7 +5447,11 @@ root.querySelectorAll('[data-lc-modal]').forEach(btn=>btn.addEventListener('clic
 root.querySelectorAll('[data-lc-close]').forEach(btn=>btn.addEventListener('click',()=>{const m=btn.closest('.lc-modal-backdrop');if(m){m.classList.remove('active');m.setAttribute('aria-hidden','true');}}));
 root.querySelectorAll('[data-lc-tab]').forEach(btn=>btn.addEventListener('click',()=>{root.querySelectorAll('[data-lc-tab]').forEach(b=>b.classList.remove('active'));root.querySelectorAll('[data-lc-panel]').forEach(p=>p.classList.remove('active'));btn.classList.add('active');root.querySelector(`[data-lc-panel="${btn.dataset.lcTab}"]`).classList.add('active');}));
 root.querySelectorAll('[data-lc-graph-mode]').forEach(btn=>btn.addEventListener('click',()=>{lcGraphMode=btn.dataset.lcGraphMode;root.querySelectorAll('[data-lc-graph-mode]').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderGraph();}));
-root.querySelectorAll('[data-lc-graph-scale]').forEach(btn=>btn.addEventListener('click',()=>{lcGraphScale=btn.dataset.lcGraphScale;root.querySelectorAll('[data-lc-graph-scale]').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderGraph();}));
+root.querySelectorAll('[data-lc-graph-scale]').forEach(btn=>btn.addEventListener('click',()=>{lcGraphScale=btn.dataset.lcGraphScale;lcGraphStartMs=0;lcGraphEndMs=0;const s=root.querySelector('#lcGraphStart'),e=root.querySelector('#lcGraphEnd');if(s)s.value='';if(e)e.value='';root.querySelectorAll('[data-lc-graph-scale]').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderGraph();}));
+const applyRange=root.querySelector('#lcGraphApplyRange');
+if(applyRange) applyRange.addEventListener('click',()=>{const s=root.querySelector('#lcGraphStart'),e=root.querySelector('#lcGraphEnd');lcGraphStartMs=localInputMs(s&&s.value);lcGraphEndMs=localInputMs(e&&e.value);lcGraphScale='custom';root.querySelectorAll('[data-lc-graph-scale]').forEach(b=>b.classList.remove('active'));renderGraph();});
+const resetRange=root.querySelector('#lcGraphResetRange');
+if(resetRange) resetRange.addEventListener('click',()=>{lcGraphScale='all';lcGraphStartMs=0;lcGraphEndMs=0;const s=root.querySelector('#lcGraphStart'),e=root.querySelector('#lcGraphEnd');if(s)s.value='';if(e)e.value='';root.querySelectorAll('[data-lc-graph-scale]').forEach(b=>b.classList.toggle('active',b.dataset.lcGraphScale==='all'));renderGraph();});
 root.querySelector('#lcAddForm').addEventListener('submit',async e=>{e.preventDefault();const fd=new FormData(e.currentTarget);const payload=Object.fromEntries(fd.entries());try{msg('Updating...');await jpost('/api/live-config/add-wallet',payload);e.currentTarget.reset();const m=e.currentTarget.closest('.lc-modal-backdrop');if(m)m.classList.remove('active');await refresh(true);msg('Updated: '+shortWallet(payload.wallet)+' -> SAVED');}catch(err){msg(err.message,true);}});
 root.querySelector('#lcReconRows').addEventListener('click',async e=>{const btn=e.target.closest('button[data-recon-act="archive-ledger-row"]');if(!btn)return;const payload={wallet:btn.dataset.wallet||'',coin:btn.dataset.coin||'',issue:btn.dataset.issue||'',manual_signed_size:btn.dataset.manualSize||''};if(!window.confirm('Archive this stale app ledger row only? This will not place an exchange order.'))return;try{msg('Archiving ledger row...');await jpost('/api/manual-reconciliation/archive-ledger-row',payload);await refresh(true);msg('Archived ledger row for '+payload.coin+'. No exchange order was placed.');}catch(err){msg(err.message||String(err),true);}});
 root.querySelector('#lcWalletRows').addEventListener('click',async e=>{
