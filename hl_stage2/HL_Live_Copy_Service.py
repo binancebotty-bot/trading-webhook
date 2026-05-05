@@ -982,7 +982,12 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
         "reduce_only": truthy_csv(row.get("reduce_only")),
     }
     is_auto_fixed_open = bool(auto_live and copy_mode == "fixed" and not close_position and not payload.get("reduce_only"))
+    _ceil_max_notional = 0.0  # set below when ceiling rounding is applied to a fixed open
     if is_auto_fixed_open and fixed_notional > 0 and fnum(payload.get("limit_price")) > 0:
+        if fixed_notional < MIN_ORDER_NOTIONAL:
+            _bl_resp = {"ok": False, "status": "FIXED_NOTIONAL_BELOW_MIN", "fixed_notional": fixed_notional, "min_order_notional": MIN_ORDER_NOTIONAL}
+            append_send_attempt(row, "FIXED_NOTIONAL_BELOW_MIN", confirmed=confirm_send, response=_bl_resp, error=f"fixed_notional {fixed_notional} < min order notional {MIN_ORDER_NOTIONAL}", notes="fixed_notional below exchange minimum; not sent")
+            return {"ok": False, "status": "FIXED_NOTIONAL_BELOW_MIN", "intent_id": intent_id, "fixed_notional": fixed_notional, "min_order_notional": MIN_ORDER_NOTIONAL}
         if fixed_notional > configured_cap_ceiling:
             response = {
                 "ok": False,
@@ -1000,7 +1005,30 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
             }
             append_send_attempt(row, "FIXED_NOTIONAL_ABOVE_CAP", confirmed=confirm_send, response=response, error="fixed_notional exceeds configured cap", notes="fixed-size auto-live config rejected before send")
             return {"ok": False, "status": "FIXED_NOTIONAL_ABOVE_CAP", "intent_id": intent_id, "payload": payload, "response": response}
-        payload["copy_size"] = fixed_notional / fnum(payload.get("limit_price"))
+        # Ceiling rounding: prepare_hl_order_numbers always floors size to szDecimals.
+        # For fixed entries, floor(fixed_notional/price) * price can fall below $10 even when
+        # fixed_notional >= $10 (e.g. XRP szDecimals=0: 10.5/1.40=7.5 → floor=7 → $9.80).
+        # Use ceiling so the wire_notional >= fixed_notional and the $10 min-notional is cleared.
+        _lp = fnum(payload.get("limit_price"))
+        _sym_early = resolve_hl_perp_symbol(str(payload.get("coin", "")))
+        if _sym_early.get("ok"):
+            _sz_dec = inum(_sym_early.get("szDecimals"))
+            _incr = size_increment_for_places(_sz_dec)
+            _raw_sz = Decimal(str(fixed_notional)) / Decimal(str(_lp))
+            _floor_sz = _raw_sz.quantize(_incr, rounding=ROUND_DOWN)
+            # Apply ceiling only when floor drops wire_notional below fixed_notional.
+            if _floor_sz * Decimal(str(_lp)) < Decimal(str(fixed_notional)):
+                _ceil_sz = _floor_sz + _incr
+            else:
+                _ceil_sz = _floor_sz
+            _ceil_n = float(_ceil_sz) * _lp
+            if _ceil_n <= configured_cap_ceiling:
+                payload["copy_size"] = float(_ceil_sz)
+                _ceil_max_notional = _ceil_n * 1.005  # allow 0.5% buffer for marketable slippage
+            else:
+                payload["copy_size"] = fixed_notional / _lp  # cap exceeded by ceiling; use floor
+        else:
+            payload["copy_size"] = fixed_notional / _lp
         payload["copy_notional"] = fixed_notional
     positions = load_manual_live_positions()
     coin_key = str(payload.get("coin", "")).upper().strip()
@@ -1039,7 +1067,9 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
     payload.setdefault("price_source", "intent_price")
     payload["use_current_quote"] = bool(use_current_quote and close_position)
     payload.setdefault("current_quote_price", "")
-    payload["copy_notional"] = fnum(payload.get("copy_size")) * fnum(payload.get("limit_price"))
+    # For fixed opens copy_notional = fixed_notional (already set); recompute for all other paths.
+    if not is_auto_fixed_open:
+        payload["copy_notional"] = fnum(payload.get("copy_size")) * fnum(payload.get("limit_price"))
     payload["position_before"] = position_before
     payload["close_position"] = bool(close_position)
     payload["size_source"] = size_source
@@ -1047,9 +1077,14 @@ def manual_send_one_intent(intent_id: str, confirm_send: bool, marketable_bps: f
     cap_source = limit_source
     notional_cap_reason = "manual_open_cap"
     if is_auto_fixed_open:
-        max_notional_for_send = fixed_notional_buffered_cap(fixed_notional, configured_cap_ceiling)
+        if _ceil_max_notional > 0:
+            # Ceiling rounding was applied: cap must accommodate ceil_size * adjusted_price.
+            max_notional_for_send = min(configured_cap_ceiling, _ceil_max_notional)
+            notional_cap_reason = "fixed_notional_ceil_buffer"
+        else:
+            max_notional_for_send = fixed_notional_buffered_cap(fixed_notional, configured_cap_ceiling)
+            notional_cap_reason = "fixed_notional_plus_rounding_buffer"
         cap_source = "auto_fixed_notional_buffer"
-        notional_cap_reason = "fixed_notional_plus_rounding_buffer"
     payload["manual_open_cap"] = max_notional_for_send
     payload["limit_source"] = cap_source
     payload["copy_mode"] = copy_mode
@@ -3794,6 +3829,75 @@ def self_test() -> bool:
             save_manual_live_positions({})
             HL_PERP_META_BY_COIN_CACHE = {"TAO": {"szDecimals": 3, "name": "TAO"}}
             # --- end reduce-only dust-close min-notional bypass tests ---
+
+            # --- fixed-mode entry sizing tests ---
+            # TESTFIXED has szDecimals=0 (integer lots) at $1.40/unit.
+            # fixed_notional=10.5: raw=7.5, floor=7 ($9.80 < $10), ceil=8 ($11.20 >= $10).
+            # These tests verify ceiling rounding and that no MIN_NOTIONAL_AFTER_ROUNDING fires.
+            HL_PERP_META_BY_COIN_CACHE = {"TESTFIXED": {"szDecimals": 0, "name": "TESTFIXED"}}
+            _wlcfg_fe = load_json(APP_CONFIG_FILE, {})
+            _wlcfg_fe["wallets"][wallet]["copy_mode"] = "fixed"
+            _wlcfg_fe["wallets"][wallet]["fixed_notional"] = 10.5
+            _wlcfg_fe["wallets"][wallet].pop("max_manual_order_notional_usd", None)
+            safe_atomic_write_json(APP_CONFIG_FILE, _wlcfg_fe)
+            # Would-send row: huge leader notional/size to confirm fixed mode ignores leader sizing.
+            _fe_row = {
+                "created_at": utc_now_iso(), "dry_run": True, "intent_id": "fixed-entry-huge",
+                "leader_wallet": wallet, "leader_fill_id": "fixed-entry-huge",
+                "source_reason": "LIVE_WS_DETECTED", "execution_decision": "WOULD_PLACE_IOC_LIMIT",
+                "decision_reason": "LIVE_WS_FAST_PATH", "coin": "TESTFIXED", "side": "BUY",
+                "copy_size": 7500.0, "copy_notional": 10500000.0,
+                "order_type": "IOC_LIMIT", "limit_price": 1.40, "reduce_only": False,
+                "manual_reconcile_required": False, "status": "WOULD_SEND_DRY_RUN", "notes": "self-test",
+            }
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, _fe_row)
+            # 1. Preview: fixed mode overrides huge leader size with ceil(10.5/1.40)=8
+            _fe_prev = manual_send_one_intent("fixed-entry-huge", False, auto_live=True, auto_send_wallet=wallet)
+            if _fe_prev.get("status") != "CONFIRM_REQUIRED":
+                raise AssertionError(f"fixed entry preview should be CONFIRM_REQUIRED: {_fe_prev}")
+            if round(fnum(_fe_prev.get("payload", {}).get("copy_size")), 8) != 8.0:
+                raise AssertionError(f"fixed entry copy_size should be 8 (ceil of 10.5/1.4): {_fe_prev.get('payload', {}).get('copy_size')}")
+            if round(fnum(_fe_prev.get("payload", {}).get("copy_notional")), 8) != 10.5:
+                raise AssertionError(f"fixed entry copy_notional should equal fixed_notional=10.5: {_fe_prev.get('payload', {})}")
+            if fnum(_fe_prev.get("payload", {}).get("manual_open_cap")) < 11.0:
+                raise AssertionError(f"fixed entry manual_open_cap should accommodate ceil notional: {_fe_prev.get('payload', {}).get('manual_open_cap')}")
+            # 2. Confirm send via fake_sender: must not return MIN_NOTIONAL_AFTER_ROUNDING
+            _fe_sent = manual_send_one_intent("fixed-entry-huge", True, auto_live=True, auto_send_wallet=wallet)
+            if _fe_sent.get("status") == "MIN_NOTIONAL_AFTER_ROUNDING":
+                raise AssertionError(f"fixed entry fixed_notional>=10 must not produce MIN_NOTIONAL_AFTER_ROUNDING: {_fe_sent}")
+            if _fe_sent.get("status") != "ORDER_FILLED":
+                raise AssertionError(f"fixed entry should fill via fake_sender: {_fe_sent}")
+            # 3. fixed_notional=5 (below $10) → FIXED_NOTIONAL_BELOW_MIN, not sent
+            _wlcfg_fe["wallets"][wallet]["fixed_notional"] = 5.0
+            safe_atomic_write_json(APP_CONFIG_FILE, _wlcfg_fe)
+            _fe_below_row = dict(_fe_row)
+            _fe_below_row["intent_id"] = "fixed-entry-below-min"
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, _fe_below_row)
+            _fe_below = manual_send_one_intent("fixed-entry-below-min", False, auto_live=True, auto_send_wallet=wallet)
+            if _fe_below.get("status") != "FIXED_NOTIONAL_BELOW_MIN":
+                raise AssertionError(f"fixed_notional=5 must return FIXED_NOTIONAL_BELOW_MIN: {_fe_below}")
+            if _fe_below.get("min_order_notional") != MIN_ORDER_NOTIONAL:
+                raise AssertionError(f"FIXED_NOTIONAL_BELOW_MIN should report min_order_notional: {_fe_below}")
+            # 4. Proportional mode: copy_size from CSV used unchanged (leader-proportional)
+            _wlcfg_fe["wallets"][wallet]["copy_mode"] = "proportional"
+            _wlcfg_fe["wallets"][wallet]["fixed_notional"] = 10.5
+            safe_atomic_write_json(APP_CONFIG_FILE, _wlcfg_fe)
+            _fe_prop_row = dict(_fe_row)
+            _fe_prop_row["intent_id"] = "fixed-entry-prop"
+            _fe_prop_row["copy_size"] = 100.0
+            _fe_prop_row["copy_notional"] = 140.0
+            append_csv(WOULD_SEND_ORDERS_CSV, WOULD_SEND_ORDER_FIELDS, _fe_prop_row)
+            _fe_prop = manual_send_one_intent("fixed-entry-prop", False, auto_live=True, auto_send_wallet=wallet)
+            if _fe_prop.get("status") != "CONFIRM_REQUIRED":
+                raise AssertionError(f"proportional entry preview should be CONFIRM_REQUIRED: {_fe_prop}")
+            if round(fnum(_fe_prop.get("payload", {}).get("copy_size")), 8) != 100.0:
+                raise AssertionError(f"proportional mode must use CSV copy_size=100 unchanged: {_fe_prop.get('payload', {}).get('copy_size')}")
+            # restore wallet config for remaining tests
+            _wlcfg_fe["wallets"][wallet]["copy_mode"] = "fixed"
+            _wlcfg_fe["wallets"][wallet]["fixed_notional"] = 20.0
+            safe_atomic_write_json(APP_CONFIG_FILE, _wlcfg_fe)
+            HL_PERP_META_BY_COIN_CACHE = {"TAO": {"szDecimals": 3, "name": "TAO"}}
+            # --- end fixed-mode entry sizing tests ---
 
             def make_auto_intent(intent_id: str, *, wallet_id: str = wallet, reason: str = "LIVE_WS_DETECTED", decision: str = "WOULD_PLACE_IOC_LIMIT", coin: str = "BTC", side: str = "BUY", manual: bool = False) -> Dict[str, Any]:
                 return {
