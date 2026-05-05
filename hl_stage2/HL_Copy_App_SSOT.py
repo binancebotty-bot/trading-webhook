@@ -135,6 +135,14 @@ def fnum(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def money2(value: Any) -> float:
+    return round(fnum(value), 2)
+
+
+def contract_money_equal(a: Any, b: Any, tolerance: float = 0.05) -> bool:
+    return abs(money2(a) - money2(b)) <= tolerance
+
+
 def inum(value: Any, default: int = 0) -> int:
     try:
         if value is None or value == "":
@@ -570,6 +578,47 @@ def _clean_wallet_include(raw_inc: Any) -> Dict[str, bool]:
     return out
 
 
+WALLET_META_TAGS = {"none", "watch", "scale", "risk", "remove", "blocked"}
+WALLET_META_COLORS = {"none", "blue", "green", "yellow", "red", "purple"}
+
+
+def sanitize_wallet_meta(meta: Any) -> Dict[str, Dict[str, str]]:
+    if not isinstance(meta, dict):
+        return {}
+    out: Dict[str, Dict[str, str]] = {}
+    for wallet, raw_item in meta.items():
+        w = str(wallet).strip().lower()
+        if not w or not isinstance(raw_item, dict):
+            continue
+        tag = str(raw_item.get("tag", "none")).strip().lower()
+        color = str(raw_item.get("color", "none")).strip().lower()
+        note = str(raw_item.get("note", "")).strip()
+        if tag not in WALLET_META_TAGS:
+            tag = "none"
+        if color not in WALLET_META_COLORS:
+            color = "none"
+        out[w] = {"tag": tag, "note": note[:120], "color": color}
+    return out
+
+
+def get_wallet_meta(ui: Dict[str, Any], wallet: str) -> Dict[str, str]:
+    meta = (ui.get("wallet_meta") or {}).get(str(wallet).strip().lower(), {})
+    if not isinstance(meta, dict):
+        return {"tag": "none", "note": "", "color": "none"}
+    clean = sanitize_wallet_meta({"_": meta}).get("_", {})
+    return clean or {"tag": "none", "note": "", "color": "none"}
+
+
+def set_wallet_meta(ui: Dict[str, Any], wallet: str, tag: Any, note: Any, color: Any) -> Dict[str, Dict[str, str]]:
+    wallet_key = str(wallet).strip().lower()
+    meta = sanitize_wallet_meta(ui.get("wallet_meta", {}))
+    if not wallet_key:
+        return meta
+    item = sanitize_wallet_meta({wallet_key: {"tag": tag, "note": note, "color": color}}).get(wallet_key, {"tag": "none", "note": "", "color": "none"})
+    meta[wallet_key] = item
+    return meta
+
+
 def wallet_included(wallet: str, ui: Dict[str, Any]) -> bool:
     return bool((ui.get("wallet_include") or {}).get(str(wallet).lower(), True))
 
@@ -600,6 +649,7 @@ def load_ui_state() -> Dict[str, Any]:
         "copy_friction_bps": max(0.0, fnum(raw.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS)),
         "wallet_config": _clean_wallet_config(raw.get("wallet_config", {})),
         "wallet_include": _clean_wallet_include(raw.get("wallet_include", {})),
+        "wallet_meta": sanitize_wallet_meta(raw.get("wallet_meta", {})),
         "ranking": ranking,
     }
 
@@ -620,6 +670,7 @@ def save_ui_state(patch: Dict[str, Any]) -> Dict[str, Any]:
     merged["copy_friction_bps"] = max(0.0, fnum(merged.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS))
     merged["wallet_config"] = _clean_wallet_config(merged.get("wallet_config", {}))
     merged["wallet_include"] = _clean_wallet_include(merged.get("wallet_include", {}))
+    merged["wallet_meta"] = sanitize_wallet_meta(merged.get("wallet_meta", {}))
     ranking = merged.get("ranking") if isinstance(merged.get("ranking"), dict) else {}
     ranking_dir = str(ranking.get("direction", "desc")).lower()
     merged["ranking"] = {"column": ranking.get("column"), "direction": ranking_dir if ranking_dir in {"asc", "desc"} else "desc"}
@@ -638,8 +689,8 @@ _GLOBAL_CONTROLS_DEFAULTS: Dict[str, Any] = {
     "max_asset_directional_exposure_usd": 0.0,
     "max_wallet_exposure_usd": 0.0,
     "max_order_notional_usd": 0.0,
-    "marketable_bps": 5.0,
-    "max_close_adverse_diff_pct": 0.25,
+    "marketable_bps": 0.0,
+    "max_close_adverse_diff_pct": 0.0,
     "symbol_allowlist": [],
     "symbol_blocklist": [],
 }
@@ -656,6 +707,16 @@ def _normalise_global_controls(raw: Any) -> Dict[str, Any]:
                 out[k] = [str(s).strip().upper() for s in val] if isinstance(val, list) else []
             else:
                 out[k] = max(0.0, fnum(raw[k]))
+    if "marketable_slippage_pct" in raw:
+        out["marketable_bps"] = max(0.0, fnum(raw.get("marketable_slippage_pct")) * 100.0)
+    return out
+
+
+def _global_controls_for_ui(raw: Any) -> Dict[str, Any]:
+    out = _normalise_global_controls(raw)
+    out["marketable_slippage_pct"] = round(fnum(out.get("marketable_bps")) / 100.0, 6)
+    out["marketable_slippage_off"] = fnum(out.get("marketable_bps")) <= 0
+    out["close_adverse_diff_off"] = fnum(out.get("max_close_adverse_diff_pct")) <= 0
     return out
 
 
@@ -975,6 +1036,29 @@ def iter_manual_wallet_positions(manual_positions: Dict[str, Any]):
             continue
         wallet = str(pos.get("leader_wallet") or pos.get("wallet") or "").lower().strip()
         yield wallet, str(coin or "").upper().strip(), pos
+
+
+def _manual_position_sleeves(manual_positions: Dict[str, Any]) -> List[Tuple[str, str, Dict[str, Any]]]:
+    sleeves: List[Tuple[str, str, Dict[str, Any]]] = []
+    for wallet, coin, pos in iter_manual_wallet_positions(manual_positions):
+        if not coin or not isinstance(pos, dict):
+            continue
+        if abs(fnum(pos.get("signed_size"))) <= 1e-12:
+            continue
+        sleeves.append((wallet, coin, pos))
+    return sleeves
+
+
+def _shared_manual_coin_nets(sleeves: List[Tuple[str, str, Dict[str, Any]]]) -> Tuple[Dict[str, int], Dict[str, float]]:
+    counts: Dict[str, int] = {}
+    nets: Dict[str, float] = {}
+    wallets_by_coin: Dict[str, set[str]] = {}
+    for wallet, coin, pos in sleeves:
+        wallets_by_coin.setdefault(coin, set()).add(str(wallet or ""))
+        nets[coin] = nets.get(coin, 0.0) + fnum(pos.get("signed_size"))
+    for coin, wallets in wallets_by_coin.items():
+        counts[coin] = len(wallets)
+    return counts, nets
 
 
 def _load_recent_send_attempts(limit: int = 20) -> List[Dict[str, Any]]:
@@ -1686,7 +1770,10 @@ def _build_manual_reconciliation_rows(manual_positions: Dict[str, Any], exchange
     exchange_positions = exchange_snapshot.get("positions_by_coin", {}) if isinstance(exchange_snapshot.get("positions_by_coin"), dict) else {}
     exchange_available = bool(exchange_snapshot.get("available"))
     seen_on_exchange: set[str] = set()
-    for wallet, coin_upper, pos in sorted(iter_manual_wallet_positions(manual_positions), key=lambda item: (item[1], item[0])):
+    sleeves = _manual_position_sleeves(manual_positions)
+    coin_counts, coin_nets = _shared_manual_coin_nets(sleeves)
+    shared_coins = {coin for coin, count in coin_counts.items() if count > 1}
+    for wallet, coin_upper, pos in sorted(sleeves, key=lambda item: (item[1], item[0])):
         signed = fnum(pos.get("signed_size"))
         if abs(signed) <= 1e-12:
             continue
@@ -1694,6 +1781,23 @@ def _build_manual_reconciliation_rows(manual_positions: Dict[str, Any], exchange
         exchange_signed = fnum(ex.get("signed_size")) if isinstance(ex, dict) else 0.0
         if ex:
             seen_on_exchange.add(coin_upper)
+        if coin_upper in shared_coins:
+            rows.append({
+                "severity": "OK" if exchange_available else "INFO",
+                "wallet": wallet,
+                "coin": coin_upper,
+                "side": "LONG" if signed > 0 else "SHORT",
+                "issue": "SHARED_SYMBOL_SLEEVE_TRACKED" if exchange_available else "EXCHANGE_UNAVAILABLE",
+                "manual_signed_size": signed,
+                "exchange_signed_size": exchange_signed if exchange_available else "n/a",
+                "last_intent_id": pos.get("last_intent_id", ""),
+                "last_oid": pos.get("last_oid", ""),
+                "last_updated_at": pos.get("last_updated_at", ""),
+                "latest_error": "shared symbol: sleeve tracked; exchange is netted at account level",
+                "count": 1,
+                "action_available": False,
+            })
+            continue
         if exchange_available:
             diff = signed - exchange_signed
             if abs(diff) <= 1e-8:
@@ -1726,6 +1830,38 @@ def _build_manual_reconciliation_rows(manual_positions: Dict[str, Any], exchange
             "action_label": "Archive ledger row" if issue == "MISSING_EXCHANGE" and abs(exchange_signed) <= 1e-12 else "",
             "action_note": "Ledger cleanup only; does not place an exchange order." if issue == "MISSING_EXCHANGE" and abs(exchange_signed) <= 1e-12 else "",
         })
+    if exchange_available:
+        for coin_upper in sorted(shared_coins):
+            ledger_net = coin_nets.get(coin_upper, 0.0)
+            ex = exchange_positions.get(coin_upper, {}) if isinstance(exchange_positions, dict) else {}
+            exchange_signed = fnum(ex.get("signed_size")) if isinstance(ex, dict) else 0.0
+            diff = ledger_net - exchange_signed
+            if ex:
+                seen_on_exchange.add(coin_upper)
+            if abs(diff) <= 1e-8:
+                severity = "OK"
+                issue = "SHARED_SYMBOL_NET_MATCH"
+            elif exchange_signed == 0.0:
+                severity = "CRITICAL"
+                issue = "MISSING_EXCHANGE"
+            else:
+                severity = "CRITICAL"
+                issue = f"SHARED_SYMBOL_NET_DIFF: {diff:+.6f}"
+            rows.append({
+                "severity": severity,
+                "wallet": "aggregate",
+                "coin": coin_upper,
+                "side": "NET",
+                "issue": issue,
+                "manual_signed_size": round(ledger_net, 12),
+                "exchange_signed_size": exchange_signed,
+                "last_intent_id": "aggregate",
+                "last_oid": "aggregate",
+                "last_updated_at": "—",
+                "latest_error": "aggregate net matches exchange" if severity == "OK" else "aggregate ledger net differs from exchange net",
+                "count": coin_counts.get(coin_upper, 0),
+                "action_available": False,
+            })
     if exchange_available:
         for coin, ex in sorted(exchange_positions.items()):
             if coin not in seen_on_exchange:
@@ -2061,7 +2197,10 @@ def _build_real_copy_positions(
     exchange_positions = exchange_snapshot.get("positions_by_coin", {}) if isinstance(exchange_snapshot.get("positions_by_coin"), dict) else {}
     exchange_available = bool(exchange_snapshot.get("available"))
     seen: set = set()
-    for wallet, coin_upper, pos in sorted(iter_manual_wallet_positions(manual_positions), key=lambda item: (item[1], item[0])):
+    sleeves = _manual_position_sleeves(manual_positions)
+    coin_counts, coin_nets = _shared_manual_coin_nets(sleeves)
+    shared_coins = {coin for coin, count in coin_counts.items() if count > 1}
+    for wallet, coin_upper, pos in sorted(sleeves, key=lambda item: (item[1], item[0])):
         signed = fnum(pos.get("signed_size"))
         if abs(signed) <= 1e-12:
             continue
@@ -2072,7 +2211,10 @@ def _build_real_copy_positions(
         ex_entry = fnum(ex.get("entry_px")) if isinstance(ex, dict) else 0.0
         ex_upnl = fnum(ex.get("unrealized_pnl")) if isinstance(ex, dict) else 0.0
         ex_pos_value = fnum(ex.get("position_value")) if isinstance(ex, dict) else 0.0
-        if exchange_available:
+        is_shared = coin_upper in shared_coins
+        if is_shared and exchange_available:
+            status = "SHARED_SYMBOL_SLEEVE_TRACKED"
+        elif exchange_available:
             diff = signed - ex_signed
             if abs(diff) <= 1e-8:
                 status = "MATCH"
@@ -2093,10 +2235,34 @@ def _build_real_copy_positions(
             "exchange_signed_size": ex_signed if exchange_available else None,
             "entry_px": ex_entry if ex_entry > 0 else None,
             "mark_px": ex_mark if ex_mark > 0 else None,
-            "position_value": ex_pos_value if ex_pos_value > 0 else None,
-            "unrealized_pnl": ex_upnl if exchange_available else None,
+            "position_value": None if is_shared else (ex_pos_value if ex_pos_value > 0 else None),
+            "unrealized_pnl": None if is_shared else (ex_upnl if exchange_available else None),
             "ledger_vs_exchange": status,
+            "reconciliation_note": "shared symbol: sleeve tracked; exchange is netted at account level" if is_shared else "",
         })
+    if exchange_available:
+        for coin_upper in sorted(shared_coins):
+            ledger_net = coin_nets.get(coin_upper, 0.0)
+            ex: Dict[str, Any] = exchange_positions.get(coin_upper, {}) if isinstance(exchange_positions, dict) else {}
+            ex_signed = fnum(ex.get("signed_size")) if isinstance(ex, dict) else 0.0
+            diff = ledger_net - ex_signed
+            status = "SHARED_SYMBOL_NET_MATCH" if abs(diff) <= 1e-8 else f"SHARED_SYMBOL_NET_DIFF {diff:+.6f}"
+            rows.append({
+                "coin": coin_upper,
+                "signed_size": round(ledger_net, 12),
+                "side": "NET LONG" if ledger_net > 0 else "NET SHORT" if ledger_net < 0 else "NET FLAT",
+                "leader_wallet": "aggregate",
+                "last_intent_id": "aggregate",
+                "last_oid": "aggregate",
+                "last_updated_at": "—",
+                "exchange_signed_size": ex_signed,
+                "entry_px": fnum(ex.get("entry_px")) or None,
+                "mark_px": fnum(ex.get("mark_px")) or None,
+                "position_value": fnum(ex.get("position_value")) or None,
+                "unrealized_pnl": fnum(ex.get("unrealized_pnl")) if isinstance(ex, dict) else None,
+                "ledger_vs_exchange": status,
+                "reconciliation_note": "aggregate net matches exchange" if abs(diff) <= 1e-8 else "aggregate ledger net differs from exchange net",
+            })
     if exchange_available:
         for coin, ex in sorted(exchange_positions.items()):
             if coin in seen:
@@ -4345,9 +4511,9 @@ def validate_render_contract(state: Dict[str, Any]) -> List[str]:
             expected_max_lead_dd = max(curve_stats["max_lead_dd"], live_lead_dd)
             expected_max_copy_dd = max(curve_stats["max_copy_dd"], live_copy_dd)
             expected_max_exposure = max(curve_stats["max_exposure"], sel_notional)
-            if abs(fnum(port_lead.get("max_drawdown")) - expected_max_lead_dd) > 0.01:
+            if not contract_money_equal(port_lead.get("max_drawdown"), expected_max_lead_dd):
                 errors.append(f"portfolio lead MaxDD {fnum(port_lead.get('max_drawdown')):.4f} != max timestamped summed DD {expected_max_lead_dd:.4f}")
-            if abs(fnum(port_copy.get("max_drawdown")) - expected_max_copy_dd) > 0.01:
+            if not contract_money_equal(port_copy.get("max_drawdown"), expected_max_copy_dd):
                 errors.append(f"portfolio copy MaxDD {fnum(port_copy.get('max_drawdown')):.4f} != max timestamped summed DD {expected_max_copy_dd:.4f}")
             if abs(fnum(port.get("max_open_notional_usd")) - expected_max_exposure) > 0.01:
                 errors.append(f"portfolio max exposure {fnum(port.get('max_open_notional_usd')):.4f} != max timestamped summed exposure {expected_max_exposure:.4f}")
@@ -4377,11 +4543,11 @@ def validate_render_contract(state: Dict[str, Any]) -> List[str]:
             # MaxDD
             hdr_copy_maxdd = fnum(port_copy2.get("max_drawdown"))
             usr_copy_maxdd = get_max_dd(u_copy)
-            if abs(hdr_copy_maxdd - usr_copy_maxdd) > 0.01:
+            if not contract_money_equal(hdr_copy_maxdd, usr_copy_maxdd):
                 errors.append(f"header/user copy maxDD mismatch: header={hdr_copy_maxdd:.4f} user={usr_copy_maxdd:.4f}")
             hdr_lead_maxdd = fnum(port_lead2.get("max_drawdown"))
             usr_lead_maxdd = get_max_dd(u_lead)
-            if abs(hdr_lead_maxdd - usr_lead_maxdd) > 0.01:
+            if not contract_money_equal(hdr_lead_maxdd, usr_lead_maxdd):
                 errors.append(f"header/user lead maxDD mismatch: header={hdr_lead_maxdd:.4f} user={usr_lead_maxdd:.4f}")
 
             for metric in ("current_position_usd", "max_position_usd", "avg_trade_pct", "avg_entry_notional_usd", "pct_entries_ge10"):
@@ -4681,19 +4847,10 @@ def render_home(state: Dict[str, Any]) -> str:
     exit_count = sum(int(r.get("exit_count") or 0) for r in included_rows)
     open_positions = sum(int(r.get("open_position_count") or 0) for r in included_rows)
     health_label, health_detail = health_status_label()
-    live_audit = _live_audit_summary()
-    account_snapshot = live_audit.get("exchange_account_snapshot", {}) if isinstance(live_audit, dict) else {}
-    manual_summary = live_audit.get("manual_live_summary", {}) if isinstance(live_audit, dict) else {}
-    clearinghouse_account_value = fnum(account_snapshot.get("account_value")) if account_snapshot.get("available") else 0.0
-    manual_live_exposure = fnum(manual_summary.get("manual_live_exposure_estimate"))
-    manual_open_count = inum(manual_summary.get("open_manual_position_count"))
-    account_updated = str(account_snapshot.get("updated_at") or account_snapshot.get("reason") or "unavailable")
     def small_metric(label: str, value: str, raw: Any = 0.0) -> str:
         return f'<div class="metric-line"><span>{label}</span><b class="{css_class(raw)}">{value}</b></div>'
     def group_card(title: str, lines: List[str], extra_cls: str = "") -> str:
         return f'<div class="card group-card {extra_cls}"><div class="label">{title}</div>' + "".join(lines) + '</div>'
-    def py_short_wallet(wallet: str) -> str:
-        return wallet[:6] + "..." + wallet[-6:] if len(wallet) > 18 else wallet
     cards = "".join([
         group_card("PNL", [small_metric("LEAD", dual(lead_total, user_base), lead_total), small_metric("COPY", dual(copy_total, user_base), copy_total), small_metric("Δ", dual(delta_total, user_base), delta_total)]),
         group_card("REALISED", [small_metric("LEAD", dual(fnum(lead.get("realized")), user_base), fnum(lead.get("realized"))), small_metric("COPY", dual(fnum(copy.get("realized")), user_base), fnum(copy.get("realized")))]),
@@ -4703,17 +4860,6 @@ def render_home(state: Dict[str, Any]) -> str:
         group_card("EXPOSURE", [small_metric("OPEN", money(open_notional), open_notional), small_metric("MAX", money(max_open_notional), max_open_notional), small_metric("BASE", f"{notional_x:.2f}x / {max_notional_x:.2f}x", notional_x)]),
         group_card("COPYABILITY", [small_metric("AVG TRADE %", pct(avg_trade_pct, 3), avg_trade_pct), small_metric("AVG TRADE $", money(avg_trade), avg_trade), small_metric("AVG POS", money(avg_pos_size), avg_pos_size), small_metric("REQ LEV", f"{max_req_lev:.2f}x", max_req_lev)]),
         group_card("ACTIVITY", [small_metric("FILLS", str(fill_count), fill_count), small_metric("EXITS", str(exit_count), exit_count), small_metric("OPEN POS", str(open_positions), open_positions), small_metric("WIN", pct(win_avg), win_avg)]),
-        group_card("LIVE ACCOUNT", [small_metric("MODEL EQUITY", money(fnum(copy.get("equity"))), fnum(copy.get("equity"))), small_metric("CLEARINGHOUSE VALUE", money(clearinghouse_account_value) if account_snapshot.get("available") else "unavailable", clearinghouse_account_value), small_metric("SNAPSHOT", html.escape(account_updated[:24]), 0)]),
-        group_card("MANUAL LIVE", [small_metric("OPEN POS", str(manual_open_count), manual_open_count), small_metric("EXPOSURE EST", money(manual_live_exposure), manual_live_exposure), small_metric("AUTO WALLET", html.escape(py_short_wallet(str(manual_summary.get("current_auto_live_wallet") or "")) or "—"), 0)]),
-    ] + [
-        (lambda eg: group_card("EXEC GUARDS", [
-            small_metric("SEND", "LIVE ON" if eg["auto_send_enabled"] else "DRY RUN", 1 if eg["auto_send_enabled"] else 0),
-            small_metric("WALLET FILTER", html.escape(py_short_wallet(eg["auto_send_wallet"]) if eg["auto_send_wallet"] else "ANY"), 0),
-            small_metric("MAX/RUN", str(eg["max_per_run"]), 0),
-            small_metric("MKT BPS", str(eg["marketable_bps"]), 0),
-            small_metric("CLOSE ADV %", str(eg["close_adverse_diff_pct"]), 0),
-            small_metric("LEGACY CAP (ignored)", f"${eg['legacy_notional_cap']}", 0),
-        ]))(_execution_guards_info()),
         group_card("DB HEALTH", [small_metric(health_label, html.escape(health_detail), -1 if "ERROR" in health_label else 0), small_metric("CACHE", str(APP_HEALTH.get("cache_hits", 0)), 0), small_metric("BUILDS", str(APP_HEALTH.get("build_count", 0)), 0)], "health-card"),
     ])
     ranking = ui.get("ranking", {}) if isinstance(ui.get("ranking"), dict) else {}
@@ -4816,19 +4962,34 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
     inc_cell = ""
     cfg_cell = ""
     purge_cell = ""
+    meta_link = ""
+    meta_badge = ""
+    wallet_color_cls = ""
+    wallet_title = ""
     if r.get("is_user_wallet"):
         user_base = max(1.0, fnum(ui.get("user_norm_base"), fnum(ui.get("norm_base"), DEFAULT_NORM_BASE)))
         cfg_cell = f'<form action="/api/ui-state" method="post" class="ajax-form user-base-form"><span class="small muted">aggregate base</span><input name="user_norm_base" value="{user_base:g}" size="5" title="aggregate normalisation base"><button title="set aggregate base">Set</button></form>'
     else:
+        meta = get_wallet_meta(ui, wallet)
+        tag = meta.get("tag", "none")
+        color = meta.get("color", "none")
+        note = meta.get("note", "")
+        if tag != "none" or note:
+            wallet_title = f' title="{html.escape(f"tag={tag}; note={note}")}"'
+        if tag != "none":
+            meta_badge = f' <span class="wallet-tag">{html.escape(tag.upper())}</span>'
+        if color != "none":
+            wallet_color_cls = f" wallet-color-{html.escape(color)}"
         inc_cell = f"""<form action="/api/wallet-include" method="post" class="inc-form" title="Include/exclude this wallet from combined graph and header cards only"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><input type="checkbox" name="included" value="1" {'checked' if included else ''} onchange="this.form.requestSubmit()"><span class="small">INC</span></form>"""
         cfg_cell = f"""<form action="/api/wallet-config" method="post" class="wallet-cfg"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><select name="copy_mode"><option value="" {'selected' if not r.get('wallet_config') else ''}>global</option><option value="proportional" {'selected' if eff_mode == 'proportional' and r.get('wallet_config') else ''}>prop</option><option value="fixed" {'selected' if eff_mode == 'fixed' and r.get('wallet_config') else ''}>fixed</option></select><input name="norm_base" value="{eff_base:g}" size="5" title="wallet normalisation base"><input name="fixed_notional" value="{eff_fixed:g}" size="4" title="wallet fixed $"><button title="save wallet override">Set</button></form>"""
         purge_cell = f"""<form action="/api/admin/purge-wallet" method="post" class="purge-form" title="ADMIN MAINTENANCE ONLY: permanently purge wallet"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><button class="purge-btn" title="purge wallet">PURGE</button></form>"""
+        meta_link = f'<a href="/wallet-meta/{html.escape(wallet)}" class="meta-edit-link" title="Edit wallet tag / color / note">Meta</a>'
     row_cls = 'user' if r.get('is_user_wallet') else ''
     if not r.get('is_user_wallet') and not included: row_cls += ' excluded-row'
     wallet_sort = html.escape(wallet)
     return f"""
     <tr class="{row_cls}">
-      <td class="sticky-wallet" data-sort="{wallet_sort}"><a href="/wallet/{wallet}">{wallet[:8]}…{wallet[-6:]}</a>{badge}</td>
+      <td class="sticky-wallet{wallet_color_cls}" data-sort="{wallet_sort}"{wallet_title}><a href="/wallet/{wallet}">{wallet[:8]}…{wallet[-6:]}</a>{badge}{meta_badge}</td>
       {core_td(r, isinstance(lead, dict) and 'equity' in lead, lead_pnl, money(lead.get('equity')), f"pair-lead {css_class(lead_pnl)}", "lead.equity")}{core_td(r, isinstance(copy, dict) and 'equity' in copy, copy_pnl, money(copy.get('equity')), f"pair-copy group-divider {css_class(copy_pnl)}", "copy.equity")}
       {core_td(r, isinstance(lead, dict) and 'realized' in lead, lead.get('realized'), dual(fnum(lead.get('realized')), alloc), f"pair-lead {css_class(lead.get('realized'))}", "lead.realized")}{core_td(r, isinstance(copy, dict) and 'realized' in copy, copy.get('realized'), dual(fnum(copy.get('realized')), alloc), f"pair-copy group-divider {css_class(copy.get('realized'))}", "copy.realized")}
       {core_td(r, isinstance(lead, dict) and 'unrealized' in lead, lead.get('unrealized'), dual(fnum(lead.get('unrealized')), alloc), f"pair-lead {css_class(lead.get('unrealized'))}", "lead.unrealized")}{core_td(r, isinstance(copy, dict) and 'unrealized' in copy, copy.get('unrealized'), dual(fnum(copy.get('unrealized')), alloc), f"pair-copy group-divider {css_class(copy.get('unrealized'))}", "copy.unrealized")}
@@ -4839,7 +5000,7 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
       {core_td(r, 'avg_position_usd' in r, r.get('avg_position_usd'), money(r.get('avg_position_usd')), css_class(r.get('avg_position_usd')), "avg_position_usd")}{core_td(r, 'max_position_usd' in r, r.get('max_position_usd'), money(r.get('max_position_usd')), css_class(r.get('max_position_usd')), "max_position_usd")}
       {core_td(r, 'avg_entry_notional_usd' in r, r.get('avg_entry_notional_usd'), money(r.get('avg_entry_notional_usd')), css_class(r.get('avg_entry_notional_usd')), "avg_entry_notional_usd")}{core_td(r, 'pct_entries_ge10' in r, r.get('pct_entries_ge10'), pct(r.get('pct_entries_ge10')), css_class(r.get('pct_entries_ge10')), "pct_entries_ge10")}{core_td(r, 'required_leverage' in r, r.get('required_leverage'), f"{fnum(r.get('required_leverage')):.2f}x", css_class(r.get('required_leverage')), "required_leverage")}
       {lc_cell(r, lc_counts['fills'], "ops-group")}{lc_cell(r, lc_counts['exits'], "ops-group")}{lc_cell(r, lc_counts['pos'], "ops-group group-divider")}
-      <td class="controls-cell {'inc-off' if (not r.get('is_user_wallet') and not included) else ''}">{inc_cell}{cfg_cell}{purge_cell}</td>
+      <td class="controls-cell {'inc-off' if (not r.get('is_user_wallet') and not included) else ''}">{inc_cell}{cfg_cell}{purge_cell}{meta_link}</td>
     </tr>"""
 
 HTML_TEMPLATE = """
@@ -4849,7 +5010,7 @@ body{{margin:0;background:#0d1117;color:#c9d1d9;font:12px Arial,Helvetica,sans-s
 .cards{{display:grid;grid-template-columns:repeat(9,minmax(130px,1fr));gap:8px;padding:10px 14px}} .card{{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:9px;min-height:72px}} .group-card .label{{font-size:10px;color:#8b949e;margin-bottom:6px;border-bottom:1px solid #21262d;padding-bottom:4px}} .metric-line{{display:flex;justify-content:space-between;gap:8px;line-height:1.55}} .metric-line span{{color:#8b949e}} .metric-line b{{font-weight:700}} .pos{{color:#2ea043}} .neg{{color:#ff4d4f}} .zero{{color:#c9d1d9}}
 .section{{padding:0 14px 10px}} .panel{{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:10px;margin-bottom:12px}} .chart-wrap{{position:relative;cursor:zoom-in}} .chart-wrap.expanded{{position:relative;z-index:20}} .chart-wrap.expanded .chart{{height:76vh}} .chart{{width:100%;height:260px;background:#151a21}} .chart *{{vector-effect:non-scaling-stroke}} .pnl-line{{fill:none;stroke:#2ea043;stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}} .realized-line{{fill:none;stroke:#58a6ff;stroke-width:1.4;stroke-linejoin:round;stroke-linecap:round}} .dd-line{{fill:none;stroke:#ff4d4f;stroke-width:1.4;stroke-linejoin:round;stroke-linecap:round}} .zero-line{{stroke:#8b949e;stroke-width:1}} .grid-line,.grid-vert{{stroke:#21262d;stroke-width:1}} .axis-label{{fill:#8b949e;font-size:10px}} .hit{{fill:transparent;stroke:none;pointer-events:all}} .crosshair{{stroke:#8b949e;stroke-width:1;stroke-dasharray:3 3;pointer-events:none}} .chart-dot{{fill:#c9d1d9;stroke:#0d1117;stroke-width:1.2;pointer-events:none}} .chart-tip{{position:absolute;left:10px;top:10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:5px 7px;color:#c9d1d9;font-size:11px;pointer-events:none;box-shadow:0 4px 12px rgba(0,0,0,.35)}} .chart-legend{{display:flex;gap:10px;align-items:center;margin-top:6px}} .legend-pnl{{color:#2ea043}} .legend-realized{{color:#58a6ff}} .legend-dd{{color:#ff4d4f}}
 .table-wrap{{border:1px solid #21262d;border-radius:6px;background:#0d1117}} table{{width:100%;border-collapse:separate;border-spacing:0;font-size:11px}} th{{position:sticky;top:0;background:#21262d;color:#8b949e;text-align:right;padding:7px;border-bottom:1px solid #30363d;z-index:2}} th:first-child,td:first-child{{text-align:left}} th.sort-active{{background:#303a49;color:#fff;box-shadow:inset 0 -2px 0 #58a6ff}} th.sort-active a{{color:#fff}} th a{{display:block;color:#8b949e}} td{{padding:6px;border-bottom:1px solid #21262d;text-align:right;white-space:nowrap}} tr:nth-child(even){{background:#111820}} tr.user{{background:#071527}} tr:hover{{background:#1b2330}} tr.excluded-row{{}}
-.sticky-wallet{{position:sticky;left:0;z-index:3;background:inherit;min-width:132px;border-right:1px solid #30363d}} th.sticky-wallet{{z-index:4;background:#21262d}} .pair-lead{{background:rgba(88,166,255,.045)}} .pair-copy{{background:rgba(46,160,67,.045)}} .ops-group{{background:rgba(210,153,34,.05)}} .group-divider{{border-right:2px solid #30363d!important}} .badge{{background:#0d419d;color:#fff;border-radius:3px;padding:1px 4px;font-size:9px}} .mode{{background:#063d1f;color:#2ea043;border-radius:3px;padding:2px 6px}} .wallet-cfg{{display:inline-flex;gap:3px;margin-left:4px;align-items:center}} .wallet-cfg input{{width:48px;padding:1px 3px}} .wallet-cfg select{{width:70px;padding:1px 3px}} .wallet-cfg button{{padding:1px 4px}} .inc-form{{display:inline-flex;align-items:center;gap:2px;margin-right:6px}} .inc-form input{{padding:0;width:14px;height:14px}} .purge-form{{display:inline-flex;margin-left:4px;align-items:center}} .purge-btn{{border-color:#8b1d1d;background:#3a1111;color:#ff7b72;padding:1px 5px;font-size:10px}} .inc-off{{opacity:1}} .controls-cell{{min-width:315px;text-align:left}} .small{{font-size:11px;color:#8b949e}} .missing{{color:#6e7681!important}} .selected-divider td{{background:#0d1117;border-top:2px solid #58a6ff;border-bottom:1px solid #30363d;color:#8b949e;text-align:left;font-size:10px;letter-spacing:.04em;text-transform:uppercase;padding:6px 8px}} .saving{{opacity:.65}} .saved-flash{{color:#2ea043}} .chart-empty{{height:230px;display:flex;align-items:center;justify-content:center;color:#8b949e}} @media(max-width:1300px){{.cards{{grid-template-columns:repeat(3,minmax(150px,1fr))}}}}
+.sticky-wallet{{position:sticky;left:0;z-index:3;background:inherit;min-width:132px;border-right:1px solid #30363d}} th.sticky-wallet{{z-index:4;background:#21262d}} .sticky-wallet.wallet-color-blue{{background:linear-gradient(90deg,rgba(88,166,255,.34),rgba(13,17,23,.96))!important;border-left:4px solid #58a6ff}} .sticky-wallet.wallet-color-green{{background:linear-gradient(90deg,rgba(46,160,67,.34),rgba(13,17,23,.96))!important;border-left:4px solid #2ea043}} .sticky-wallet.wallet-color-yellow{{background:linear-gradient(90deg,rgba(210,153,34,.36),rgba(13,17,23,.96))!important;border-left:4px solid #d29922}} .sticky-wallet.wallet-color-red{{background:linear-gradient(90deg,rgba(255,77,79,.34),rgba(13,17,23,.96))!important;border-left:4px solid #ff4d4f}} .sticky-wallet.wallet-color-purple{{background:linear-gradient(90deg,rgba(163,113,247,.34),rgba(13,17,23,.96))!important;border-left:4px solid #a371f7}} .pair-lead{{background:rgba(88,166,255,.045)}} .pair-copy{{background:rgba(46,160,67,.045)}} .ops-group{{background:rgba(210,153,34,.05)}} .group-divider{{border-right:2px solid #30363d!important}} .badge{{background:#0d419d;color:#fff;border-radius:3px;padding:1px 4px;font-size:9px}} .wallet-tag{{background:#30363d;color:#c9d1d9;border-radius:3px;padding:1px 4px;font-size:9px}} .mode{{background:#063d1f;color:#2ea043;border-radius:3px;padding:2px 6px}} .wallet-cfg{{display:inline-flex;gap:3px;margin-left:4px;align-items:center}} .wallet-cfg input{{width:48px;padding:1px 3px}} .wallet-cfg select{{width:70px;padding:1px 3px}} .wallet-cfg button{{padding:1px 4px}} .inc-form{{display:inline-flex;align-items:center;gap:2px;margin-right:6px}} .inc-form input{{padding:0;width:14px;height:14px}} .purge-form{{display:inline-flex;margin-left:4px;align-items:center}} .purge-btn{{border-color:#8b1d1d;background:#3a1111;color:#ff7b72;padding:1px 5px;font-size:10px}} .inc-off{{opacity:1}} .controls-cell{{min-width:315px;text-align:left}} .small{{font-size:11px;color:#8b949e}} .missing{{color:#6e7681!important}} .selected-divider td{{background:#0d1117;border-top:2px solid #58a6ff;border-bottom:1px solid #30363d;color:#8b949e;text-align:left;font-size:10px;letter-spacing:.04em;text-transform:uppercase;padding:6px 8px}} .saving{{opacity:.65}} .saved-flash{{color:#2ea043}} .chart-empty{{height:230px;display:flex;align-items:center;justify-content:center;color:#8b949e}} @media(max-width:1300px){{.cards{{grid-template-columns:repeat(3,minmax(150px,1fr))}}}}
 </style></head><body><div class="top"><b>⚡ HL Copy Engine</b><span class="live">POLL</span><span class="muted">Updated: {updated}</span><form action="/api/ui-state" method="post" class="ajax-form" style="display:flex;gap:6px;align-items:center;margin:0"><span class="muted">Normalisation Base:</span><input name="norm_base" value="{norm}" size="8"><span class="muted">Mode:</span><select name="copy_mode"><option>proportional</option><option>fixed</option></select><span class="muted">Fixed $:</span><input name="fixed_notional" value="{fixed}" size="6"><span class="muted">Fee bps:</span><input name="fee_bps" value="{fee}" size="5"><span class="muted">Copy friction bps:</span><input name="copy_friction_bps" value="{friction}" size="5"><button>Set</button></form><span class="muted">Current: {mode}</span><span id="save-status" class="muted"></span><span style="margin-left:auto" class="muted">Auto refresh off</span></div><div class="cards">{cards}</div><div class="section"><b>COMBINED PORTFOLIO — NON-USER WALLETS</b><div class="panel">{chart}</div><div class="small">TRACKED WALLETS ({wallet_count}) — model derived in app from engine SSOT only. {raw_boundary}</div><div class="table-wrap"><table><thead>{table_head}</thead><tbody>{table_rows}</tbody></table></div></div>
 <script>(function(){{
 let busyUntil=0;
@@ -5028,6 +5189,66 @@ async def set_wallet_config(request: Request):
     return HTMLResponse('<meta http-equiv="refresh" content="0; url=/">')
 
 
+def render_wallet_meta_page(wallet: str, meta: Dict[str, str], saved: bool = False) -> str:
+    def opt(name: str, val: str, current: str) -> str:
+        sel = ' selected' if val == current else ''
+        return f'<option value="{html.escape(val)}"{sel}>{html.escape(val)}</option>'
+    tag_opts = "".join(opt("tag", v, meta.get("tag", "none")) for v in sorted(WALLET_META_TAGS))
+    color_opts = "".join(opt("color", v, meta.get("color", "none")) for v in sorted(WALLET_META_COLORS))
+    saved_banner = '<p style="color:#2ea043;margin:0 0 10px">Saved.</p>' if saved else ""
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>Wallet Meta — {html.escape(wallet)}</title>
+<style>
+body{{margin:0;background:#0d1117;color:#c9d1d9;font:13px Arial,Helvetica,sans-serif}}
+a{{color:#58a6ff;text-decoration:none}}
+.top{{display:flex;align-items:center;gap:12px;padding:8px 14px;border-bottom:1px solid #222;background:#090d12}}
+.box{{max-width:480px;margin:32px auto;background:#161b22;border:1px solid #21262d;border-radius:8px;padding:20px 24px}}
+h2{{margin:0 0 16px;font-size:15px;color:#c9d1d9}}
+label{{display:block;margin-bottom:12px;color:#8b949e;font-size:12px}}
+label span{{display:block;margin-bottom:4px}}
+input,select,textarea{{width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 8px;font-size:13px;box-sizing:border-box}}
+textarea{{height:60px;resize:vertical}}
+button{{background:#238636;color:#fff;border:none;border-radius:6px;padding:7px 18px;cursor:pointer;font-size:13px;margin-top:6px}}
+button:hover{{background:#2ea043}}
+.addr{{font-size:11px;color:#8b949e;font-family:monospace;word-break:break-all;margin-bottom:16px}}
+</style></head><body>
+<div class="top"><b>HL Copy Engine</b><a href="/">← Dashboard</a></div>
+<div class="box">
+<h2>Wallet meta</h2>
+{saved_banner}
+<div class="addr">{html.escape(wallet)}</div>
+<form action="/api/wallet-meta" method="post">
+  <input type="hidden" name="wallet" value="{html.escape(wallet)}">
+  <label><span>Tag</span><select name="tag">{tag_opts}</select></label>
+  <label><span>Color</span><select name="color">{color_opts}</select></label>
+  <label><span>Note</span><textarea name="note" maxlength="120">{html.escape(meta.get("note", ""))}</textarea></label>
+  <button type="submit">Save</button>
+</form>
+</div></body></html>"""
+
+
+@app.get("/wallet-meta/{wallet}", response_class=HTMLResponse)
+def wallet_meta_page(wallet: str, saved: str = "") -> HTMLResponse:
+    wallet = wallet.strip().lower()
+    ui = load_ui_state()
+    meta = get_wallet_meta(ui, wallet)
+    return HTMLResponse(render_wallet_meta_page(wallet, meta, saved == "1"))
+
+
+@app.post("/api/wallet-meta", response_class=HTMLResponse)
+async def api_wallet_meta(request: Request):
+    form = await request.form()
+    wallet = str(form.get("wallet", "")).strip().lower()
+    if wallet:
+        ui = load_ui_state()
+        meta = set_wallet_meta(ui, wallet, form.get("tag", "none"), form.get("note", ""), form.get("color", "none"))
+        save_ui_state({"wallet_meta": meta})
+    if wants_json_response(request):
+        return JSONResponse({"ok": True, "ui_state": load_ui_state()})
+    if wallet:
+        return HTMLResponse(f'<meta http-equiv="refresh" content="0; url=/wallet-meta/{html.escape(wallet)}?saved=1">')
+    return HTMLResponse('<meta http-equiv="refresh" content="0; url=/">')
+
+
 @app.post("/api/admin/purge-wallet")
 async def admin_purge_wallet(request: Request):
     """ADMIN MAINTENANCE ONLY: purge a wallet from active dashboard data files."""
@@ -5064,14 +5285,14 @@ def render_live_copy_control_panel() -> str:
           <h3>Global Live Copy Controls</h3>
           <button type="button" id="lcGcClose">close</button>
         </div>
-        <p>These override all wallet settings. 0 = disabled except marketable bps and close adverse diff.</p>
+        <p>These override all wallet settings. 0/blank = OFF. Slippage is shown as %. Internally converted where needed.</p>
         <div class="lc-form-grid" id="lcGcForm">
           <label>Max total live exposure ($) <input id="gcMaxTotal" type="number" min="0" step="1" placeholder="0 = disabled"></label>
           <label>Max per-asset directional exposure ($) <input id="gcMaxDir" type="number" min="0" step="1" placeholder="0 = disabled"></label>
           <label>Max per-wallet exposure ($) <input id="gcMaxWallet" type="number" min="0" step="1" placeholder="0 = disabled"></label>
           <label>Max per-order notional ($) <input id="gcMaxOrder" type="number" min="0" step="0.01" placeholder="0 = disabled"></label>
-          <label>Marketable bps (slippage) <input id="gcMktBps" type="number" min="0" max="20" step="0.1"></label>
-          <label>Close adverse diff % <input id="gcCloseAdv" type="number" min="0" step="0.01"></label>
+          <label>Marketable slippage % <input id="gcMktPct" type="number" min="0" max="0.50" step="0.01" placeholder="0 = OFF"><span id="gcMktPctState" class="lc-muted"></span></label>
+          <label>Adverse close diff % <input id="gcCloseAdv" type="number" min="0" step="0.01" placeholder="0 = OFF"><span id="gcCloseAdvState" class="lc-muted"></span></label>
           <label class="wide">Symbol allowlist (empty = all allowed) <input id="gcAllowlist" type="text" placeholder="BTC,ETH"></label>
           <label class="wide">Symbol blocklist <input id="gcBlocklist" type="text" placeholder="DOGE,SHIB"></label>
         </div>
@@ -5163,7 +5384,7 @@ def render_live_copy_control_panel() -> str:
         <p>Real fill quality from send_attempts.csv joined to order_intents.csv. Leader-vs-user bps requires reference price from intent.</p>
         <div class="lc-source-strip" id="lcExecQualChips"></div>
         <div class="lc-table-wrap">
-          <table style="min-width:1440px"><thead><tr><th>Time</th><th>Wallet</th><th>Coin</th><th>Side</th><th>Status</th><th>Limit px</th><th>Fill avg px</th><th>Size</th><th>OID</th><th>Fill-vs-limit bps</th><th>Leader-vs-user bps</th><th>Mkt bps</th><th>Error</th></tr></thead><tbody id="lcExecQualRows"><tr><td colspan="13">Loading...</td></tr></tbody></table>
+          <table style="min-width:1440px"><thead><tr><th>Time</th><th>Wallet</th><th>Coin</th><th>Side</th><th>Status</th><th>Limit px</th><th>Fill avg px</th><th>Size</th><th>OID</th><th>Fill-vs-limit %</th><th>Leader-vs-user %</th><th>Market slip %</th><th>Error</th></tr></thead><tbody id="lcExecQualRows"><tr><td colspan="13">Loading...</td></tr></tbody></table>
         </div>
       </section>
     </div>
@@ -5492,11 +5713,11 @@ function renderPositions(){
   const szCls=r.signed_size!=null?(r.signed_size>0?'lc-pos':'lc-neg'):'';
   const exCls=r.exchange_signed_size!=null?(r.exchange_signed_size>0?'lc-pos':'lc-neg'):'';
   const stRaw=r.ledger_vs_exchange||'—';
-  const stCls=stRaw==='MATCH'?'lc-green':stRaw==='EXCHANGE_UNAVAILABLE'?'':'lc-red';
+  const stCls=(stRaw==='MATCH'||String(stRaw).startsWith('SHARED_SYMBOL_NET_MATCH')||String(stRaw).startsWith('SHARED_SYMBOL_SLEEVE_TRACKED'))?'lc-green':stRaw==='EXCHANGE_UNAVAILABLE'?'':'lc-red';
   const upnlCls=r.unrealized_pnl!=null?(r.unrealized_pnl>0?'lc-pos':r.unrealized_pnl<0?'lc-neg':''):'';
   const pv=r.position_value!=null?('$'+Number(r.position_value).toLocaleString(undefined,{maximumFractionDigits:2})):'n/a';
   const upnlStr=r.unrealized_pnl!=null?('$'+Number(r.unrealized_pnl).toLocaleString(undefined,{maximumFractionDigits:2})):'n/a';
-  return `<tr><td><b>${h(r.coin||'—')}</b></td><td>${pill(r.side||'—',r.side||'')}</td><td class="${szCls}">${r.signed_size!=null?h(r.signed_size):'n/a'}</td><td class="${exCls}">${r.exchange_signed_size!=null?h(r.exchange_signed_size):'n/a'}</td><td>${r.entry_px!=null?h(r.entry_px):'n/a'}</td><td>${r.mark_px!=null?h(r.mark_px):'n/a'}</td><td>${pv}</td><td class="${upnlCls}">${upnlStr}</td><td class="lc-wallet">${h(r.leader_wallet?shortWallet(r.leader_wallet):'—')}</td><td><span class="lc-pill ${stCls}">${h(stRaw)}</span></td><td class="lc-wallet">${tiny(String(r.last_oid||'—'),24)}</td><td>${tiny(r.last_updated_at||'—',22)}</td></tr>`;
+  return `<tr><td><b>${h(r.coin||'—')}</b></td><td>${pill(r.side||'—',r.side||'')}</td><td class="${szCls}">${r.signed_size!=null?h(r.signed_size):'n/a'}</td><td class="${exCls}">${r.exchange_signed_size!=null?h(r.exchange_signed_size):'n/a'}</td><td>${r.entry_px!=null?h(r.entry_px):'n/a'}</td><td>${r.mark_px!=null?h(r.mark_px):'n/a'}</td><td>${pv}</td><td class="${upnlCls}">${upnlStr}</td><td class="lc-wallet">${h(r.leader_wallet?shortWallet(r.leader_wallet):'—')}</td><td title="${h(r.reconciliation_note||'')}"><span class="lc-pill ${stCls}">${h(stRaw)}</span></td><td class="lc-wallet">${tiny(String(r.last_oid||'—'),24)}</td><td>${tiny(r.last_updated_at||'—',22)}</td></tr>`;
  }).join('')||'<tr><td colspan="12">No real copy positions tracked. Positions appear here after the copy service places live orders.</td></tr>';
 }
 function renderExecQuality(){
@@ -5524,7 +5745,9 @@ function renderExecQuality(){
   const stCls=st==='ORDER_FILLED'?'lc-green':st==='ORDER_REJECTED'?'lc-red':st==='CONFIRM_REQUIRED'?'lc-blue':st?'lc-amber':'';
   const bCls=r.fill_bps!=null?(r.fill_bps>10?'lc-neg':r.fill_bps<=0?'lc-pos':''):'';
   const lbCls=r.leader_bps!=null?(r.leader_bps>10?'lc-neg':r.leader_bps<=0?'lc-pos':''):'';
-  return `<tr><td>${tiny(r.time||'—',22)}</td><td class="lc-wallet">${h(r.leader_wallet?shortWallet(r.leader_wallet):'—')}</td><td>${h(r.coin||'—')}</td><td>${h(r.side||'—')}</td><td><span class="lc-pill ${stCls}">${h(st)}</span></td><td>${r.limit_px!=null?h(r.limit_px):'n/a'}</td><td>${r.fill_avg_px!=null?h(r.fill_avg_px):'n/a'}</td><td>${r.fill_size!=null?h(r.fill_size):'n/a'}</td><td class="lc-wallet">${r.oid?tiny(String(r.oid),18):'n/a'}</td><td class="${bCls}">${r.fill_bps!=null?h(r.fill_bps)+'bps':'n/a'}</td><td class="${lbCls}">${r.leader_bps!=null?h(r.leader_bps)+'bps':'n/a'}</td><td>${r.marketable_bps!=null?h(r.marketable_bps)+'bps':'n/a'}</td><td title="${h(r.error||'')}">${tiny(r.error||'',28)}</td></tr>`;
+  const pct=v=>v!=null?(Number(v)/100).toFixed(4)+'%':'n/a';
+  const mkt=r.marketable_bps!=null?(Number(r.marketable_bps)<=0?'OFF':(Number(r.marketable_bps)/100).toFixed(2)+'%'):'n/a';
+  return `<tr><td>${tiny(r.time||'—',22)}</td><td class="lc-wallet">${h(r.leader_wallet?shortWallet(r.leader_wallet):'—')}</td><td>${h(r.coin||'—')}</td><td>${h(r.side||'—')}</td><td><span class="lc-pill ${stCls}">${h(st)}</span></td><td>${r.limit_px!=null?h(r.limit_px):'n/a'}</td><td>${r.fill_avg_px!=null?h(r.fill_avg_px):'n/a'}</td><td>${r.fill_size!=null?h(r.fill_size):'n/a'}</td><td class="lc-wallet">${r.oid?tiny(String(r.oid),18):'n/a'}</td><td class="${bCls}">${pct(r.fill_bps)}</td><td class="${lbCls}">${pct(r.leader_bps)}</td><td>${mkt}</td><td title="${h(r.error||'')}">${tiny(r.error||'',28)}</td></tr>`;
  }).join('')||'<tr><td colspan="13">No execution data. Real fills appear here after send_attempts.csv is populated.</td></tr>';
 }
 function renderAudit(){
@@ -5569,9 +5792,12 @@ function render(){
 async function refresh(quiet){try{if(!quiet)msg('Loading...');const [cfg,health,audit,gcr]=await Promise.all([jget('/api/live-config'),jget('/api/live-ws-health'),jget('/api/live-audit-summary'),jget('/api/global-controls')]);lcConfig=cfg.config||{wallets:{}};lcHealth=health.health||{};lcAudit=audit||{};render();loadGcForm(gcr.global_controls||{});if(!quiet)msg('Loaded');}catch(e){msg(e.message||String(e),true);}}
 function loadGcForm(gc){
   const f=(id,v)=>{const el=root.querySelector('#'+id);if(el&&v!=null)el.value=v;};
+  const st=(id,v)=>{const el=root.querySelector('#'+id);if(el)el.textContent=Number(v||0)<=0?'OFF':'';};
   f('gcMaxTotal',gc.max_total_live_exposure_usd||0);f('gcMaxDir',gc.max_asset_directional_exposure_usd||0);
   f('gcMaxWallet',gc.max_wallet_exposure_usd||0);f('gcMaxOrder',gc.max_order_notional_usd||0);
-  f('gcMktBps',gc.marketable_bps!=null?gc.marketable_bps:5);f('gcCloseAdv',gc.max_close_adverse_diff_pct!=null?gc.max_close_adverse_diff_pct:0.25);
+  const mktPct=gc.marketable_slippage_pct!=null?gc.marketable_slippage_pct:(Number(gc.marketable_bps||0)/100);
+  const closePct=gc.max_close_adverse_diff_pct!=null?gc.max_close_adverse_diff_pct:0;
+  f('gcMktPct',mktPct);f('gcCloseAdv',closePct);st('gcMktPctState',mktPct);st('gcCloseAdvState',closePct);
   f('gcAllowlist',(gc.symbol_allowlist||[]).join(','));f('gcBlocklist',(gc.symbol_blocklist||[]).join(','));
 }
 root.querySelector('#lcRefresh').addEventListener('click',()=>refresh());
@@ -5585,7 +5811,7 @@ root.querySelector('#lcGcSave').addEventListener('click',async()=>{
   const g=id=>parseFloat(root.querySelector('#'+id).value)||0;
   const gl=id=>(root.querySelector('#'+id).value||'').split(',').map(s=>s.trim().toUpperCase()).filter(Boolean);
   try{gs.textContent='Saving...';gs.className='lc-status';
-    await jpost('/api/global-controls',{max_total_live_exposure_usd:g('gcMaxTotal'),max_asset_directional_exposure_usd:g('gcMaxDir'),max_wallet_exposure_usd:g('gcMaxWallet'),max_order_notional_usd:g('gcMaxOrder'),marketable_bps:g('gcMktBps'),max_close_adverse_diff_pct:g('gcCloseAdv'),symbol_allowlist:gl('gcAllowlist'),symbol_blocklist:gl('gcBlocklist')});
+    await jpost('/api/global-controls',{max_total_live_exposure_usd:g('gcMaxTotal'),max_asset_directional_exposure_usd:g('gcMaxDir'),max_wallet_exposure_usd:g('gcMaxWallet'),max_order_notional_usd:g('gcMaxOrder'),marketable_slippage_pct:g('gcMktPct'),max_close_adverse_diff_pct:g('gcCloseAdv'),symbol_allowlist:gl('gcAllowlist'),symbol_blocklist:gl('gcBlocklist')});
     gs.textContent='Saved';gs.className='lc-status lc-ok';}catch(e){gs.textContent=e.message||String(e);gs.className='lc-status lc-bad';}
 });
 root.querySelectorAll('[data-lc-modal]').forEach(btn=>btn.addEventListener('click',()=>{const m=root.querySelector('#'+btn.dataset.lcModal);if(m){m.classList.add('active');m.setAttribute('aria-hidden','false');}}));
@@ -5822,7 +6048,7 @@ def get_live_config():
 @app.get("/api/global-controls")
 def get_global_controls():
     cfg = _load_live_copy_config()
-    return JSONResponse({"ok": True, "global_controls": cfg.get("global_controls", _GLOBAL_CONTROLS_DEFAULTS)})
+    return JSONResponse({"ok": True, "global_controls": _global_controls_for_ui(cfg.get("global_controls", _GLOBAL_CONTROLS_DEFAULTS))})
 
 
 @app.post("/api/global-controls")
@@ -5832,7 +6058,7 @@ async def set_global_controls(req: Request):
         config = _load_live_copy_config()
         config["global_controls"] = _normalise_global_controls(body)
         _save_live_copy_config(config)
-        return JSONResponse({"ok": True, "global_controls": config["global_controls"]})
+        return JSONResponse({"ok": True, "global_controls": _global_controls_for_ui(config["global_controls"])})
     except Exception as exc:
         return _live_config_error(type(exc).__name__)
 

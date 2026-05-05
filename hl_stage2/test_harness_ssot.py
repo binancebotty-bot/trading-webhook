@@ -148,10 +148,16 @@ def configure_app_paths(tmp: Path) -> None:
     appmod.RAW_FILLS_CSV = out / "raw_live_fills.csv"
     appmod.APP_MODEL_STATE_JSON = out / "app_model_state.json"
     appmod.COPY_TRADES_CSV = out / "copy_trades.csv"
+    appmod.LIVE_WALLET_METRICS_CSV = out / "live_wallet_metrics.csv"
+    appmod.EXCHANGE_BASELINES_JSON = out / "exchange_baselines.json"
     appmod.PORTFOLIO_HISTORY_FILE = out / "portfolio_history.json"
     appmod.EQUITY_HISTORY_FILE = out / "equity_history.json"
     appmod.UI_STATE_FILE = tmp / "ui_state.json"
     appmod.WALLET_GATE_FILE = tmp / "wallet_gate.json"
+    appmod.MANUAL_WALLETS_FILE = tmp / "manual_wallets.txt"
+    appmod.PURGED_WALLETS_FILE = tmp / "purged_wallets.txt"
+    appmod.LIVE_COPY_AUDIT_DIR = tmp / "hl_live_copy_audit"
+    appmod.LIVE_COPY_CONFIG_FILE = appmod.LIVE_COPY_AUDIT_DIR / "live_config.json"
     appmod.SNAP_DIR = out / "snapshots"
     if hasattr(appmod, "EXPECTED_COPY_FILLS_CSV"):
         appmod.EXPECTED_COPY_FILLS_CSV = out / "expected_copy_fills.csv"
@@ -1273,6 +1279,31 @@ def test_combined_maxdd_is_max_timestamped_sum_dd() -> None:
           str(port["lead"]))
 
 
+def test_maxdd_contract_uses_cents_safe_tolerance() -> None:
+    import copy as _copy
+    state = _synthetic_combined_state()
+
+    small = _copy.deepcopy(state)
+    small["portfolio"]["lead"]["max_drawdown"] += 0.03
+    small["portfolio"]["copy"]["max_drawdown"] += 0.03
+    errs_small = appmod.validate_render_contract(small)
+    check("cents-safe portfolio lead MaxDD tamper ignored",
+          not any("portfolio lead MaxDD" in e for e in errs_small), str(errs_small))
+    check("cents-safe portfolio copy MaxDD tamper ignored",
+          not any("portfolio copy MaxDD" in e for e in errs_small), str(errs_small))
+    check("cents-safe header/user MaxDD tamper ignored",
+          not any("header/user" in e and "maxDD" in e for e in errs_small), str(errs_small))
+
+    big = _copy.deepcopy(state)
+    big["portfolio"]["lead"]["max_drawdown"] += 0.10
+    big["portfolio"]["copy"]["max_drawdown"] += 0.10
+    errs_big = appmod.validate_render_contract(big)
+    check("real portfolio lead MaxDD drift still warns",
+          any("portfolio lead MaxDD" in e for e in errs_big), str(errs_big))
+    check("real portfolio copy MaxDD drift still warns",
+          any("portfolio copy MaxDD" in e for e in errs_big), str(errs_big))
+
+
 def test_combined_max_exposure_is_max_timestamped_sum_exposure() -> None:
     state = _synthetic_combined_state()
     port = state["portfolio"]
@@ -1436,8 +1467,8 @@ def test_live_dd_differs_from_curve_tail_uses_live_blocks() -> None:
               f"unexpected MaxDD errors: {[e for e in errs_patched if 'MaxDD' in e]}")
 
 
-def test_user_row_has_no_fake_wallet_controls_but_global_base_exists() -> None:
-    """USER aggregate row must not contain inc-form or wallet-cfg; global norm_base control must be present."""
+def test_user_row_has_aggregate_base_control_only() -> None:
+    """USER row must contain only the aggregate-base form; no per-wallet model controls."""
     wallet = "0xa100000000000000000000000000000000000051"
     with tempfile.TemporaryDirectory() as td:
         rows = [
@@ -1451,10 +1482,55 @@ def test_user_row_has_no_fake_wallet_controls_but_global_base_exists() -> None:
         if user_tr_start >= 0:
             user_tr_end = html_out.find('</tr>', user_tr_start)
             user_row_html = html_out[user_tr_start:user_tr_end]
-            check("USER row has no inc-form", "inc-form" not in user_row_html, user_row_html[-200:])
-            check("USER row has no wallet-cfg", "wallet-cfg" not in user_row_html, user_row_html[-200:])
-            check("USER row has aggregate indicator text", "aggregate" in user_row_html, user_row_html[-200:])
-        check("global header contains norm_base control", 'name="norm_base"' in html_out, "")
+            check("USER row has aggregate base indicator", "aggregate base" in user_row_html, user_row_html[-300:])
+            check("USER row has user_norm_base input", 'name="user_norm_base"' in user_row_html, user_row_html[-300:])
+            check("USER row has no norm_base input", 'name="norm_base"' not in user_row_html, user_row_html[-300:])
+            check("USER row has no inc-form", "inc-form" not in user_row_html, user_row_html[-300:])
+            check("USER row has no wallet-cfg", "wallet-cfg" not in user_row_html, user_row_html[-300:])
+            check("USER row has no copy_mode field", 'name="copy_mode"' not in user_row_html, user_row_html[-300:])
+            check("USER row has no fixed_notional field", 'name="fixed_notional"' not in user_row_html, user_row_html[-300:])
+
+
+def test_user_aggregate_base_form_posts_to_api_ui_state() -> None:
+    """USER row aggregate-base form must post to /api/ui-state with class ajax-form."""
+    wallet = "0xa105000000000000000000000000000000000055"
+    with tempfile.TemporaryDirectory() as td:
+        rows = [
+            raw_row(wallet, "BTC", "BUY",  100.0, 1.0, 1000, "ubf-entry", expected_copy_price=100.0),
+            raw_row(wallet, "BTC", "SELL", 110.0, 1.0, 2000, "ubf-exit",  expected_copy_price=110.0),
+        ]
+        state = build_app_state(Path(td), rows)
+        html_out = appmod.render_home(state)
+        user_tr_start = html_out.find('<tr class="user">')
+        check("USER tr found", user_tr_start >= 0, "")
+        if user_tr_start >= 0:
+            user_tr_end = html_out.find('</tr>', user_tr_start)
+            user_row_html = html_out[user_tr_start:user_tr_end]
+            check("USER row form posts to /api/ui-state",
+                  'action="/api/ui-state"' in user_row_html, user_row_html[-300:])
+            check("USER row form has ajax-form class (success reload applies)",
+                  "ajax-form" in user_row_html, user_row_html[-300:])
+
+
+def test_user_base_form_posts_user_norm_base_not_norm_base() -> None:
+    """USER aggregate base form posts only user_norm_base, not model controls."""
+    wallet = "0xa106000000000000000000000000000000000061"
+    with tempfile.TemporaryDirectory() as td:
+        state = build_app_state(Path(td), [
+            raw_row(wallet, "BTC", "BUY", 100.0, 1.0, 1000, "ubf2-entry", expected_copy_price=100.0),
+        ], {"copy_mode": "fixed", "fixed_notional": 100.0, "norm_base": 100.0, "user_norm_base": 777.0, "fee_bps": 5.0})
+        html_out = appmod.render_home(state)
+        user_tr_start = html_out.find('<tr class="user">')
+        check("USER tr found for user_norm_base form", user_tr_start >= 0, "")
+        if user_tr_start >= 0:
+            user_tr_end = html_out.find('</tr>', user_tr_start)
+            user_row_html = html_out[user_tr_start:user_tr_end]
+            check("user-base-form exists", "user-base-form" in user_row_html, user_row_html[-300:])
+            check("USER row posts user_norm_base", 'name="user_norm_base"' in user_row_html, user_row_html[-300:])
+            check("USER row does not post norm_base", 'name="norm_base"' not in user_row_html, user_row_html[-300:])
+            check("USER row has no wallet/inc/model controls",
+                  all(x not in user_row_html for x in ("wallet-cfg", "inc-form", 'name="copy_mode"', 'name="fixed_notional"')),
+                  user_row_html[-300:])
 
 
 def test_non_user_wallet_controls_still_render() -> None:
@@ -1470,6 +1546,389 @@ def test_non_user_wallet_controls_still_render() -> None:
         check("inc-form present in rendered HTML for non-user wallet", "inc-form" in html_out, "")
         check("wallet-cfg present in rendered HTML for non-user wallet", "wallet-cfg" in html_out, "")
         check("INC label present in non-user wallet row", ">INC<" in html_out, "")
+
+
+def test_wallet_meta_persists_in_ui_state() -> None:
+    target = "0xa111000000000000000000000000000000000064"
+    keep_cfg = "0xa112000000000000000000000000000000000065"
+    with tempfile.TemporaryDirectory() as td:
+        configure_app_paths(Path(td))
+        write_json(appmod.UI_STATE_FILE, {
+            "copy_mode": "fixed",
+            "fixed_notional": 44.0,
+            "norm_base": 222.0,
+            "user_norm_base": 333.0,
+            "fee_bps": 5.0,
+            "wallet_config": {keep_cfg: {"copy_mode": "fixed", "norm_base": 321.0, "fixed_notional": 12.0}},
+            "wallet_include": {keep_cfg: False},
+            "ranking": {"column": "copy_real", "direction": "asc"},
+        })
+        appmod.save_ui_state({"wallet_meta": {target: {"tag": "watch", "color": "purple", "note": "review after London open"}}})
+        loaded = appmod.load_ui_state()
+        check("wallet_meta tag/color/note persist",
+              loaded.get("wallet_meta", {}).get(target) == {"tag": "watch", "color": "purple", "note": "review after London open"},
+              str(loaded.get("wallet_meta")))
+        check("wallet_config preserved with wallet_meta save",
+              loaded.get("wallet_config", {}).get(keep_cfg, {}).get("copy_mode") == "fixed", str(loaded))
+        check("wallet_include preserved with wallet_meta save",
+              loaded.get("wallet_include", {}).get(keep_cfg) is False, str(loaded))
+        check("ranking preserved with wallet_meta save",
+              loaded.get("ranking") == {"column": "copy_real", "direction": "asc"}, str(loaded.get("ranking")))
+        check("norm bases preserved with wallet_meta save",
+              approx(loaded.get("norm_base"), 222.0, 0.01) and approx(loaded.get("user_norm_base"), 333.0, 0.01),
+              str(loaded))
+
+
+def test_no_unrelated_auto_wallet_header_cards() -> None:
+    wallet = "0xa113000000000000000000000000000000000066"
+    with tempfile.TemporaryDirectory() as td:
+        state = build_app_state(Path(td), [
+            raw_row(wallet, "BTC", "BUY", 100.0, 1.0, 1000, "noauto-entry", expected_copy_price=100.0),
+        ])
+        html_out = appmod.render_home(state)
+        for forbidden in ("EXPOSURE EST", "AUTO WALLET", "WALLET FILTER", "MAXRUN", "MKT SLIP", "CLOSE ADV", "LEGACY CAP"):
+            check(f"header does not contain {forbidden}", forbidden not in html_out, "")
+
+
+def test_wallet_meta_not_inline_in_main_table() -> None:
+    wallet = "0xa113000000000000000000000000000000000066"
+    with tempfile.TemporaryDirectory() as td:
+        state = build_app_state(Path(td), [
+            raw_row(wallet, "BTC", "BUY", 100.0, 1.0, 1000, "wmc-entry", expected_copy_price=100.0),
+        ], {"copy_mode": "fixed", "fixed_notional": 100.0, "norm_base": 100.0, "wallet_meta": {wallet: {"tag": "risk", "color": "red", "note": "thin exits"}}})
+        html_out = appmod.render_home(state)
+        main_start = html_out.find("<tbody>")
+        main_end = html_out.find("</tbody>", main_start)
+        main_rows = html_out[main_start:main_end]
+        check("main table rows do not contain wallet-meta-form", "wallet-meta-form" not in main_rows, main_rows[-500:])
+        check("main table rows do not contain tag field", 'name="tag"' not in main_rows, main_rows[-500:])
+        check("main table rows do not contain color field", 'name="color"' not in main_rows, main_rows[-500:])
+        check("main table rows do not contain note field", 'name="note"' not in main_rows, main_rows[-500:])
+
+
+def test_wallet_color_badge_display_only() -> None:
+    wallet = "0xa115000000000000000000000000000000000068"
+    with tempfile.TemporaryDirectory() as td:
+        state = build_app_state(Path(td), [
+            raw_row(wallet, "BTC", "BUY", 100.0, 1.0, 1000, "wmcolor-entry", expected_copy_price=100.0),
+        ], {"copy_mode": "fixed", "fixed_notional": 100.0, "norm_base": 100.0, "wallet_meta": {wallet: {"tag": "risk", "color": "red", "note": "test note"}}})
+        html_out = appmod.render_home(state)
+        wallet_pos = html_out.find(wallet[:8])
+        td_start = html_out.rfind("<td", 0, wallet_pos)
+        td_end = html_out.find("</td>", td_start)
+        wallet_cell = html_out[td_start:td_end]
+        row_start = html_out.rfind("<tr", 0, wallet_pos)
+        row_end = html_out.find("</tr>", row_start)
+        row_html = html_out[row_start:row_end]
+        check("wallet cell carries red color class", "sticky-wallet wallet-color-red" in wallet_cell, wallet_cell)
+        check("wallet cell title contains note", "test note" in wallet_cell, wallet_cell)
+        check("rendered row contains compact risk badge", "wallet-tag" in row_html and "RISK" in row_html, row_html)
+        check("rendered row does not contain wallet-meta-form", "wallet-meta-form" not in row_html, row_html)
+
+
+def test_wallet_meta_edit_link_present_for_non_user_only() -> None:
+    wallet = "0xa116000000000000000000000000000000000069"
+    with tempfile.TemporaryDirectory() as td:
+        state = build_app_state(Path(td), [
+            raw_row(wallet, "BTC", "BUY", 100.0, 1.0, 1000, "wmel-entry", expected_copy_price=100.0),
+        ])
+        html_out = appmod.render_home(state)
+        main_start = html_out.find("<tbody>")
+        main_end = html_out.find("</tbody>", main_start)
+        main_rows = html_out[main_start:main_end]
+        check("non-user row contains /wallet-meta/ link",
+              f"/wallet-meta/{wallet}" in main_rows or "meta-edit-link" in main_rows, main_rows[-600:])
+        user_wallet_start = main_rows.find("USER")
+        if user_wallet_start >= 0:
+            user_row_start = main_rows.rfind("<tr", 0, user_wallet_start)
+            user_row_end = main_rows.find("</tr>", user_wallet_start)
+            user_row = main_rows[user_row_start:user_row_end]
+            check("USER row does not contain meta-edit-link", "meta-edit-link" not in user_row, user_row[-300:])
+        else:
+            check("USER row does not contain meta-edit-link (no USER row present)", True, "no USER row in output")
+
+
+def test_wallet_meta_form_not_in_main_table() -> None:
+    wallet = "0xa117000000000000000000000000000000000070"
+    with tempfile.TemporaryDirectory() as td:
+        state = build_app_state(Path(td), [
+            raw_row(wallet, "BTC", "BUY", 100.0, 1.0, 1000, "wmfmt-entry", expected_copy_price=100.0),
+        ], {"copy_mode": "fixed", "fixed_notional": 100.0, "norm_base": 100.0, "wallet_meta": {wallet: {"tag": "risk", "color": "red", "note": "form check"}}})
+        html_out = appmod.render_home(state)
+        main_start = html_out.find("<tbody>")
+        main_end = html_out.find("</tbody>", main_start)
+        main_rows = html_out[main_start:main_end]
+        check("main table does not contain wallet-meta-form", "wallet-meta-form" not in main_rows, main_rows[-400:])
+        check("main table does not contain tag select field", 'name="tag"' not in main_rows, main_rows[-400:])
+        check("main table does not contain color select field", 'name="color"' not in main_rows, main_rows[-400:])
+        check("main table does not contain note input field", 'name="note"' not in main_rows, main_rows[-400:])
+
+
+def test_wallet_meta_detail_page_has_controls() -> None:
+    wallet = "0xa118000000000000000000000000000000000071"
+    saved_note = "great exits lately"
+    with tempfile.TemporaryDirectory() as td:
+        configure_app_paths(Path(td))
+        appmod.save_ui_state({"wallet_meta": {wallet: {"tag": "watch", "color": "blue", "note": saved_note}}})
+        ui = appmod.load_ui_state()
+        meta = appmod.get_wallet_meta(ui, wallet)
+        page = appmod.render_wallet_meta_page(wallet, meta)
+        check("detail page has form posting to /api/wallet-meta", 'action="/api/wallet-meta"' in page, page[-400:])
+        check("detail page has hidden wallet field", f'name="wallet"' in page and wallet in page, page[-400:])
+        check("detail page has tag select", 'name="tag"' in page, page[-400:])
+        check("detail page has color select", 'name="color"' in page, page[-400:])
+        check("detail page has note textarea", 'name="note"' in page, page[-400:])
+        check("detail page shows saved note value", saved_note in page, page[-400:])
+        check("detail page has back link to dashboard", 'href="/"' in page, page[-400:])
+
+
+def test_wallet_meta_post_persists_values() -> None:
+    wallet = "0xa119000000000000000000000000000000000072"
+    with tempfile.TemporaryDirectory() as td:
+        configure_app_paths(Path(td))
+        appmod.save_ui_state({"copy_mode": "fixed", "fixed_notional": 50.0, "norm_base": 100.0})
+        ui = appmod.load_ui_state()
+        appmod.set_wallet_meta(ui, wallet, "scale", "post persist test", "green")
+        updated_meta = appmod.set_wallet_meta(ui, wallet, "scale", "post persist test", "green")
+        appmod.save_ui_state({"wallet_meta": updated_meta})
+        loaded = appmod.load_ui_state()
+        wm = loaded.get("wallet_meta", {}).get(wallet, {})
+        check("meta post persists tag", wm.get("tag") == "scale", str(wm))
+        check("meta post persists color", wm.get("color") == "green", str(wm))
+        check("meta post persists note", wm.get("note") == "post persist test", str(wm))
+        check("meta post does not affect copy_mode", loaded.get("copy_mode") == "fixed", str(loaded))
+        check("meta post does not affect fixed_notional", approx(loaded.get("fixed_notional"), 50.0), str(loaded))
+
+
+def test_wallet_meta_does_not_affect_model_values() -> None:
+    target = "0xa114000000000000000000000000000000000067"
+    rows = [
+        raw_row(target, "BTC", "BUY", 100.0, 1.0, 1000, "wmm-entry", expected_copy_price=100.0),
+        raw_row(target, "BTC", "SELL", 112.0, 1.0, 2000, "wmm-exit", expected_copy_price=112.0),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        state = build_app_state(Path(td), rows, {"copy_mode": "fixed", "fixed_notional": 100.0, "norm_base": 100.0, "fee_bps": 5.0})
+        before = next(r for r in state["wallet_rows"] if str(r.get("wallet")).lower() == target)
+        keys = {
+            "effective_copy_mode": before.get("effective_copy_mode"),
+            "effective_norm_base": before.get("effective_norm_base"),
+            "lead_equity": before.get("lead", {}).get("equity"),
+            "copy_equity": before.get("copy", {}).get("equity"),
+            "lead_dd": before.get("lead", {}).get("drawdown"),
+            "copy_dd": before.get("copy", {}).get("drawdown"),
+            "lead_maxdd": before.get("lead", {}).get("max_drawdown"),
+            "copy_maxdd": before.get("copy", {}).get("max_drawdown"),
+        }
+        appmod.save_ui_state({"wallet_meta": {target: {"tag": "scale", "color": "green", "note": "display only"}}})
+        state2 = appmod.build_model_state()
+        after = next(r for r in state2["wallet_rows"] if str(r.get("wallet")).lower() == target)
+        after_keys = {
+            "effective_copy_mode": after.get("effective_copy_mode"),
+            "effective_norm_base": after.get("effective_norm_base"),
+            "lead_equity": after.get("lead", {}).get("equity"),
+            "copy_equity": after.get("copy", {}).get("equity"),
+            "lead_dd": after.get("lead", {}).get("drawdown"),
+            "copy_dd": after.get("copy", {}).get("drawdown"),
+            "lead_maxdd": after.get("lead", {}).get("max_drawdown"),
+            "copy_maxdd": after.get("copy", {}).get("max_drawdown"),
+        }
+        check("wallet_meta does not affect model/accounting values", after_keys == keys, f"before={keys} after={after_keys}")
+
+
+def test_purge_button_renders_for_non_user_only() -> None:
+    """Dashboard renders admin purge only for normal wallet rows, never USER aggregate."""
+    wallet = "0xa150000000000000000000000000000000000057"
+    with tempfile.TemporaryDirectory() as td:
+        state = build_app_state(Path(td), [
+            raw_row(wallet, "BTC", "BUY", 100.0, 1.0, 1000, "pbr-entry", expected_copy_price=100.0),
+        ])
+        html_out = appmod.render_home(state)
+        user_start = html_out.find('<tr class="user">')
+        user_end = html_out.find("</tr>", user_start)
+        user_row = html_out[user_start:user_end]
+        check("non-user row contains purge-form", 'class="purge-form"' in html_out, "")
+        check("USER row does not contain purge-form", 'class="purge-form"' not in user_row,
+              user_row[:160])
+
+
+def test_purge_requires_full_wallet_confirmation_js_present() -> None:
+    """Purge form must be wired into AJAX submit handler with exact full-wallet prompt."""
+    wallet = "0xa160000000000000000000000000000000000058"
+    with tempfile.TemporaryDirectory() as td:
+        state = build_app_state(Path(td), [
+            raw_row(wallet, "BTC", "BUY", 100.0, 1.0, 1000, "prc-entry", expected_copy_price=100.0),
+        ])
+        html_out = appmod.render_home(state)
+        check("purge prompt requires full wallet address",
+              "Type full wallet address to permanently purge" in html_out, "")
+        check("purge-form included in submit handler",
+              ".ajax-form,.wallet-cfg,.inc-form,.purge-form" in html_out, "")
+        check("typed confirmation must equal wallet",
+              "typed!==wallet" in html_out, "")
+
+
+def test_purge_wallet_removes_active_loaded_data_and_blacklists() -> None:
+    """Admin purge removes target wallet from active files, preserves keep wallet, and backs up."""
+    target = "0xa170000000000000000000000000000000000059"
+    keep = "0xa180000000000000000000000000000000000060"
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        configure_app_paths(tmp)
+        appmod.MANUAL_WALLETS_FILE.write_text(f"{target}\n{keep}\n", encoding="utf-8")
+        write_json(appmod.UI_STATE_FILE, {
+            "wallet_config": {target: {"copy_mode": "fixed"}, keep: {"copy_mode": "proportional"}},
+            "wallet_include": {target: False, keep: True},
+        })
+        write_json(appmod.WALLET_GATE_FILE, {target: {"mode": "LIVE"}, keep: {"mode": "OFF"}})
+        write_json(appmod.LIVE_COPY_CONFIG_FILE, {"wallets": {target: {"mode": "LIVE"}, keep: {"mode": "OFF"}}})
+        write_json(appmod.EXCHANGE_BASELINES_JSON, {target: {"BTC": 1}, keep: {"BTC": 2}})
+        for path in (appmod.ENGINE_TRUTH_JSON, appmod.LEGACY_LIVE_STATE_JSON):
+            write_json(path, {
+                "wallets": {target: {"equity": 1}, keep: {"equity": 2}},
+                target: {"top": True},
+                keep: {"top": True},
+                "fills": [{"wallet": target, "id": "drop"}, {"wallet": keep, "id": "keep"}],
+            })
+        csv_rows = [{"wallet": target, "value": "drop"}, {"wallet": keep, "value": "keep"}]
+        for path in (appmod.RAW_FILLS_CSV, appmod.EXPECTED_COPY_FILLS_CSV, appmod.COPY_TRADES_CSV, appmod.LIVE_WALLET_METRICS_CSV):
+            write_raw_fills(path, csv_rows)
+        for path in (appmod.APP_MODEL_STATE_JSON, appmod.PORTFOLIO_HISTORY_FILE, appmod.EQUITY_HISTORY_FILE):
+            write_json(path, {"wallet": target})
+
+        proof = appmod.purge_wallet_everywhere(target)
+        check("purge returns ok", bool(proof.get("ok")), str(proof))
+        check("backup folder exists", Path(proof.get("backup_dir", "")).exists(), str(proof.get("backup_dir")))
+        check("purged_wallets.txt contains target", target in appmod.PURGED_WALLETS_FILE.read_text(encoding="utf-8"), "")
+        manual = appmod.MANUAL_WALLETS_FILE.read_text(encoding="utf-8")
+        check("manual wallet target removed", target not in manual, manual)
+        check("manual wallet keep remains", keep in manual, manual)
+
+        ui = appmod.load_json(appmod.UI_STATE_FILE, {})
+        check("ui wallet_config target removed", target not in ui.get("wallet_config", {}), str(ui))
+        check("ui wallet_include target removed", target not in ui.get("wallet_include", {}), str(ui))
+        check("ui keep wallet remains", keep in ui.get("wallet_config", {}) and keep in ui.get("wallet_include", {}), str(ui))
+        gate = appmod.load_json(appmod.WALLET_GATE_FILE, {})
+        live_cfg = appmod.load_json(appmod.LIVE_COPY_CONFIG_FILE, {})
+        check("wallet_gate target removed", target not in gate and keep in gate, str(gate))
+        check("live_config target removed", target not in live_cfg.get("wallets", {}) and keep in live_cfg.get("wallets", {}), str(live_cfg))
+        baselines = appmod.load_json(appmod.EXCHANGE_BASELINES_JSON, {})
+        check("exchange_baselines target removed", target not in baselines and keep in baselines, str(baselines))
+        for path in (appmod.ENGINE_TRUTH_JSON, appmod.LEGACY_LIVE_STATE_JSON):
+            payload = appmod.load_json(path, {})
+            rows = payload.get("fills", [])
+            check(f"{path.name} target removed", target not in payload.get("wallets", {}) and target not in payload,
+                  str(payload))
+            check(f"{path.name} keep remains", keep in payload.get("wallets", {}) and keep in payload, str(payload))
+            check(f"{path.name} list wallet row removed",
+                  all(str(r.get("wallet", "")).lower() != target for r in rows), str(rows))
+        for path in (appmod.RAW_FILLS_CSV, appmod.EXPECTED_COPY_FILLS_CSV, appmod.COPY_TRADES_CSV, appmod.LIVE_WALLET_METRICS_CSV):
+            rows = list(csv.DictReader(path.open("r", newline="", encoding="utf-8")))
+            wallets = {r.get("wallet") for r in rows}
+            check(f"{path.name} target CSV row removed", target not in wallets and keep in wallets, str(rows))
+        for path in (appmod.APP_MODEL_STATE_JSON, appmod.PORTFOLIO_HISTORY_FILE, appmod.EQUITY_HISTORY_FILE):
+            check(f"{path.name} derived file deleted", not path.exists(), str(path))
+
+        write_json(appmod.ENGINE_TRUTH_JSON, {"wallets": {target: {"equity": 9}, keep: {"equity": 10}}})
+        write_raw_fills(appmod.RAW_FILLS_CSV, [
+            raw_row(target, "BTC", "BUY", 100.0, 1.0, 3000, "blacklist-target", expected_copy_price=100.0),
+            raw_row(keep, "BTC", "BUY", 100.0, 1.0, 3001, "blacklist-keep", expected_copy_price=100.0),
+        ])
+        loaded_truth = appmod.load_engine_truth()
+        loaded_fills = appmod.load_raw_fills()
+        check("purged blacklist hides reappearing engine_truth wallet",
+              target not in loaded_truth.get("wallets", {}) and keep in loaded_truth.get("wallets", {}),
+              str(loaded_truth))
+        check("purged blacklist hides reappearing raw fill wallet",
+              target not in {f.wallet for f in loaded_fills} and keep in {f.wallet for f in loaded_fills},
+              str([f.wallet for f in loaded_fills]))
+
+
+def test_purge_refuses_user_wallet() -> None:
+    """Admin purge must not allow deleting the USER aggregate wallet."""
+    with tempfile.TemporaryDirectory() as td:
+        configure_app_paths(Path(td))
+        try:
+            appmod.purge_wallet_everywhere(appmod.USER_WALLET)
+            refused = False
+        except ValueError as exc:
+            refused = str(exc) == "CANNOT_PURGE_USER_WALLET"
+        check("purge refuses USER_WALLET", refused, appmod.USER_WALLET)
+
+
+def test_user_base_does_not_change_global_wallet_model_base() -> None:
+    """user_norm_base drives USER/header denominator only; wallet fallback remains norm_base."""
+    wallet = "0xa190000000000000000000000000000000000061"
+    ui = {"copy_mode": "proportional", "norm_base": 100.0, "user_norm_base": 1000.0, "leader_equity_base": 10000.0, "fee_bps": 5.0}
+    with tempfile.TemporaryDirectory() as td:
+        state = build_app_state(Path(td), [
+            raw_row(wallet, "BTC", "BUY", 100.0, 1.0, 1000, "ubase-entry", expected_copy_price=100.0),
+        ], ui)
+        non_user = next(r for r in state["wallet_rows"] if str(r.get("wallet")).lower() == wallet)
+        user_row = next(r for r in state["wallet_rows"] if r.get("is_user_wallet"))
+        expected_rl = float(user_row.get("max_position_usd", 0)) / 1000.0
+        check("non-user effective_norm_base remains global norm_base",
+              approx(float(non_user.get("effective_norm_base", 0)), 100.0, 0.01), str(non_user.get("effective_norm_base")))
+        check("wallet_alloc uses global norm_base fallback",
+              approx(appmod.wallet_alloc(wallet, appmod.load_ui_state()), 100.0, 0.01), str(appmod.wallet_alloc(wallet, appmod.load_ui_state())))
+        check("USER alloc uses user_norm_base",
+              approx(float(user_row.get("alloc", 0)), 1000.0, 0.01), str(user_row.get("alloc")))
+        check("header/user required_leverage uses user_norm_base denominator",
+              approx(float(state.get("portfolio", {}).get("max_required_leverage", 0)), expected_rl, 0.001)
+              and approx(float(user_row.get("required_leverage", 0)), expected_rl, 0.001),
+              f"header={state.get('portfolio', {}).get('max_required_leverage')} user={user_row.get('required_leverage')} expected={expected_rl}")
+
+
+def test_global_header_norm_base_still_controls_wallet_fallback() -> None:
+    """Header norm_base remains the non-user wallet fallback; user base defaults to norm_base."""
+    wallet = "0xa200000000000000000000000000000000000062"
+    with tempfile.TemporaryDirectory() as td1:
+        state = build_app_state(Path(td1), [
+            raw_row(wallet, "BTC", "BUY", 100.0, 1.0, 1000, "ghb-entry", expected_copy_price=100.0),
+        ], {"copy_mode": "proportional", "norm_base": 123.0, "leader_equity_base": 10000.0, "fee_bps": 5.0})
+        non_user = next(r for r in state["wallet_rows"] if str(r.get("wallet")).lower() == wallet)
+        user_row = next(r for r in state["wallet_rows"] if r.get("is_user_wallet"))
+        check("global norm_base controls wallet fallback",
+              approx(float(non_user.get("effective_norm_base", 0)), 123.0, 0.01), str(non_user.get("effective_norm_base")))
+        check("USER alloc falls back to norm_base when user_norm_base missing",
+              approx(float(user_row.get("alloc", 0)), 123.0, 0.01), str(user_row.get("alloc")))
+    with tempfile.TemporaryDirectory() as td2:
+        state2 = build_app_state(Path(td2), [
+            raw_row(wallet, "BTC", "BUY", 100.0, 1.0, 1000, "ghb2-entry", expected_copy_price=100.0),
+        ], {"copy_mode": "proportional", "norm_base": 123.0, "user_norm_base": 456.0, "leader_equity_base": 10000.0, "fee_bps": 5.0})
+        user_row2 = next(r for r in state2["wallet_rows"] if r.get("is_user_wallet"))
+        check("USER alloc uses explicit user_norm_base",
+              approx(float(user_row2.get("alloc", 0)), 456.0, 0.01), str(user_row2.get("alloc")))
+
+
+def test_wallet_config_override_persists_and_overrides_global() -> None:
+    """Per-wallet config overrides global norm_base and is unaffected by user_norm_base-only edits."""
+    target = "0xa210000000000000000000000000000000000063"
+    rows = [raw_row(target, "BTC", "BUY", 100.0, 1.0, 1000, "wco-entry", expected_copy_price=100.0)]
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        build_app_state(tmp, rows, {
+            "copy_mode": "proportional",
+            "norm_base": 100.0,
+            "user_norm_base": 999.0,
+            "fixed_notional": 100.0,
+            "fee_bps": 5.0,
+            "wallet_config": {target: {"copy_mode": "fixed", "norm_base": 321.0, "fixed_notional": 12.0}},
+        })
+        state = appmod.build_model_state()
+        row = next(r for r in state["wallet_rows"] if str(r.get("wallet")).lower() == target)
+        user_row = next(r for r in state["wallet_rows"] if r.get("is_user_wallet"))
+        check("wallet override copy_mode persists", row.get("effective_copy_mode") == "fixed", str(row.get("effective_copy_mode")))
+        check("wallet override norm_base persists", approx(float(row.get("effective_norm_base", 0)), 321.0, 0.01), str(row.get("effective_norm_base")))
+        check("wallet override fixed_notional persists", approx(float(row.get("effective_fixed_notional", 0)), 12.0, 0.01), str(row.get("effective_fixed_notional")))
+        check("USER alloc uses user_norm_base with wallet override present", approx(float(user_row.get("alloc", 0)), 999.0, 0.01), str(user_row.get("alloc")))
+        appmod.save_ui_state({"user_norm_base": 1111.0})
+        state2 = appmod.build_model_state()
+        row2 = next(r for r in state2["wallet_rows"] if str(r.get("wallet")).lower() == target)
+        check("changing user_norm_base does not change wallet override values",
+              row2.get("effective_copy_mode") == "fixed"
+              and approx(float(row2.get("effective_norm_base", 0)), 321.0, 0.01)
+              and approx(float(row2.get("effective_fixed_notional", 0)), 12.0, 0.01),
+              f"mode={row2.get('effective_copy_mode')} base={row2.get('effective_norm_base')} fixed={row2.get('effective_fixed_notional')}")
 
 
 def test_global_norm_base_updates_user_and_header_base_values() -> None:
@@ -1539,6 +1998,37 @@ def test_ajax_success_reload_present() -> None:
                   f"finally: {finally_block}")
 
 
+def test_norm_base_persistence_propagates_to_user_and_header() -> None:
+    """save_ui_state(norm_base=N) must propagate to USER alloc and portfolio req_lev = max_exposure/N."""
+    wallet = "0xa140000000000000000000000000000000000056"
+    rows = [
+        raw_row(wallet, "BTC", "BUY",  100.0, 1.0, 1000, "nbp-entry", expected_copy_price=100.0),
+        raw_row(wallet, "BTC", "SELL", 110.0, 1.0, 2000, "nbp-exit",  expected_copy_price=110.0),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        base_ui = {"copy_mode": "fixed", "fixed_notional": 100.0, "norm_base": 100.0, "fee_bps": 5.0}
+        build_app_state(Path(td), rows, base_ui)
+        appmod.save_ui_state({"norm_base": 1234.0})
+        loaded = appmod.load_ui_state()
+        check("save_ui_state norm_base=1234 persists", approx(float(loaded.get("norm_base", 0)), 1234.0, 0.01),
+              str(loaded.get("norm_base")))
+        _reset_app_cache()
+        state = appmod.build_model_state()
+        user_row = next((r for r in state["wallet_rows"] if r.get("is_user_wallet")), None)
+        check("USER alloc == 1234 after norm_base save", user_row is not None and approx(float((user_row or {}).get("alloc", 0)), 1234.0, 0.01),
+              str((user_row or {}).get("alloc")))
+        port = state.get("portfolio", {})
+        hdr_rl = float(port.get("max_required_leverage", -1))
+        usr_rl = float((user_row or {}).get("required_leverage", -1))
+        hist = state.get("portfolio_history", [])
+        max_exp = max((float(p.get("open_notional_usd", 0)) for p in hist), default=0.0)
+        expected_rl = max_exp / 1234.0
+        check("portfolio req_lev = max_exposure / 1234", approx(hdr_rl, expected_rl, 0.001),
+              f"hdr_rl={hdr_rl:.6f} expected={expected_rl:.6f}")
+        check("USER required_leverage == header req_lev", approx(usr_rl, hdr_rl, 0.001),
+              f"user={usr_rl:.6f} header={hdr_rl:.6f}")
+
+
 def run_test(fn) -> None:
     """Run a test function, counting any uncaught exception as a FAIL."""
     global FAIL
@@ -1587,13 +2077,33 @@ if __name__ == "__main__":
     run_test(test_pnl_hr_no_exit_reconciles_or_dash)
     run_test(test_combined_dd_is_latest_sum_of_selected_wallet_dd)
     run_test(test_combined_maxdd_is_max_timestamped_sum_dd)
+    run_test(test_maxdd_contract_uses_cents_safe_tolerance)
     run_test(test_combined_max_exposure_is_max_timestamped_sum_exposure)
     run_test(test_validator_detects_yellow_cell_tampers)
     run_test(test_live_dd_differs_from_curve_tail_uses_live_blocks)
-    run_test(test_user_row_has_no_fake_wallet_controls_but_global_base_exists)
+    run_test(test_user_row_has_aggregate_base_control_only)
+    run_test(test_user_aggregate_base_form_posts_to_api_ui_state)
+    run_test(test_user_base_form_posts_user_norm_base_not_norm_base)
     run_test(test_non_user_wallet_controls_still_render)
+    run_test(test_wallet_meta_persists_in_ui_state)
+    run_test(test_no_unrelated_auto_wallet_header_cards)
+    run_test(test_wallet_meta_not_inline_in_main_table)
+    run_test(test_wallet_color_badge_display_only)
+    run_test(test_wallet_meta_edit_link_present_for_non_user_only)
+    run_test(test_wallet_meta_form_not_in_main_table)
+    run_test(test_wallet_meta_detail_page_has_controls)
+    run_test(test_wallet_meta_post_persists_values)
+    run_test(test_wallet_meta_does_not_affect_model_values)
+    run_test(test_purge_button_renders_for_non_user_only)
+    run_test(test_purge_requires_full_wallet_confirmation_js_present)
+    run_test(test_purge_wallet_removes_active_loaded_data_and_blacklists)
+    run_test(test_purge_refuses_user_wallet)
+    run_test(test_user_base_does_not_change_global_wallet_model_base)
+    run_test(test_global_header_norm_base_still_controls_wallet_fallback)
+    run_test(test_wallet_config_override_persists_and_overrides_global)
     run_test(test_global_norm_base_updates_user_and_header_base_values)
     run_test(test_ajax_success_reload_present)
+    run_test(test_norm_base_persistence_propagates_to_user_and_header)
     print(f"\nRESULTS: {PASS} PASS / {FAIL} FAIL")
     if FAIL:
         raise SystemExit("RESULT::FAILED")
