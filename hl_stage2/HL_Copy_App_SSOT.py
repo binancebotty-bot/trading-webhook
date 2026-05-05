@@ -89,6 +89,12 @@ EQUITY_HISTORY_MAX = 20000
 CHART_POINT_MAX = 1200
 WS_CAPTURED = "WS_CAPTURED"
 REBUILD = "REBUILD"
+_LOCAL_NOOP_STATUSES: frozenset = frozenset({
+    "NO_MANUAL_POSITION_TO_CLOSE",
+    "ALREADY_FLAT",
+    "LEDGER_FLAT",
+    "NO_POSITION_TO_CLOSE",
+})
 
 app = FastAPI(title="HL Copy Dashboard SSOT")
 
@@ -627,6 +633,32 @@ def load_wallet_gate() -> Dict[str, Any]:
     return g if isinstance(g, dict) else {}
 
 
+_GLOBAL_CONTROLS_DEFAULTS: Dict[str, Any] = {
+    "max_total_live_exposure_usd": 0.0,
+    "max_asset_directional_exposure_usd": 0.0,
+    "max_wallet_exposure_usd": 0.0,
+    "max_order_notional_usd": 0.0,
+    "marketable_bps": 5.0,
+    "max_close_adverse_diff_pct": 0.25,
+    "symbol_allowlist": [],
+    "symbol_blocklist": [],
+}
+
+
+def _normalise_global_controls(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        raw = {}
+    out = dict(_GLOBAL_CONTROLS_DEFAULTS)
+    for k, default in _GLOBAL_CONTROLS_DEFAULTS.items():
+        if k in raw:
+            if isinstance(default, list):
+                val = raw[k]
+                out[k] = [str(s).strip().upper() for s in val] if isinstance(val, list) else []
+            else:
+                out[k] = max(0.0, fnum(raw[k]))
+    return out
+
+
 def _load_live_copy_config() -> Dict[str, Any]:
     try:
         if LIVE_COPY_CONFIG_FILE.exists():
@@ -641,6 +673,8 @@ def _load_live_copy_config() -> Dict[str, Any]:
     archived = cfg.get("archived_wallets")
     cfg["wallets"] = wallets if isinstance(wallets, dict) else {}
     cfg["archived_wallets"] = archived if isinstance(archived, dict) else {}
+    gc = cfg.get("global_controls")
+    cfg["global_controls"] = _normalise_global_controls(gc if isinstance(gc, dict) else {})
     return cfg
 
 
@@ -856,6 +890,16 @@ def _live_audit_summary() -> Dict[str, Any]:
 
     portfolio_history: List[Dict[str, Any]] = []
     exchange_history = load_json(EXCHANGE_ACCOUNT_HISTORY_FILE, [])
+    fills_recent = exchange_snapshot.get("actual_user_fills_recent", [])
+    rpnl_points: List[Dict[str, Any]] = []
+    for _fill in (fills_recent if isinstance(fills_recent, list) else []):
+        if not isinstance(_fill, dict):
+            continue
+        _ts = inum(_fill.get("time") or _fill.get("timestamp") or _fill.get("ts"))
+        if _ts <= 0:
+            continue
+        rpnl_points.append({"ts": _ts, "pnl": fnum(_fill.get("closedPnl") or _fill.get("closed_pnl") or 0)})
+    rpnl_points.sort(key=lambda x: x["ts"])
 
     return {
         "ok": True,
@@ -887,6 +931,7 @@ def _live_audit_summary() -> Dict[str, Any]:
             "timescales": ["1d", "7d", "all"],
             "modes": ["account", "wallet_pnl", "exposure"],
             "account_points": exchange_history,
+            "realized_pnl_points": rpnl_points,
         },
         "live_wallet_derived": live_wallet_derived,
         "live_wallet_rows": live_wallet_rows,
@@ -908,6 +953,28 @@ def _load_manual_live_positions() -> Dict[str, Any]:
     except Exception:
         pass
     return {}
+
+
+def iter_manual_wallet_positions(manual_positions: Dict[str, Any]):
+    if not isinstance(manual_positions, dict):
+        return
+    if manual_positions.get("schema") == "manual_live_positions.v2":
+        by_wallet = manual_positions.get("by_wallet", {})
+        if not isinstance(by_wallet, dict):
+            return
+        for wallet, coins in by_wallet.items():
+            if not isinstance(coins, dict):
+                continue
+            wallet_key = str(wallet or "").lower().strip()
+            for coin, pos in coins.items():
+                if isinstance(pos, dict):
+                    yield wallet_key, str(coin or "").upper().strip(), pos
+        return
+    for coin, pos in manual_positions.items():
+        if not isinstance(pos, dict):
+            continue
+        wallet = str(pos.get("leader_wallet") or pos.get("wallet") or "").lower().strip()
+        yield wallet, str(coin or "").upper().strip(), pos
 
 
 def _load_recent_send_attempts(limit: int = 20) -> List[Dict[str, Any]]:
@@ -966,6 +1033,19 @@ def _local_env_value(key: str) -> str:
     except Exception:
         pass
     return ""
+
+
+def _execution_guards_info() -> Dict[str, Any]:
+    def ev(key: str, default: str = "") -> str:
+        return _local_env_value(key) or os.getenv(key, default)
+    return {
+        "auto_send_enabled": ev("HL_LIVE_AUTO_SEND_ENABLED", "0") == "1",
+        "auto_send_wallet": ev("HL_LIVE_AUTO_SEND_WALLET", ""),
+        "max_per_run": ev("HL_LIVE_AUTO_SEND_MAX_PER_RUN", "1"),
+        "marketable_bps": ev("HL_LIVE_AUTO_SEND_MARKETABLE_BPS", "5"),
+        "close_adverse_diff_pct": ev("HL_LIVE_MAX_CLOSE_ADVERSE_DIFF_PCT", "0.25"),
+        "legacy_notional_cap": ev("HL_LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD", "25"),
+    }
 
 
 def _public_account_address() -> str:
@@ -1557,6 +1637,7 @@ def _manual_live_summary(manual_positions: Dict[str, Any], recent_send_attempts:
             price_by_coin[str(coin).upper()] = fnum(pos.get("mark_px"))
     last_filled: Dict[str, Any] = {}
     last_rejected: Dict[str, Any] = {}
+    last_local_block: Dict[str, Any] = {}
     last_auto_fill_at = ""
     auto_wallet = ""
     auto_wallets: List[str] = []
@@ -1574,16 +1655,17 @@ def _manual_live_summary(manual_positions: Dict[str, Any], recent_send_attempts:
                 auto_wallet = w
                 if w and w not in auto_wallets:
                     auto_wallets.append(w)
+        elif status in _LOCAL_NOOP_STATUSES:
+            last_local_block = row
         elif status and status not in {"CONFIRM_REQUIRED"}:
             last_rejected = row
     signed_by_coin: Dict[str, float] = {}
     exposure_by_coin: Dict[str, float] = {}
-    for coin, pos in manual_positions.items():
-        if not isinstance(pos, dict):
-            continue
+    for _wallet, coin, pos in iter_manual_wallet_positions(manual_positions):
         signed = fnum(pos.get("signed_size"))
-        signed_by_coin[str(coin).upper()] = signed
-        exposure_by_coin[str(coin).upper()] = abs(signed) * fnum(price_by_coin.get(str(coin).upper()))
+        coin_upper = str(coin).upper()
+        signed_by_coin[coin_upper] = signed_by_coin.get(coin_upper, 0.0) + signed
+        exposure_by_coin[coin_upper] = exposure_by_coin.get(coin_upper, 0.0) + abs(signed) * fnum(price_by_coin.get(coin_upper))
     open_count = sum(1 for v in signed_by_coin.values() if abs(v) > 1e-12)
     return {
         "open_manual_position_count": open_count,
@@ -1592,6 +1674,7 @@ def _manual_live_summary(manual_positions: Dict[str, Any], recent_send_attempts:
         "manual_live_exposure_estimate": sum(exposure_by_coin.values()),
         "last_filled_manual_order": last_filled,
         "last_rejected_manual_order": last_rejected,
+        "last_local_block_manual_order": last_local_block,
         "current_auto_live_wallet": auto_wallet,
         "auto_live_wallets": auto_wallets,
         "last_auto_live_fill_at": last_auto_fill_at,
@@ -1603,14 +1686,10 @@ def _build_manual_reconciliation_rows(manual_positions: Dict[str, Any], exchange
     exchange_positions = exchange_snapshot.get("positions_by_coin", {}) if isinstance(exchange_snapshot.get("positions_by_coin"), dict) else {}
     exchange_available = bool(exchange_snapshot.get("available"))
     seen_on_exchange: set[str] = set()
-    for coin, pos in sorted(manual_positions.items()):
-        if not isinstance(pos, dict):
-            continue
+    for wallet, coin_upper, pos in sorted(iter_manual_wallet_positions(manual_positions), key=lambda item: (item[1], item[0])):
         signed = fnum(pos.get("signed_size"))
         if abs(signed) <= 1e-12:
             continue
-        coin_upper = str(coin).upper()
-        wallet = str(pos.get("leader_wallet") or pos.get("wallet") or "")
         ex = exchange_positions.get(coin_upper, {}) if isinstance(exchange_positions, dict) else {}
         exchange_signed = fnum(ex.get("signed_size")) if isinstance(ex, dict) else 0.0
         if ex:
@@ -1823,10 +1902,9 @@ def _build_live_wallet_derived(model_state: Dict[str, Any], live_config: Dict[st
         elif str(attempt.get("status", "")):
             derived[w]["auto_rejected_count"] += 1
     exposure_by_coin = manual_summary.get("exposure_by_coin", {}) if isinstance(manual_summary.get("exposure_by_coin"), dict) else {}
-    for coin, pos in manual_positions.items():
-        if not isinstance(pos, dict) or abs(fnum(pos.get("signed_size"))) <= 1e-12:
+    for w, coin, pos in iter_manual_wallet_positions(manual_positions):
+        if abs(fnum(pos.get("signed_size"))) <= 1e-12:
             continue
-        w = str(pos.get("leader_wallet") or pos.get("wallet") or "").lower()
         if w in derived:
             derived[w]["manual_open_exposure"] += fnum(exposure_by_coin.get(str(coin).upper()))
     return derived
@@ -1983,13 +2061,10 @@ def _build_real_copy_positions(
     exchange_positions = exchange_snapshot.get("positions_by_coin", {}) if isinstance(exchange_snapshot.get("positions_by_coin"), dict) else {}
     exchange_available = bool(exchange_snapshot.get("available"))
     seen: set = set()
-    for coin, pos in sorted(manual_positions.items()):
-        if not isinstance(pos, dict):
-            continue
+    for wallet, coin_upper, pos in sorted(iter_manual_wallet_positions(manual_positions), key=lambda item: (item[1], item[0])):
         signed = fnum(pos.get("signed_size"))
         if abs(signed) <= 1e-12:
             continue
-        coin_upper = coin.upper()
         seen.add(coin_upper)
         ex: Dict[str, Any] = exchange_positions.get(coin_upper, {}) if isinstance(exchange_positions, dict) else {}
         ex_signed = fnum(ex.get("signed_size")) if isinstance(ex, dict) else 0.0
@@ -2011,7 +2086,7 @@ def _build_real_copy_positions(
             "coin": coin_upper,
             "signed_size": signed,
             "side": "LONG" if signed > 0 else "SHORT",
-            "leader_wallet": str(pos.get("leader_wallet") or pos.get("wallet") or ""),
+            "leader_wallet": wallet,
             "last_intent_id": pos.get("last_intent_id", ""),
             "last_oid": pos.get("last_oid", ""),
             "last_updated_at": pos.get("last_updated_at", ""),
@@ -2176,10 +2251,9 @@ def _build_live_leader_performance(
     exchange_positions = exchange_snapshot.get("positions_by_coin", {}) if isinstance(exchange_snapshot.get("positions_by_coin"), dict) else {}
     exchange_available = bool(exchange_snapshot.get("available"))
     coin_wallets: Dict[str, set[str]] = {}
-    for coin, pos in manual_positions.items():
-        if not isinstance(pos, dict) or abs(fnum(pos.get("signed_size"))) <= 1e-12:
+    for pw, coin, pos in iter_manual_wallet_positions(manual_positions):
+        if abs(fnum(pos.get("signed_size"))) <= 1e-12:
             continue
-        pw = str(pos.get("leader_wallet") or pos.get("wallet") or "").lower()
         if pw:
             coin_wallets.setdefault(str(coin).upper(), set()).add(pw)
 
@@ -2356,10 +2430,7 @@ def _build_live_leader_performance(
         has_unrealized = False
         has_ambiguous_coin = False
 
-        for coin, pos in manual_positions.items():
-            if not isinstance(pos, dict):
-                continue
-            pw = str(pos.get("leader_wallet") or pos.get("wallet") or "").lower()
+        for pw, coin, pos in iter_manual_wallet_positions(manual_positions):
             if pw != w:
                 continue
             signed = fnum(pos.get("signed_size"))
@@ -2372,7 +2443,7 @@ def _build_live_leader_performance(
             entry = fnum(ex.get("entry_px")) if isinstance(ex, dict) else 0.0
             ex_upnl = fnum(ex.get("unrealized_pnl")) if isinstance(ex, dict) else 0.0
             pos_value = fnum(ex.get("position_value")) if isinstance(ex, dict) else 0.0
-            exp_est = pos_value if pos_value > 0 else (abs(signed) * mark if mark > 0 else 0.0)
+            exp_est = abs(signed) * mark if mark > 0 else (pos_value if pos_value > 0 else 0.0)
             current_exposure += exp_est
             if coin_shared:
                 match = "AMBIGUOUS_COIN_SHARED"
@@ -4634,6 +4705,15 @@ def render_home(state: Dict[str, Any]) -> str:
         group_card("ACTIVITY", [small_metric("FILLS", str(fill_count), fill_count), small_metric("EXITS", str(exit_count), exit_count), small_metric("OPEN POS", str(open_positions), open_positions), small_metric("WIN", pct(win_avg), win_avg)]),
         group_card("LIVE ACCOUNT", [small_metric("MODEL EQUITY", money(fnum(copy.get("equity"))), fnum(copy.get("equity"))), small_metric("CLEARINGHOUSE VALUE", money(clearinghouse_account_value) if account_snapshot.get("available") else "unavailable", clearinghouse_account_value), small_metric("SNAPSHOT", html.escape(account_updated[:24]), 0)]),
         group_card("MANUAL LIVE", [small_metric("OPEN POS", str(manual_open_count), manual_open_count), small_metric("EXPOSURE EST", money(manual_live_exposure), manual_live_exposure), small_metric("AUTO WALLET", html.escape(py_short_wallet(str(manual_summary.get("current_auto_live_wallet") or "")) or "—"), 0)]),
+    ] + [
+        (lambda eg: group_card("EXEC GUARDS", [
+            small_metric("SEND", "LIVE ON" if eg["auto_send_enabled"] else "DRY RUN", 1 if eg["auto_send_enabled"] else 0),
+            small_metric("WALLET FILTER", html.escape(py_short_wallet(eg["auto_send_wallet"]) if eg["auto_send_wallet"] else "ANY"), 0),
+            small_metric("MAX/RUN", str(eg["max_per_run"]), 0),
+            small_metric("MKT BPS", str(eg["marketable_bps"]), 0),
+            small_metric("CLOSE ADV %", str(eg["close_adverse_diff_pct"]), 0),
+            small_metric("LEGACY CAP (ignored)", f"${eg['legacy_notional_cap']}", 0),
+        ]))(_execution_guards_info()),
         group_card("DB HEALTH", [small_metric(health_label, html.escape(health_detail), -1 if "ERROR" in health_label else 0), small_metric("CACHE", str(APP_HEALTH.get("cache_hits", 0)), 0), small_metric("BUILDS", str(APP_HEALTH.get("build_count", 0)), 0)], "health-card"),
     ])
     ranking = ui.get("ranking", {}) if isinstance(ui.get("ranking"), dict) else {}
@@ -4977,7 +5057,29 @@ def render_live_copy_control_panel() -> str:
     </div>
     <div class="lc-header-actions">
       <button type="button" id="lcRefresh">Refresh</button>
+      <button type="button" id="lcGcToggle" class="lc-soft" aria-expanded="false">Global Controls</button>
       <button type="button" data-lc-modal="lcWalletModal">Add wallet</button>
+      <div class="lc-gc-popover" id="lcGlobalControlsPanel" aria-hidden="true">
+        <div class="lc-popover-head">
+          <h3>Global Live Copy Controls</h3>
+          <button type="button" id="lcGcClose">close</button>
+        </div>
+        <p>These override all wallet settings. 0 = disabled except marketable bps and close adverse diff.</p>
+        <div class="lc-form-grid" id="lcGcForm">
+          <label>Max total live exposure ($) <input id="gcMaxTotal" type="number" min="0" step="1" placeholder="0 = disabled"></label>
+          <label>Max per-asset directional exposure ($) <input id="gcMaxDir" type="number" min="0" step="1" placeholder="0 = disabled"></label>
+          <label>Max per-wallet exposure ($) <input id="gcMaxWallet" type="number" min="0" step="1" placeholder="0 = disabled"></label>
+          <label>Max per-order notional ($) <input id="gcMaxOrder" type="number" min="0" step="0.01" placeholder="0 = disabled"></label>
+          <label>Marketable bps (slippage) <input id="gcMktBps" type="number" min="0" max="20" step="0.1"></label>
+          <label>Close adverse diff % <input id="gcCloseAdv" type="number" min="0" step="0.01"></label>
+          <label class="wide">Symbol allowlist (empty = all allowed) <input id="gcAllowlist" type="text" placeholder="BTC,ETH"></label>
+          <label class="wide">Symbol blocklist <input id="gcBlocklist" type="text" placeholder="DOGE,SHIB"></label>
+        </div>
+        <div class="lc-modal-actions">
+          <span id="lcGcStatus" class="lc-status"></span>
+          <button type="button" id="lcGcSave">Save Global Controls</button>
+        </div>
+      </div>
     </div>
   </header>
   <div class="lc-safety-strip">
@@ -5009,15 +5111,20 @@ def render_live_copy_control_panel() -> str:
         <button type="button" id="lcGraphResetRange">Reset</button>
       </div>
     </div>
+    <div class="lc-chart-legend" aria-hidden="true">
+      <span><i class="lc-line-green"></i>Total PnL</span>
+      <span><i class="lc-line-blue"></i>Realized PnL</span>
+      <span><i class="lc-line-red"></i>Drawdown</span>
+    </div>
     <div class="lc-chart-wrap">
-      <svg id="lcEquityChart" viewBox="0 0 1000 320" preserveAspectRatio="none" aria-label="Portfolio value change">
-        <line id="lcZeroLine" x1="40" y1="300" x2="960" y2="300" stroke="rgba(148,163,184,.45)" stroke-width="1" stroke-dasharray="4 4"/>
+      <svg id="lcEquityChart" viewBox="0 0 1000 330" preserveAspectRatio="none" aria-label="Portfolio value change">
+        <line id="lcZeroLine" x1="58" y1="280" x2="976" y2="280" stroke="rgba(148,163,184,.6)" stroke-width="1.2" stroke-dasharray="4 4"/>
         <path id="lcExchangeFill" fill="rgba(33,193,107,.08)" d=""/>
         <polyline id="lcExchangePath" points="" fill="none" stroke="#3fb950" stroke-width="1.5"/>
         <polyline id="lcRealizedPath" points="" fill="none" stroke="#58a6ff" stroke-width="1.4"/>
         <polyline id="lcDrawdownPath" points="" fill="none" stroke="#ff5263" stroke-width="1.4"/>
-        <text x="42" y="34" class="lc-axis" id="lcYMax"></text><text x="42" y="155" class="lc-axis" id="lcYMid"></text><text x="42" y="296" class="lc-axis" id="lcYMin"></text>
-        <g><rect x="665" y="40" width="12" height="12" fill="#3fb950"/><text x="683" y="50" class="lc-axis" id="lcGraphLegend">Total account PnL</text><rect x="665" y="58" width="12" height="12" fill="#58a6ff"/><text x="683" y="68" class="lc-axis" id="lcGraphLegend2">Realized PnL</text><rect x="665" y="76" width="12" height="12" fill="#ff5263"/><text x="683" y="86" class="lc-axis" id="lcGraphLegend3">Drawdown</text></g>
+        <text x="8" y="28" class="lc-axis" id="lcYMax"></text><text x="8" y="155" class="lc-axis" id="lcYMid"></text><text x="8" y="282" class="lc-axis" id="lcYMin"></text>
+        <g id="lcXAxisTicks"></g>
       </svg>
     </div>
   </section>
@@ -5105,7 +5212,7 @@ def render_live_copy_control_panel() -> str:
   </div>
 </div>
 <style>
-.live-copy-centre{--lc-bg:#070c11;--lc-panel:#0f171f;--lc-line:#223342;--lc-text:#e6edf5;--lc-muted:#8fa3b7;--lc-green:#21c16b;--lc-red:#ff5263;--lc-amber:#f5b84b;--lc-blue:#58a6ff;border-top:1px solid #30363d;margin-top:12px;color:var(--lc-text);font-size:12px}.live-copy-centre *{box-sizing:border-box}.lc-header{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:10px 12px;border:1px solid var(--lc-line);background:#0c131a;border-radius:8px;margin-bottom:10px}.lc-title{font-size:20px;font-weight:760}.lc-header-pills,.lc-header-actions,.lc-safety-strip,.lc-source-strip{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.lc-header-pills{justify-content:flex-end}.lc-header-actions{justify-content:flex-end}.lc-pill{display:inline-flex;align-items:center;min-height:24px;padding:0 8px;border:1px solid var(--lc-line);border-radius:999px;background:#131f2b;color:var(--lc-muted);font-weight:720;white-space:nowrap}.lc-blue{color:var(--lc-blue);border-color:rgba(88,166,255,.45)}.lc-green{color:var(--lc-green);border-color:rgba(33,193,107,.45)}.lc-red{color:var(--lc-red);border-color:rgba(255,82,99,.45)}.lc-amber,.lc-mode-CLO{color:var(--lc-amber);border-color:rgba(245,184,75,.45)}.live-copy-centre button{min-height:28px;border:1px solid var(--lc-line);border-radius:6px;background:#172437;color:var(--lc-text);padding:0 8px;font-weight:700}.live-copy-centre button.lc-soft{color:var(--lc-amber);border-color:rgba(245,184,75,.55)}.live-copy-centre button.lc-danger{color:var(--lc-red);border-color:rgba(255,82,99,.6);background:#2a1218}.live-copy-centre button[disabled]{opacity:.5}.lc-safety-strip{margin-bottom:10px}.lc-status{font-weight:720}.lc-ok{color:var(--lc-green)}.lc-bad{color:var(--lc-red)}.lc-panel{border:1px solid var(--lc-line);border-radius:8px;background:var(--lc-panel);padding:12px;margin-bottom:10px;min-width:0}.lc-panel h3{margin:0 0 5px 0;font-size:15px}.lc-panel p,.lc-modal p{margin:0 0 10px 0;color:var(--lc-muted);font-size:12px}.lc-graph-panel{min-height:430px}.lc-graph-top{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start}.lc-chart-controls{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}.lc-chart-controls button,.lc-chart-controls input{min-height:26px;border:1px solid var(--lc-line);border-radius:6px;background:#0a1118;color:var(--lc-muted);padding:0 7px}.lc-chart-controls .active{color:var(--lc-text);border-color:rgba(88,166,255,.55);background:#142337}.lc-stat-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin:8px 0 10px}.lc-stat{border:1px solid var(--lc-line);background:#0a1118;border-radius:7px;padding:8px;min-height:55px}.lc-stat .label{color:var(--lc-muted);font-size:10px;font-weight:720;text-transform:uppercase}.lc-stat .value{margin-top:6px;font-size:16px;font-weight:780}.lc-chart-wrap{position:relative;min-height:300px;border:1px solid var(--lc-line);border-radius:8px;background:linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px) 0 0/100% 20%,linear-gradient(90deg,rgba(255,255,255,.028) 1px,transparent 1px) 0 0/10% 100%,#091017;overflow:hidden}.lc-chart-wrap svg{display:block;width:100%;height:100%;min-height:300px}.lc-axis{fill:var(--lc-muted);font-size:11px}.lc-table-wrap{overflow-x:auto;border:1px solid var(--lc-line);border-radius:8px}.live-copy-centre table{width:100%;border-collapse:collapse;min-width:1320px}.live-copy-centre th,.live-copy-centre td{border-bottom:1px solid var(--lc-line);padding:6px 7px;text-align:left;vertical-align:middle;white-space:nowrap}.live-copy-centre th{color:var(--lc-muted);font-size:10px;font-weight:780;text-transform:uppercase;background:#0a1118}.lc-wallet{font-family:Consolas,Monaco,monospace;color:#d9ebff}.lc-cell-stack{display:grid;gap:4px}.lc-pair{display:grid;grid-template-columns:34px minmax(52px,auto);gap:5px;align-items:baseline}.lc-pair span:first-child{color:var(--lc-muted);font-size:10px;font-weight:780}.lc-pos{color:var(--lc-green);font-weight:760}.lc-neg{color:var(--lc-red);font-weight:760}.lc-muted{color:var(--lc-muted)}.lc-row-OFF{opacity:.58}.lc-mini-actions,.lc-inline-controls{display:flex;gap:4px;align-items:center;flex-wrap:wrap}.lc-wallet-table input,.lc-wallet-table select{width:76px;min-height:26px;background:#0a1118;color:var(--lc-text);border:1px solid var(--lc-line);border-radius:5px;padding:0 6px}.lc-wallet-table select{width:92px}.lc-graph-toggle{display:inline-flex;gap:5px;align-items:center}.lc-graph-toggle input{width:14px;min-height:14px}.lc-tabs{display:grid;gap:8px}.lc-tabbar{display:flex;gap:6px;border-bottom:1px solid var(--lc-line)}.lc-tabbar button{border-bottom:0;border-radius:7px 7px 0 0;color:var(--lc-muted)}.lc-tabbar button.active{color:var(--lc-text);background:var(--lc-panel)}.lc-tab-panel{display:none}.lc-tab-panel.active{display:block}.lc-source-strip{margin-bottom:10px}.lc-modal-backdrop{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.62);z-index:2000;padding:18px}.lc-modal-backdrop.active{display:flex}.lc-modal{width:min(660px,100%);border:1px solid var(--lc-line);border-radius:8px;background:var(--lc-panel);padding:14px;box-shadow:0 20px 60px rgba(0,0,0,.45)}.lc-modal-head{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:10px}.lc-modal-head h3{margin:0}.lc-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.lc-form-grid .wide{grid-column:1/-1}.lc-form-grid label{display:grid;gap:5px;color:var(--lc-muted);font-size:10px;font-weight:760;text-transform:uppercase}.lc-form-grid input,.lc-form-grid select{width:100%;min-height:32px;border:1px solid var(--lc-line);border-radius:6px;color:var(--lc-text);background:#0a1118;padding:0 8px}.lc-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}@media(max-width:1300px){.lc-header,.lc-graph-top{grid-template-columns:1fr}.lc-header-pills,.lc-header-actions,.lc-chart-controls{justify-content:flex-start}.lc-stat-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:800px){.lc-stat-strip,.lc-form-grid{grid-template-columns:1fr}}
+.live-copy-centre{--lc-bg:#070c11;--lc-panel:#0f171f;--lc-line:#223342;--lc-text:#e6edf5;--lc-muted:#8fa3b7;--lc-green:#21c16b;--lc-red:#ff5263;--lc-amber:#f5b84b;--lc-blue:#58a6ff;border-top:1px solid #30363d;margin-top:12px;color:var(--lc-text);font-size:12px}.live-copy-centre *{box-sizing:border-box}.lc-header{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:10px 12px;border:1px solid var(--lc-line);background:#0c131a;border-radius:8px;margin-bottom:10px}.lc-title{font-size:20px;font-weight:760}.lc-header-pills,.lc-header-actions,.lc-safety-strip,.lc-source-strip{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.lc-header-pills{justify-content:flex-end}.lc-header-actions{justify-content:flex-end;position:relative}.lc-pill{display:inline-flex;align-items:center;min-height:24px;padding:0 8px;border:1px solid var(--lc-line);border-radius:999px;background:#131f2b;color:var(--lc-muted);font-weight:720;white-space:nowrap}.lc-blue{color:var(--lc-blue);border-color:rgba(88,166,255,.45)}.lc-green{color:var(--lc-green);border-color:rgba(33,193,107,.45)}.lc-red{color:var(--lc-red);border-color:rgba(255,82,99,.45)}.lc-amber,.lc-mode-CLO{color:var(--lc-amber);border-color:rgba(245,184,75,.45)}.live-copy-centre button{min-height:28px;border:1px solid var(--lc-line);border-radius:6px;background:#172437;color:var(--lc-text);padding:0 8px;font-weight:700}.live-copy-centre button.lc-soft{color:var(--lc-amber);border-color:rgba(245,184,75,.55)}.live-copy-centre button.lc-danger{color:var(--lc-red);border-color:rgba(255,82,99,.6);background:#2a1218}.live-copy-centre button[disabled]{opacity:.5}.lc-safety-strip{margin-bottom:10px}.lc-status{font-weight:720}.lc-ok{color:var(--lc-green)}.lc-bad{color:var(--lc-red)}.lc-panel{border:1px solid var(--lc-line);border-radius:8px;background:var(--lc-panel);padding:12px;margin-bottom:10px;min-width:0}.lc-panel h3{margin:0 0 5px 0;font-size:15px}.lc-panel p,.lc-modal p,.lc-gc-popover p{margin:0 0 10px 0;color:var(--lc-muted);font-size:12px}.lc-popover-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.lc-popover-head h3{margin:0;font-size:15px}.lc-gc-popover{display:none;position:absolute;right:0;top:36px;width:min(640px,calc(100vw - 36px));max-height:calc(100vh - 90px);overflow:auto;z-index:40;border:1px solid var(--lc-line);border-radius:8px;background:#0d161f;padding:12px;box-shadow:0 18px 48px rgba(0,0,0,.55)}.lc-gc-popover.active{display:block}.lc-graph-panel{min-height:430px}.lc-graph-top{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start}.lc-chart-controls{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}.lc-chart-controls button,.lc-chart-controls input{min-height:26px;border:1px solid var(--lc-line);border-radius:6px;background:#0a1118;color:var(--lc-muted);padding:0 7px}.lc-chart-controls .active{color:var(--lc-text);border-color:rgba(88,166,255,.55);background:#142337}.lc-stat-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin:8px 0 10px}.lc-stat{border:1px solid var(--lc-line);background:#0a1118;border-radius:7px;padding:8px;min-height:55px}.lc-stat .label{color:var(--lc-muted);font-size:10px;font-weight:720;text-transform:uppercase}.lc-stat .value{margin-top:6px;font-size:16px;font-weight:780}.lc-chart-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:4px 0 8px;color:var(--lc-muted);font-weight:720}.lc-chart-legend span{display:inline-flex;gap:6px;align-items:center}.lc-chart-legend i{width:18px;height:3px;border-radius:3px;display:inline-block}.lc-line-green{background:#3fb950}.lc-line-blue{background:#58a6ff}.lc-line-red{background:#ff5263}.lc-chart-wrap{position:relative;min-height:330px;border:1px solid var(--lc-line);border-radius:8px;background:linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px) 0 0/100% 20%,linear-gradient(90deg,rgba(255,255,255,.028) 1px,transparent 1px) 0 0/10% 100%,#091017;overflow:hidden}.lc-chart-wrap svg{display:block;width:100%;height:100%;min-height:330px}.lc-axis{fill:var(--lc-muted);font-size:11px}.lc-table-wrap{overflow-x:auto;border:1px solid var(--lc-line);border-radius:8px}.live-copy-centre table{width:100%;border-collapse:collapse;min-width:1320px}.live-copy-centre th,.live-copy-centre td{border-bottom:1px solid var(--lc-line);padding:6px 7px;text-align:left;vertical-align:middle;white-space:nowrap}.live-copy-centre th{color:var(--lc-muted);font-size:10px;font-weight:780;text-transform:uppercase;background:#0a1118}.lc-wallet{font-family:Consolas,Monaco,monospace;color:#d9ebff}.lc-cell-stack{display:grid;gap:4px}.lc-pair{display:grid;grid-template-columns:34px minmax(52px,auto);gap:5px;align-items:baseline}.lc-pair span:first-child{color:var(--lc-muted);font-size:10px;font-weight:780}.lc-pos{color:var(--lc-green);font-weight:760}.lc-neg{color:var(--lc-red);font-weight:760}.lc-muted{color:var(--lc-muted)}.lc-row-OFF{opacity:.58}.lc-mini-actions,.lc-inline-controls{display:flex;gap:4px;align-items:center;flex-wrap:wrap}.lc-wallet-table input,.lc-wallet-table select{width:76px;min-height:26px;background:#0a1118;color:var(--lc-text);border:1px solid var(--lc-line);border-radius:5px;padding:0 6px}.lc-wallet-table select{width:92px}.lc-graph-toggle{display:inline-flex;gap:5px;align-items:center}.lc-graph-toggle input{width:14px;min-height:14px}.lc-tabs{display:grid;gap:8px}.lc-tabbar{display:flex;gap:6px;border-bottom:1px solid var(--lc-line)}.lc-tabbar button{border-bottom:0;border-radius:7px 7px 0 0;color:var(--lc-muted)}.lc-tabbar button.active{color:var(--lc-text);background:var(--lc-panel)}.lc-tab-panel{display:none}.lc-tab-panel.active{display:block}.lc-source-strip{margin-bottom:10px}.lc-modal-backdrop{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.62);z-index:2000;padding:18px}.lc-modal-backdrop.active{display:flex}.lc-modal{width:min(660px,100%);border:1px solid var(--lc-line);border-radius:8px;background:var(--lc-panel);padding:14px;box-shadow:0 20px 60px rgba(0,0,0,.45)}.lc-modal-head{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:10px}.lc-modal-head h3{margin:0}.lc-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.lc-form-grid .wide{grid-column:1/-1}.lc-form-grid label{display:grid;gap:5px;color:var(--lc-muted);font-size:10px;font-weight:760;text-transform:uppercase}.lc-form-grid input,.lc-form-grid select{width:100%;min-height:32px;border:1px solid var(--lc-line);border-radius:6px;color:var(--lc-text);background:#0a1118;padding:0 8px}.lc-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}@media(max-width:1300px){.lc-header,.lc-graph-top{grid-template-columns:1fr}.lc-header-pills,.lc-header-actions,.lc-chart-controls{justify-content:flex-start}.lc-gc-popover{left:0;right:auto}.lc-stat-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:800px){.lc-stat-strip,.lc-form-grid{grid-template-columns:1fr}.lc-gc-popover{position:static;width:100%;max-height:none;margin-top:8px}}
 </style>
 <script>
 (function(){
@@ -5140,6 +5247,12 @@ function localInputMs(v){const t=Date.parse(v||'');return Number.isFinite(t)?t:0
 function graphRangeLabel(){if(lcGraphScale==='custom'){const s=lcGraphStartMs?new Date(lcGraphStartMs).toLocaleString():'start';const e=lcGraphEndMs?new Date(lcGraphEndMs).toLocaleString():'now';return `${s} to ${e}`;}return lcGraphScale.toUpperCase();}
 function filterScale(points){let start=0,end=0;if(lcGraphScale==='custom'){start=lcGraphStartMs;end=lcGraphEndMs;}else if(lcGraphScale!=='all'){const days=lcGraphScale==='7d'?7:1;start=Date.now()-days*86400000;}return points.filter(p=>{const t=tsOf(p);if(!t)return false;if(start&&t<start)return false;if(end&&t>end)return false;return true;});}
 function linePts(series,xOf,yOf){return series.map(p=>`${xOf(p)},${yOf(p.value)}`).join(' ');}
+function fmtAxisMoney(v){const n=Number(v);const sign=n<0?'-':'';const a=Math.abs(n);return sign+'$'+(a>=1000?Math.round(a).toLocaleString():a.toLocaleString(undefined,{maximumFractionDigits:a<10?2:1}));}
+function tickLabel(ms,minTs,maxTs){const span=maxTs-minTs;const d=new Date(ms);if(span<=2*86400000)return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});if(span<=10*86400000)return d.toLocaleDateString([], {weekday:'short',day:'numeric'});return d.toLocaleDateString([], {month:'short',day:'numeric'});}
+function renderXTicks(minTs,maxTs,getX){
+ const g=root.querySelector('#lcXAxisTicks');if(!g)return;const span=maxTs-minTs||1;const ticks=[];for(let i=0;i<5;i++)ticks.push(minTs+(span*i/4));
+ g.innerHTML=ticks.map(t=>{const x=getX({timestamp_ms:t});return `<line x1="${x}" y1="280" x2="${x}" y2="286" stroke="rgba(148,163,184,.45)" stroke-width="1"/><text x="${x}" y="306" text-anchor="middle" class="lc-axis">${h(tickLabel(t,minTs,maxTs))}</text>`;}).join('');
+}
 function clearGraphText(message,label){
  const realizedPath=root.querySelector('#lcRealizedPath'), drawdownPath=root.querySelector('#lcDrawdownPath');
  if(message&&root.querySelector('#lcGraphSubtitle')) root.querySelector('#lcGraphSubtitle').textContent=message;
@@ -5148,6 +5261,7 @@ function clearGraphText(message,label){
  if(realizedPath) realizedPath.setAttribute('points','');
  if(drawdownPath) drawdownPath.setAttribute('points','');
  ['#lcYMax','#lcYMid','#lcYMin'].forEach(id=>{const el=root.querySelector(id);if(el)el.textContent='';});
+ const ticks=root.querySelector('#lcXAxisTicks');if(ticks)ticks.innerHTML='';
  const legend=root.querySelector('#lcGraphLegend'), legend2=root.querySelector('#lcGraphLegend2'), legend3=root.querySelector('#lcGraphLegend3');
  if(legend) legend.textContent=label||'Total account PnL';
  if(legend2) legend2.textContent='';
@@ -5160,19 +5274,25 @@ function renderGraph(){
  const realizedPath=root.querySelector('#lcRealizedPath');
  const drawdownPath=root.querySelector('#lcDrawdownPath');
  const zeroLine=root.querySelector('#lcZeroLine');
- let points=[], realizedPoints=[], drawdownPoints=[], label='Total account PnL';
+ let points=[], realizedPoints=[], drawdownPoints=[], fillsInRange=[], label='Total account PnL';
  if(lcGraphMode==='account'){
   const hist=lcAudit.exchange_account_history||lcAudit.exchange_history||[];
   const hasUnified=hist.some(p=>isNum(p.unified_portfolio_value));
   label=hasUnified?'Total account PnL / portfolio value change':'Clearinghouse value change (fallback)';
-  const visible=filterScale(hist.map(p=>({timestamp:p.timestamp||p.updated_at||'', timestamp_ms:tsOf(p), value:hasUnified?num(p.unified_portfolio_value,NaN):num(p.account_value,NaN), realized:isNum(p.realized_pnl_selected)?num(p.realized_pnl_selected,NaN):isNum(p.realized_pnl_since_first_live_order)?num(p.realized_pnl_since_first_live_order,NaN):isNum(p.realized_pnl_24h)?num(p.realized_pnl_24h,NaN):isNum(p.realized_pnl_today)?num(p.realized_pnl_today,NaN):NaN}))).filter(p=>isNum(p.value)).sort((a,b)=>a.timestamp_ms-b.timestamp_ms);
+  const visible=filterScale(hist.map(p=>({timestamp:p.timestamp||p.updated_at||'', timestamp_ms:tsOf(p), value:hasUnified?num(p.unified_portfolio_value,NaN):num(p.account_value,NaN)}))).filter(p=>isNum(p.value)).sort((a,b)=>a.timestamp_ms-b.timestamp_ms);
   if(visible.length<2){clearGraphText(`Not enough points in selected range (${graphRangeLabel()}).`,label);return;}
-  const realizedFallback=lcAudit.exchange_account_snapshot||{};
-  const fallbackRealized=isNum(realizedFallback.realized_pnl_selected)?num(realizedFallback.realized_pnl_selected,0):isNum(realizedFallback.realized_pnl_since_first_live_order)?num(realizedFallback.realized_pnl_since_first_live_order,0):isNum(realizedFallback.realized_pnl_24h)?num(realizedFallback.realized_pnl_24h,0):isNum(realizedFallback.realized_pnl_today)?num(realizedFallback.realized_pnl_today,0):NaN;
+  const selectedStart=visible[0].timestamp_ms, selectedEnd=visible[visible.length-1].timestamp_ms;
   const base=visible[0].value;
   let peak=0;
   points=visible.map(p=>({timestamp:p.timestamp,timestamp_ms:p.timestamp_ms,value:p.value-base}));
-  realizedPoints=visible.map(p=>({timestamp:p.timestamp,timestamp_ms:p.timestamp_ms,value:isNum(p.realized)?p.realized:fallbackRealized})).filter(p=>isNum(p.value));
+  const rawFillPts=(lcAudit.live_graph||{}).realized_pnl_points||[];
+  const allRealizedFills=rawFillPts.map(p=>({timestamp_ms:tsOf(p), timestamp:p.timestamp||new Date(tsOf(p)||0).toISOString(), pnl:num(p.pnl,0)})).filter(p=>p.timestamp_ms>0&&isNum(p.pnl)).sort((a,b)=>a.timestamp_ms-b.timestamp_ms);
+  const baseRealized=allRealizedFills.filter(p=>p.timestamp_ms<=selectedStart).reduce((a,p)=>a+p.pnl,0);
+  let runningRealized=baseRealized;
+  fillsInRange=allRealizedFills.filter(p=>p.timestamp_ms>selectedStart&&p.timestamp_ms<=selectedEnd);
+  realizedPoints=[{timestamp_ms:selectedStart,timestamp:visible[0].timestamp,value:0}];
+  for(const p of fillsInRange){runningRealized+=p.pnl;realizedPoints.push({timestamp_ms:p.timestamp_ms,timestamp:p.timestamp,value:runningRealized-baseRealized});}
+  realizedPoints.push({timestamp_ms:selectedEnd,timestamp:visible[visible.length-1].timestamp,value:runningRealized-baseRealized});
   drawdownPoints=points.map(p=>{peak=Math.max(peak,p.value);return {timestamp:p.timestamp,timestamp_ms:p.timestamp_ms,value:p.value-peak};});
  } else {
   const perf=(lcAudit.live_leader_performance||{})[String(lcSelectedWallet||'').toLowerCase()]||{};
@@ -5191,25 +5311,27 @@ function renderGraph(){
  }
  const allSeries=points.concat(realizedPoints).concat(drawdownPoints);
  const allVals=allSeries.map(p=>num(p.value,0)).concat([0]);
- const mn=Math.min(...allVals), mx=Math.max(...allVals), pad=Math.max(Math.abs(mx-mn)*0.08, 1);
+ const mn=Math.min(...allVals), mx=Math.max(...allVals), pad=Math.max(Math.abs(mx-mn)*0.12, 1);
  const ymin=mn-pad, ymax=mx+pad, rng=ymax-ymin||1;
- const getY2=v=>300-((num(v)-ymin)/rng)*260;
+ const plot={left:58,right:976,top:24,bottom:280};
+ const getY2=v=>plot.bottom-((num(v)-ymin)/rng)*(plot.bottom-plot.top);
  const minTs=Math.min(...points.map(p=>p.timestamp_ms).filter(Boolean)), maxTs=Math.max(...points.map(p=>p.timestamp_ms).filter(Boolean)), trng=maxTs-minTs||1;
- const getX=p=>40+(((p.timestamp_ms||minTs)-minTs)/trng)*920;
+ const getX=p=>plot.left+(((p.timestamp_ms||minTs)-minTs)/trng)*(plot.right-plot.left);
  const pts=linePts(points,getX,getY2);
  root.querySelector('#lcExchangePath').setAttribute('points',pts);
  const fx=getX(points[0]),lx=getX(points[points.length-1]);
- root.querySelector('#lcExchangeFill').setAttribute('d',`M${fx} 300 L${pts} L${lx} 300 Z`);
+ root.querySelector('#lcExchangeFill').setAttribute('d',`M${fx} ${plot.bottom} L${pts} L${lx} ${plot.bottom} Z`);
  if(realizedPath) realizedPath.setAttribute('points',realizedPoints.length?linePts(realizedPoints,getX,getY2):'');
  if(drawdownPath) drawdownPath.setAttribute('points',drawdownPoints.length?linePts(drawdownPoints,getX,getY2):'');
- if(zeroLine){const zy=getY2(0);zeroLine.setAttribute('y1',zy);zeroLine.setAttribute('y2',zy);}
- root.querySelector('#lcYMax').textContent='$'+Number(ymax).toLocaleString(undefined,{maximumFractionDigits:0});
- root.querySelector('#lcYMid').textContent='$'+Number(ymin+rng/2).toLocaleString(undefined,{maximumFractionDigits:0});
- root.querySelector('#lcYMin').textContent='$'+Number(ymin).toLocaleString(undefined,{maximumFractionDigits:0});
+ if(zeroLine){const zy=getY2(0);zeroLine.setAttribute('x1',plot.left);zeroLine.setAttribute('x2',plot.right);zeroLine.setAttribute('y1',zy);zeroLine.setAttribute('y2',zy);}
+ renderXTicks(minTs,maxTs,getX);
+ root.querySelector('#lcYMax').textContent=fmtAxisMoney(ymax);
+ root.querySelector('#lcYMid').textContent=fmtAxisMoney(ymin+rng/2);
+ root.querySelector('#lcYMin').textContent=fmtAxisMoney(ymin);
  if(legend) legend.textContent=label;
  if(legend2) legend2.textContent=lcGraphMode==='account'?'Realized PnL':'';
  const legend3=root.querySelector('#lcGraphLegend3'); if(legend3) legend3.textContent=lcGraphMode==='account'?'Drawdown':'';
- if(sub) sub.textContent=lcGraphMode==='account'?`Exchange account graph. ${graphRangeLabel()} range, ${points.length} visible points.`:`${label}. ${graphRangeLabel()} range, ${points.length} live data points.`;
+ if(sub) sub.textContent=lcGraphMode==='account'?`Exchange account graph. ${graphRangeLabel()} range — ${points.length} portfolio pts, ${fillsInRange.length} realized fills.${((lcAudit.live_graph||{}).realized_pnl_points||[]).length>=250?' realized fill series limited to recent fetched fills.':''}`:`${label}. ${graphRangeLabel()} range, ${points.length} live data points.`;
 }
 function renderCards(){
  const snap=lcAudit.exchange_account_snapshot||{}, manual=lcAudit.manual_live_summary||{};
@@ -5220,13 +5342,16 @@ function renderCards(){
  const upnlCls=signCls(snap.unrealized_pnl);
  const rpnlCls=signCls(snap.realized_pnl_selected);
  const exPos=snap.available?((snap.open_positions||[]).length):'n/a';
- const exp='$'+Number(manual.manual_live_exposure_estimate||0).toLocaleString(undefined,{maximumFractionDigits:2});
+ const expVal=manual.manual_live_exposure_estimate||0;
+ const exp='$'+Number(expVal).toLocaleString(undefined,{maximumFractionDigits:2});
+ const expCls=expVal>0?'lc-amber':'';
  const lfStr=lf.coin?(h(lf.coin)+' '+h(lf.actual_side||lf.side||'?')+' '+h(lf.fill_size||'?')+' @ '+h(lf.fill_avg_px||'?')):'none yet';
  const lrErr=lr.error||lr.response||lr.notes||'';
  const lrStatusRaw=String(lr.status||'?');
  const lrStatusLabel={'SYMBOL_UNAVAILABLE':'symbol not found after fresh universe refresh','META_UNAVAILABLE':'could not fetch Hyperliquid universe','SDK_SYMBOL_MAP_UNAVAILABLE':'symbol in meta but SDK map unavailable'}[lrStatusRaw]||lrStatusRaw;
  const lrStr=lr.coin?(h(lr.coin)+' '+h(lr.actual_side||lr.side||'?')+' '+h(lrStatusLabel)+(lrErr?'<br><span class="lc-muted" title="'+h(lrErr)+'">'+tiny(lrErr,90)+'</span>':'')):'none';
- const cards=[['Portfolio Value',unified,''],['Unrealized PnL',upnl,upnlCls],['Realized PnL',rpnl,rpnlCls],['Open Positions',exPos,''],['Live Exposure',exp,''],['Last Fill',lfStr,''],['Last Reject',lrStr,'']];
+ const lrCls=lr.coin?'lc-neg':'';
+ const cards=[['Portfolio Value',unified,''],['Unrealized PnL',upnl,upnlCls],['Realized PnL',rpnl,rpnlCls],['Open Positions',exPos,''],['Live Exposure',exp,expCls],['Last Fill',lfStr,''],['Last Reject',lrStr,lrCls]];
  root.querySelector('#lcRealCards').innerHTML=cards.map(([l,v,cls])=>`<div class="lc-stat"><div class="label">${h(l)}</div><div class="value ${cls||''}" style="font-size:12px;word-break:break-all">${v}</div></div>`).join('');
  renderGraph();
 }
@@ -5441,8 +5566,28 @@ function render(){
  if(ro){const hasRealFills=(lcAudit.execution_quality_rows||[]).some(r=>r.status==='ORDER_FILLED');ro.className='lc-pill '+(hasRealFills?'lc-green':'lc-red');ro.textContent=hasRealFills?'REAL ORDERS: SERVICE ACTIVE':'REAL ORDERS: APP DISABLED';}
  renderCards(); renderWallets(); renderAudit(); renderHealth(); renderPositions(); renderExecQuality();
 }
-async function refresh(quiet){try{if(!quiet)msg('Loading...');const [cfg,health,audit]=await Promise.all([jget('/api/live-config'),jget('/api/live-ws-health'),jget('/api/live-audit-summary')]);lcConfig=cfg.config||{wallets:{}};lcHealth=health.health||{};lcAudit=audit||{};render();if(!quiet)msg('Loaded');}catch(e){msg(e.message||String(e),true);}}
+async function refresh(quiet){try{if(!quiet)msg('Loading...');const [cfg,health,audit,gcr]=await Promise.all([jget('/api/live-config'),jget('/api/live-ws-health'),jget('/api/live-audit-summary'),jget('/api/global-controls')]);lcConfig=cfg.config||{wallets:{}};lcHealth=health.health||{};lcAudit=audit||{};render();loadGcForm(gcr.global_controls||{});if(!quiet)msg('Loaded');}catch(e){msg(e.message||String(e),true);}}
+function loadGcForm(gc){
+  const f=(id,v)=>{const el=root.querySelector('#'+id);if(el&&v!=null)el.value=v;};
+  f('gcMaxTotal',gc.max_total_live_exposure_usd||0);f('gcMaxDir',gc.max_asset_directional_exposure_usd||0);
+  f('gcMaxWallet',gc.max_wallet_exposure_usd||0);f('gcMaxOrder',gc.max_order_notional_usd||0);
+  f('gcMktBps',gc.marketable_bps!=null?gc.marketable_bps:5);f('gcCloseAdv',gc.max_close_adverse_diff_pct!=null?gc.max_close_adverse_diff_pct:0.25);
+  f('gcAllowlist',(gc.symbol_allowlist||[]).join(','));f('gcBlocklist',(gc.symbol_blocklist||[]).join(','));
+}
 root.querySelector('#lcRefresh').addEventListener('click',()=>refresh());
+const gcPanel=root.querySelector('#lcGlobalControlsPanel'), gcToggle=root.querySelector('#lcGcToggle'), gcClose=root.querySelector('#lcGcClose');
+function setGcOpen(open){if(!gcPanel||!gcToggle)return;gcPanel.classList.toggle('active',!!open);gcPanel.setAttribute('aria-hidden',open?'false':'true');gcToggle.setAttribute('aria-expanded',open?'true':'false');}
+if(gcToggle) gcToggle.addEventListener('click',e=>{e.stopPropagation();setGcOpen(!(gcPanel&&gcPanel.classList.contains('active')));});
+if(gcClose) gcClose.addEventListener('click',()=>setGcOpen(false));
+document.addEventListener('click',e=>{if(gcPanel&&gcPanel.classList.contains('active')&&!gcPanel.contains(e.target)&&e.target!==gcToggle)setGcOpen(false);});
+root.querySelector('#lcGcSave').addEventListener('click',async()=>{
+  const gs=root.querySelector('#lcGcStatus');
+  const g=id=>parseFloat(root.querySelector('#'+id).value)||0;
+  const gl=id=>(root.querySelector('#'+id).value||'').split(',').map(s=>s.trim().toUpperCase()).filter(Boolean);
+  try{gs.textContent='Saving...';gs.className='lc-status';
+    await jpost('/api/global-controls',{max_total_live_exposure_usd:g('gcMaxTotal'),max_asset_directional_exposure_usd:g('gcMaxDir'),max_wallet_exposure_usd:g('gcMaxWallet'),max_order_notional_usd:g('gcMaxOrder'),marketable_bps:g('gcMktBps'),max_close_adverse_diff_pct:g('gcCloseAdv'),symbol_allowlist:gl('gcAllowlist'),symbol_blocklist:gl('gcBlocklist')});
+    gs.textContent='Saved';gs.className='lc-status lc-ok';}catch(e){gs.textContent=e.message||String(e);gs.className='lc-status lc-bad';}
+});
 root.querySelectorAll('[data-lc-modal]').forEach(btn=>btn.addEventListener('click',()=>{const m=root.querySelector('#'+btn.dataset.lcModal);if(m){m.classList.add('active');m.setAttribute('aria-hidden','false');}}));
 root.querySelectorAll('[data-lc-close]').forEach(btn=>btn.addEventListener('click',()=>{const m=btn.closest('.lc-modal-backdrop');if(m){m.classList.remove('active');m.setAttribute('aria-hidden','true');}}));
 root.querySelectorAll('[data-lc-tab]').forEach(btn=>btn.addEventListener('click',()=>{root.querySelectorAll('[data-lc-tab]').forEach(b=>b.classList.remove('active'));root.querySelectorAll('[data-lc-panel]').forEach(p=>p.classList.remove('active'));btn.classList.add('active');root.querySelector(`[data-lc-panel="${btn.dataset.lcTab}"]`).classList.add('active');}));
@@ -5672,6 +5817,24 @@ def sort_column(column: str, request: Request, direction: str = ""):
 @app.get("/api/live-config")
 def get_live_config():
     return JSONResponse(_live_copy_config_response(_load_live_copy_config()))
+
+
+@app.get("/api/global-controls")
+def get_global_controls():
+    cfg = _load_live_copy_config()
+    return JSONResponse({"ok": True, "global_controls": cfg.get("global_controls", _GLOBAL_CONTROLS_DEFAULTS)})
+
+
+@app.post("/api/global-controls")
+async def set_global_controls(req: Request):
+    try:
+        body = await req.json()
+        config = _load_live_copy_config()
+        config["global_controls"] = _normalise_global_controls(body)
+        _save_live_copy_config(config)
+        return JSONResponse({"ok": True, "global_controls": config["global_controls"]})
+    except Exception as exc:
+        return _live_config_error(type(exc).__name__)
 
 
 @app.get("/api/live-ws-health")
