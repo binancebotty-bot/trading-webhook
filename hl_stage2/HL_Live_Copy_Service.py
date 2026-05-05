@@ -689,6 +689,49 @@ def fixed_notional_buffered_cap(fixed_notional: float, cap_ceiling: float) -> fl
     return fixed_notional + buffer
 
 
+def _is_reduce_only_full_close_bypass(
+    payload: Dict[str, Any], wire_size: float, size_inc: float, reduce_only: bool
+) -> bool:
+    """Return True iff the $10 min-notional preflight should be bypassed.
+
+    Hyperliquid allows reduce-only orders that fully close an existing position regardless of
+    notional; the exchange-side $10 minimum does not apply in that case.  This bypass must only
+    fire for exact full-position closes — not opens, adds, partial closes, or wrong-side orders.
+
+    All conditions must hold:
+    - reduce_only=True
+    - close_position=True OR size_source=manual_position_close (confirmed full-close intent)
+    - position_before is non-zero (there is a position to close)
+    - side reduces the tracked position (SELL for long, BUY for short — no flip)
+    - wire_size > 0 and within one size increment of abs(position_before) (full close, not partial)
+    """
+    if not reduce_only:
+        return False
+    close_position = bool(payload.get("close_position"))
+    size_source = str(payload.get("size_source", ""))
+    if not (close_position or size_source == "manual_position_close"):
+        return False
+    position_before = fnum(payload.get("position_before", 0))
+    if position_before == 0:
+        return False
+    side = str(payload.get("side", "")).upper()
+    if side == "SELL" and position_before <= 0:
+        return False
+    if side == "BUY" and position_before >= 0:
+        return False
+    if wire_size <= 0:
+        return False
+    pos_abs = abs(position_before)
+    size_inc_safe = max(size_inc, 1e-8)
+    # wire_size must not exceed position (guard against flip) and must be within one increment
+    # of the full position (rounding down is allowed; a partial close is not)
+    if wire_size > pos_abs + size_inc_safe:
+        return False
+    if pos_abs - wire_size >= size_inc_safe:
+        return False
+    return True
+
+
 def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0, use_current_quote: bool = False, max_notional: Optional[float] = None) -> Dict[str, Any]:
     coin = str(payload.get("coin", "")).upper().strip()
     side = str(payload.get("side", "")).upper().strip()
@@ -736,6 +779,16 @@ def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0,
     try:
         _effective_max_notional = max_notional if max_notional is not None else LIVE_MAX_MANUAL_ORDER_NOTIONAL_USD
         prepared = prepare_hl_order_numbers(canonical_coin, size, adjusted_limit_px, _effective_max_notional)
+        if prepared.get("status") == "MIN_NOTIONAL_AFTER_ROUNDING":
+            _bwire = fnum(prepared.get("wire_size", 0))
+            _binc = fnum(prepared.get("size_increment") or "0.001")
+            if _is_reduce_only_full_close_bypass(payload, _bwire, _binc, reduce_only):
+                prepared = {
+                    **prepared,
+                    "ok": True,
+                    "min_notional_bypass": True,
+                    "min_notional_bypass_reason": "EXACT_REDUCE_ONLY_FULL_CLOSE",
+                }
         cap_context = {
             "copy_mode": payload.get("copy_mode", ""),
             "fixed_notional": payload.get("fixed_notional", ""),
@@ -813,6 +866,11 @@ def send_hyperliquid_order(payload: Dict[str, Any], marketable_bps: float = 0.0,
             "wire_limit_price": prepared.get("wire_limit_price"),
             "wire_notional": prepared.get("wire_notional"),
             "reduce_only": reduce_only,
+            "min_notional_bypass": prepared.get("min_notional_bypass", False),
+            "min_notional_bypass_reason": prepared.get("min_notional_bypass_reason", ""),
+            "position_before": payload.get("position_before", ""),
+            "close_position": payload.get("close_position", ""),
+            "size_source": payload.get("size_source", ""),
             **cap_context,
         }
     except Exception as exc:
@@ -3685,6 +3743,57 @@ def self_test() -> bool:
             fetch_public_executable_quote = old_fetch_public_executable_quote
             save_manual_live_positions({})
             # --- end close adverse diff guard tests ---
+
+            # --- reduce-only dust-close min-notional bypass tests ---
+            # FARTCOIN szDecimals=1, price $0.20 → 48 units = $9.60 < $10 min-notional.
+            HL_PERP_META_BY_COIN_CACHE = {"FARTCOIN": {"szDecimals": 1, "name": "FARTCOIN"}}
+            # 1. prepare_hl_order_numbers still blocks below-$10 (bypass lives in send_hyperliquid_order)
+            _fc_prep = prepare_hl_order_numbers("FARTCOIN", 48.0, 0.20, 1e12)
+            if _fc_prep.get("status") != "MIN_NOTIONAL_AFTER_ROUNDING":
+                raise AssertionError(f"prepare_hl_order_numbers must still block <$10 notional without bypass context: {_fc_prep}")
+            if _fc_prep.get("wire_size") != 48.0:
+                raise AssertionError(f"FARTCOIN wire_size should be 48.0: {_fc_prep}")
+            # 2. bypass helper: exact full long close (SELL reduces LONG) → True
+            _bp_long = {"close_position": True, "size_source": "manual_position_close", "position_before": 48.0, "side": "SELL"}
+            if not _is_reduce_only_full_close_bypass(_bp_long, 48.0, 1.0, True):
+                raise AssertionError("exact full long close must pass bypass check")
+            # 3. bypass helper: exact full short close (BUY reduces SHORT) → True
+            _bp_short = {"close_position": True, "size_source": "manual_position_close", "position_before": -78.0, "side": "BUY"}
+            if not _is_reduce_only_full_close_bypass(_bp_short, 78.0, 1.0, True):
+                raise AssertionError("exact full short close must pass bypass check")
+            # 4. bypass helper: open order (reduce_only=False, no position) → False
+            _bp_open = {"close_position": False, "size_source": "payload", "position_before": 0.0, "side": "BUY"}
+            if _is_reduce_only_full_close_bypass(_bp_open, 48.0, 1.0, False):
+                raise AssertionError("open order must not bypass min_notional")
+            # 5. bypass helper: partial close (wire_size well below position) → False
+            _bp_partial = {"close_position": True, "size_source": "manual_position_close", "position_before": -78.0, "side": "BUY"}
+            if _is_reduce_only_full_close_bypass(_bp_partial, 40.0, 1.0, True):
+                raise AssertionError("partial close must not bypass min_notional")
+            # 6. bypass helper: wrong-side reduce_only (SELL on SHORT position) → False
+            _bp_wrong = {"close_position": True, "size_source": "manual_position_close", "position_before": -78.0, "side": "SELL"}
+            if _is_reduce_only_full_close_bypass(_bp_wrong, 78.0, 1.0, True):
+                raise AssertionError("wrong-side reduce must not bypass min_notional")
+            # 7. bypass helper: reduce_only=False on close_position path → False
+            _bp_noro = {"close_position": True, "size_source": "manual_position_close", "position_before": 48.0, "side": "SELL"}
+            if _is_reduce_only_full_close_bypass(_bp_noro, 48.0, 1.0, False):
+                raise AssertionError("reduce_only=False must not bypass min_notional")
+            # 8. end-to-end through manual_send_one_intent (close_position=True, confirm_send=False):
+            #    with tracked position 48 FARTCOIN long, the close payload must have size=48.
+            #    The MIN_NOTIONAL bypass fires inside send_hyperliquid_order (called only on confirm_send=True),
+            #    so preview path (confirm_send=False) returns CONFIRM_REQUIRED with correct payload size.
+            save_manual_live_positions({"FARTCOIN": {"signed_size": 48.0, "last_updated_at": utc_now_iso(), "last_oid": "fc-long", "last_intent_id": "fc-long"}})
+            _fc_preview = manual_send_one_intent("manual-close-dust", False, close_position=True)
+            if _fc_preview.get("status") != "CONFIRM_REQUIRED":
+                raise AssertionError(f"dust close preview should be CONFIRM_REQUIRED: {_fc_preview}")
+            if round(fnum(_fc_preview.get("payload", {}).get("copy_size")), 6) != 48.0:
+                raise AssertionError(f"dust close payload copy_size should be 48.0: {_fc_preview}")
+            if _fc_preview.get("payload", {}).get("side") != "SELL":
+                raise AssertionError(f"dust long close should SELL: {_fc_preview}")
+            if not _fc_preview.get("payload", {}).get("reduce_only"):
+                raise AssertionError(f"dust close payload must have reduce_only=True: {_fc_preview}")
+            save_manual_live_positions({})
+            HL_PERP_META_BY_COIN_CACHE = {"TAO": {"szDecimals": 3, "name": "TAO"}}
+            # --- end reduce-only dust-close min-notional bypass tests ---
 
             def make_auto_intent(intent_id: str, *, wallet_id: str = wallet, reason: str = "LIVE_WS_DETECTED", decision: str = "WOULD_PLACE_IOC_LIMIT", coin: str = "BTC", side: str = "BUY", manual: bool = False) -> Dict[str, Any]:
                 return {
