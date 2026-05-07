@@ -675,6 +675,9 @@ class IntentBuilder:
         before = self.ledger.wallet_coin_position(wallet, coin)
         direction_before = self.ledger.direction_from_size(before)
         lifecycle, is_reduce = self.ledger.classify_leader_side_for_wallet(wallet, coin, fill.side)
+        if lifecycle == "EXIT":
+            copy_size = round(min(copy_size, abs(before)), 8)
+            copy_notional = copy_size * fill.price
         intent_id = stable_hash(["intent", fill.leader_fill_id, wallet, coin, fill.side, fill.timestamp_ms])
         position_id = ""
         if lifecycle in {"ENTRY", "ADD"}:
@@ -686,7 +689,7 @@ class IntentBuilder:
         coin_net_before = self.ledger.coin_net(coin)
         decision, reason = self._decision(wallet, fill, lifecycle, copy_notional, before)
         reduce_only_intended = bool(is_reduce)
-        reduce_only_sent_planned = self._planned_reduce_only(fill.side, copy_size, before, coin_net_before, reduce_only_intended)
+        reduce_only_sent_planned = False
         return Intent(
             intent_id=intent_id,
             fill=fill,
@@ -748,16 +751,6 @@ class IntentBuilder:
                 return "SEND_BLOCKED_RISK", "max total exposure exceeded"
         return ("EXIT_ALLOWED" if lifecycle == "EXIT" else "ENTRY_ALLOWED"), lifecycle
 
-    @staticmethod
-    def _planned_reduce_only(side: str, size: float, wallet_before: float, coin_net_before: float, reduce_intended: bool) -> bool:
-        if not reduce_intended:
-            return False
-        delta = ManualLedger.signed_delta(side, size)
-        coin_net_after = coin_net_before + delta
-        # If reduce-only would increase absolute account net, do not set it blindly.
-        if abs(coin_net_after) > abs(coin_net_before) + POSITION_EPSILON:
-            return False
-        return True
 
 
 class SenderGateway:
@@ -1549,6 +1542,83 @@ def run_self_test() -> None:
         status = recon.compare_snapshot({"positions_by_coin": {"TON": 999.0}})
         _check("exchange mismatch is reported", status == "LEDGER_EXCHANGE_NET_MISMATCH")
         _check("exchange mismatch does not auto-correct ledger", json.dumps(ledger.data, sort_keys=True) == ledger_before)
+
+        # Sleeve exit policy: exit clamped to sleeve size, not current config notional.
+        atomic_write_json(LIVE_CONFIG_FILE, {
+            "auto_send_enabled": False,
+            "wallets": {
+                wallet_a: {"enabled": True, "mode": "ON", "copy_mode": "fixed", "fixed_notional": 10},
+                wallet_b: {"enabled": True, "mode": "ON", "copy_mode": "fixed", "fixed_notional": 10},
+            },
+            "global_controls": {"min_notional": 1},
+        })
+        _sl = ManualLedger(path=AUDIT_DIR / "test_sl1_positions.json")
+        _sb = IntentBuilder(ConfigManager(), _sl)
+        _sm = CopyFillMatcher(_sl, AuditLogWriter())
+        _f_open = LeaderFill("sl-open", wallet_a, "SOL", "BUY", 2.0, 25.0, 6000, "TEST")
+        _i_open = _sb.build(_f_open)
+        _sm.match_and_apply(
+            {"intent_id": _i_open.intent_id, "side": "BUY", "price": 2.0, "size": 5.0, "copy_fill_id": "sl-cf1"},
+            {_i_open.intent_id: _i_open},
+        )
+        # Config raised to 50; unclamped exit would give copy_size=25.0
+        atomic_write_json(LIVE_CONFIG_FILE, {
+            "auto_send_enabled": False,
+            "wallets": {
+                wallet_a: {"enabled": True, "mode": "ON", "copy_mode": "fixed", "fixed_notional": 50},
+                wallet_b: {"enabled": True, "mode": "ON", "copy_mode": "fixed", "fixed_notional": 10},
+            },
+            "global_controls": {"min_notional": 1},
+        })
+        _f_exit = LeaderFill("sl-exit", wallet_a, "SOL", "SELL", 2.0, 25.0, 6500, "TEST")
+        _i_exit = IntentBuilder(ConfigManager(), _sl).build(_f_exit)
+        _check("sleeve exit clamped to sleeve size not inflated config",
+               abs(_i_exit.copy_size - 5.0) < 1e-9,
+               f"copy_size={_i_exit.copy_size}")
+
+        # Wallet A exits TON with wallet B holding opposite exposure — A exit allowed and sized to A sleeve.
+        _sl2 = ManualLedger(path=AUDIT_DIR / "test_sl2_positions.json")
+        _sb2 = IntentBuilder(ConfigManager(), _sl2)
+        _sm2 = CopyFillMatcher(_sl2, AuditLogWriter())
+        _fa_open = LeaderFill("ab2-oa", wallet_a, "TON", "BUY", 2.0, 10.0, 7000, "TEST")
+        _ia_open = _sb2.build(_fa_open)
+        _sm2.match_and_apply(
+            {"intent_id": _ia_open.intent_id, "side": "BUY", "price": 2.0, "size": 5.0, "copy_fill_id": "ab2-cfa"},
+            {_ia_open.intent_id: _ia_open},
+        )
+        _fb_open = LeaderFill("ab2-ob", wallet_b, "TON", "SELL", 2.0, 10.0, 7100, "TEST")
+        _ib_open = _sb2.build(_fb_open)
+        _sm2.match_and_apply(
+            {"intent_id": _ib_open.intent_id, "side": "SELL", "price": 2.0, "size": 3.0, "copy_fill_id": "ab2-cfb"},
+            {_ib_open.intent_id: _ib_open},
+        )
+        # coin_net=+2.0 but wallet_a sleeve=+5.0; exit must clamp to 5.0 not coin_net
+        _fa_exit = LeaderFill("ab2-xa", wallet_a, "TON", "SELL", 2.0, 10.0, 7200, "TEST")
+        _ia_exit = _sb2.build(_fa_exit)
+        _check("wallet A exit allowed with wallet B opposite exposure",
+               _ia_exit.decision in {"EXIT_ALLOWED", "ENTRY_ALLOWED"})
+        _check("wallet A exit clamped to wallet A sleeve not coin_net",
+               abs(_ia_exit.copy_size - 5.0) < 1e-9,
+               f"copy_size={_ia_exit.copy_size} coin_net={_ia_exit.coin_net_before}")
+        _check("wallet B sleeve unchanged after wallet A exit intent",
+               abs(_sl2.wallet_coin_position(wallet_b, "TON") - (-3.0)) < 1e-9)
+
+        # reduce_only_sent_planned is always False regardless of position or coin_net.
+        _sl3 = ManualLedger(path=AUDIT_DIR / "test_sl3_positions.json")
+        _sb3 = IntentBuilder(ConfigManager(), _sl3)
+        _sm3 = CopyFillMatcher(_sl3, AuditLogWriter())
+        _f_ro_entry = LeaderFill("ro2-open", wallet_a, "BTC", "BUY", 50000.0, 0.002, 8000, "TEST")
+        _i_ro_entry = _sb3.build(_f_ro_entry)
+        _check("reduce_only_sent_planned False on entry",
+               _i_ro_entry.reduce_only_sent_planned is False)
+        _sm3.match_and_apply(
+            {"intent_id": _i_ro_entry.intent_id, "side": "BUY", "price": 50000.0, "size": 0.0002, "copy_fill_id": "ro2-cf1"},
+            {_i_ro_entry.intent_id: _i_ro_entry},
+        )
+        _f_ro_exit = LeaderFill("ro2-exit", wallet_a, "BTC", "SELL", 50000.0, 0.002, 8500, "TEST")
+        _i_ro_exit = _sb3.build(_f_ro_exit)
+        _check("reduce_only_sent_planned False on exit regardless of coin_net",
+               _i_ro_exit.reduce_only_sent_planned is False)
 
         # Heartbeat: pong message must not enqueue a fill.
         _ws_pong = WSManager(["0x" + "f" * 40], LeaderFillIngestor())
