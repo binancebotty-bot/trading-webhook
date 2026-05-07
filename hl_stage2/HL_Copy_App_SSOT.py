@@ -966,9 +966,10 @@ def _live_audit_summary() -> Dict[str, Any]:
     else:
         exchange_snapshot["realized_pnl_diagnostic"] = ""
     account_reconciliation = _build_account_reconciliation(exchange_snapshot, live_leader_performance)
-    live_wallet_rows = _build_live_wallet_rows(live_config, audit_rows, metric_send_attempts, manual_positions, manual_live_summary, ws_health, live_leader_performance)
+    _live_fills_data = _load_recent_live_fills(500)
+    live_wallet_rows = _build_live_wallet_rows(live_config, audit_rows, metric_send_attempts, manual_positions, manual_live_summary, ws_health, live_leader_performance, live_fills=_live_fills_data)
     real_copy_positions = _build_real_copy_positions(manual_positions, exchange_snapshot)
-    execution_quality_rows = _build_execution_quality_rows(metric_send_attempts, audit_rows)
+    execution_quality_rows = _build_execution_quality_rows(metric_send_attempts, audit_rows, live_fills=_live_fills_data)
     execution_quality_summary = _build_execution_quality_summary(execution_quality_rows)
     manual_reconciliation_rows = _build_manual_reconciliation_rows(manual_positions, exchange_snapshot, recent_send_attempts)
     recent_send_warning_groups = _build_recent_send_warning_groups(recent_send_attempts)
@@ -1045,7 +1046,9 @@ def _load_manual_live_positions() -> Dict[str, Any]:
 def iter_manual_wallet_positions(manual_positions: Dict[str, Any]):
     if not isinstance(manual_positions, dict):
         return
-    if manual_positions.get("schema") == "manual_live_positions.v2":
+    _schema = str(manual_positions.get("schema", ""))
+    # Handle v2 and v1.wallet_sleeves schemas — both use the by_wallet structure
+    if _schema == "manual_live_positions.v2" or _schema.startswith("manual_live_positions.v1"):
         by_wallet = manual_positions.get("by_wallet", {})
         if not isinstance(by_wallet, dict):
             return
@@ -1094,7 +1097,8 @@ def _load_recent_send_attempts(limit: int = 20) -> List[Dict[str, Any]]:
     try:
         with SEND_ATTEMPTS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
-                resp_text = str(row.get("response") or "")
+                # Support both old "response" column and new-core "exchange_response" column
+                resp_text = str(row.get("exchange_response") or row.get("response") or "")
                 parsed: Dict[str, Any] = {}
                 if resp_text:
                     try:
@@ -1116,11 +1120,46 @@ def _load_recent_send_attempts(limit: int = 20) -> List[Dict[str, Any]]:
                             val = payload.get(key)
                         if val is not None:
                             parsed[key] = val
+                    # New-core Hyperliquid exchange_response format:
+                    # {"status":"ok","response":{"type":"order","data":{"statuses":[{"filled":{"totalSz":"0.02","avgPx":"559.92","oid":415169026806}}]}}}
+                    if "fill_avg_px" not in parsed or "fill_size" not in parsed:
+                        order_r = resp.get("response") if isinstance(resp.get("response"), dict) else {}
+                        order_d = order_r.get("data") if isinstance(order_r, dict) else {}
+                        statuses = order_d.get("statuses") if isinstance(order_d, dict) else None
+                        if isinstance(statuses, list) and statuses:
+                            filled = statuses[0].get("filled") if isinstance(statuses[0], dict) else None
+                            if isinstance(filled, dict):
+                                if "fill_avg_px" not in parsed and filled.get("avgPx"):
+                                    try:
+                                        parsed["fill_avg_px"] = float(filled["avgPx"])
+                                    except Exception:
+                                        pass
+                                if "fill_size" not in parsed and filled.get("totalSz"):
+                                    try:
+                                        parsed["fill_size"] = float(filled["totalSz"])
+                                    except Exception:
+                                        pass
                     # actual_side: prefer executed side from response/payload over CSV intent side
                     actual_side = resp.get("side") or payload.get("side") or row.get("side")
                     if actual_side:
                         parsed["actual_side"] = actual_side
+                # exchange_order_id column (new-core) → oid fallback
+                if "oid" not in parsed and row.get("exchange_order_id"):
+                    parsed["oid"] = str(row["exchange_order_id"])
                 out.append({**row, **parsed})
+        return out[-limit:]
+    except Exception:
+        return out[-limit:] if len(out) >= limit else out
+
+
+def _load_recent_live_fills(limit: int = 500) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    if not LIVE_FILLS_CSV.exists():
+        return out
+    try:
+        with LIVE_FILLS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                out.append(dict(row))
         return out[-limit:]
     except Exception:
         return out[-limit:] if len(out) >= limit else out
@@ -2084,12 +2123,42 @@ def _build_live_wallet_rows(
     manual_summary: Dict[str, Any],
     ws_health: Dict[str, Any],
     live_leader_performance: Optional[Dict[str, Any]] = None,
+    live_fills: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     wallets = live_config.get("wallets", {})
     if not isinstance(wallets, dict):
         wallets = {}
     health_wallets = ws_health.get("wallets", {}) if isinstance(ws_health.get("wallets"), dict) else {}
     exposure_by_coin = manual_summary.get("exposure_by_coin", {}) if isinstance(manual_summary.get("exposure_by_coin"), dict) else {}
+    # Detect shared HOT10 WS health from ws_summary (per-wallet rows absent under shared socket)
+    _ws_summary = ws_health.get("ws_summary", {}) if isinstance(ws_health.get("ws_summary"), dict) else {}
+    _shared_ws_ok = (
+        str(_ws_summary.get("ws_status", "")).upper() == "WS_OK"
+        and bool(_ws_summary.get("socket_open"))
+        and bool(_ws_summary.get("thread_alive"))
+    )
+    # Pre-build per-wallet manual ledger aggregates from by_wallet sleeves
+    _by_wallet_pos: Dict[str, Any] = {}
+    if isinstance(manual_positions, dict):
+        _bwp = manual_positions.get("by_wallet", {})
+        if isinstance(_bwp, dict):
+            _by_wallet_pos = _bwp
+    # Pre-build most recent live fill per leader wallet (for last_fill field)
+    if live_fills is None:
+        live_fills = _load_recent_live_fills(500)
+    _last_lf_by_wallet: Dict[str, Dict[str, Any]] = {}
+    for _lf in (live_fills or []):
+        _lfw = str(_lf.get("leader_wallet") or "").lower()
+        if _lfw:
+            _ex_lf = _last_lf_by_wallet.get(_lfw)
+            if _ex_lf is None or str(_lf.get("created_at", "")) > str(_ex_lf.get("created_at", "")):
+                _last_lf_by_wallet[_lfw] = _lf
+    # Pre-count ORDER_FILLED send_attempts per wallet
+    _filled_cnt_by_wallet: Dict[str, int] = {}
+    for _sa in recent_send_attempts:
+        _saw = str(_sa.get("leader_wallet") or _sa.get("auto_send_wallet") or "").lower()
+        if _saw and str(_sa.get("status", "")) == "ORDER_FILLED":
+            _filled_cnt_by_wallet[_saw] = _filled_cnt_by_wallet.get(_saw, 0) + 1
     rows: List[Dict[str, Any]] = []
     for wallet, cfg in sorted(wallets.items()):
         if not isinstance(cfg, dict):
@@ -2102,6 +2171,19 @@ def _build_live_wallet_rows(
         service_eligible = bool(normal.get("service_eligible"))
         service_reason = str(normal.get("service_eligibility_reason", "MODE_OFF"))
         perf = (live_leader_performance or {}).get(w, {})
+
+        # Per-wallet manual ledger: open sleeves + exposure
+        _w_sleeves = _by_wallet_pos.get(wallet) or _by_wallet_pos.get(w) or {}
+        _w_open_coins: List[str] = []
+        _w_exposure = 0.0
+        for _coin_k, _pos_v in (_w_sleeves.items() if isinstance(_w_sleeves, dict) else []):
+            _sz_v = float((_pos_v or {}).get("signed_size", 0) or 0)
+            if abs(_sz_v) <= 1e-12:
+                continue
+            _w_open_coins.append(str(_coin_k).upper())
+            _w_exposure += abs(_sz_v) * float((_pos_v or {}).get("avg_entry_px", 0) or 0)
+        _w_filled_count = _filled_cnt_by_wallet.get(w, 0)
+        _w_last_fill: Dict[str, Any] = _last_lf_by_wallet.get(w, {})
 
         # WS intent activity
         ws_intent_count = 0
@@ -2134,8 +2216,13 @@ def _build_live_wallet_rows(
             conn_status = "COPY DISABLED"
             conn_detail = service_reason if service_reason != "MODE_OFF" else ""
         elif not in_health_file:
-            conn_status = "NO WS HEALTH"
-            conn_detail = "service not reporting this wallet"
+            # Shared HOT10 socket: per-wallet rows absent but socket is OK
+            if _shared_ws_ok and mode in {"LIVE", "CLO"}:
+                conn_status = "SHARED_WS_OK"
+                conn_detail = "HOT10 shared socket active"
+            else:
+                conn_status = "NO WS HEALTH"
+                conn_detail = "service not reporting this wallet"
         else:
             raw_status = str(wh.get("current_status") or wh.get("effective_status") or wh.get("status") or "UNKNOWN").upper()
             conn_status = "OFFLINE" if raw_status in {"OFFLINE", "DISCONNECTED", "CLOSED"} else raw_status
@@ -2168,7 +2255,7 @@ def _build_live_wallet_rows(
             "last_intent_coin": last_intent_coin,
             "last_intent_side": last_intent_side,
             "last_intent_coin_side": f"{last_intent_coin} {last_intent_side}".strip(),
-            "filled_count": perf.get("filled_count", 0),
+            "filled_count": _w_filled_count if _w_filled_count else perf.get("filled_count", 0),
             "exits_count": perf.get("exits_count", 0),
             "exchange_rejected_count": perf.get("exchange_rejected_count", 0),
             "local_blocked_count": perf.get("local_blocked_count", 0),
@@ -2205,16 +2292,16 @@ def _build_live_wallet_rows(
             "worst_diff_bps": perf.get("worst_diff_bps"),
             "fill_vs_limit_avg_bps": perf.get("avg_fill_vs_limit_bps"),
             "fill_vs_limit_worst_bps": perf.get("worst_fill_vs_limit_bps"),
-            "open_position_count": len(open_positions),
-            "open_positions": open_positions,
-            "open_coins": perf.get("open_coins", []),
-            "open_exposure": open_exposure,
-            "current_exposure": open_exposure,
+            "open_position_count": len(_w_open_coins) if _w_open_coins else len(open_positions),
+            "open_positions": _w_open_coins if _w_open_coins else open_positions,
+            "open_coins": _w_open_coins if _w_open_coins else perf.get("open_coins", []),
+            "open_exposure": _w_exposure if _w_exposure > 0 else open_exposure,
+            "current_exposure": _w_exposure if _w_exposure > 0 else open_exposure,
             "max_exposure": perf.get("max_exposure"),
             "drawdown": perf.get("drawdown"),
             "live_dd": perf.get("drawdown"),
             "max_drawdown": perf.get("max_drawdown"),
-            "last_fill": last_fill_d,
+            "last_fill": _w_last_fill if _w_last_fill else last_fill_d,
         })
     return rows
 
@@ -2255,10 +2342,14 @@ def _build_real_copy_positions(
         else:
             status = "EXCHANGE_UNAVAILABLE"
         rows.append({
+            "row_type": "OWNED_COPY",
             "coin": coin_upper,
             "signed_size": signed,
             "side": "LONG" if signed > 0 else "SHORT",
             "leader_wallet": wallet,
+            "avg_entry_px": fnum(pos.get("avg_entry_px")) or None,
+            "last_copy_fill_id": pos.get("last_copy_fill_id", ""),
+            "last_updated_ms": pos.get("last_updated_ms"),
             "last_intent_id": pos.get("last_intent_id", ""),
             "last_oid": pos.get("last_oid", ""),
             "last_updated_at": pos.get("last_updated_at", ""),
@@ -2301,10 +2392,14 @@ def _build_real_copy_positions(
             if abs(ex_signed) <= 1e-12:
                 continue
             rows.append({
+                "row_type": "ACCOUNT_LEVEL_ONLY",
                 "coin": coin.upper(),
                 "signed_size": None,
                 "side": "LONG" if ex_signed > 0 else "SHORT",
                 "leader_wallet": "—",
+                "avg_entry_px": None,
+                "last_copy_fill_id": "",
+                "last_updated_ms": None,
                 "last_intent_id": "—",
                 "last_oid": "—",
                 "last_updated_at": "—",
@@ -2313,7 +2408,8 @@ def _build_real_copy_positions(
                 "mark_px": fnum(ex.get("mark_px")) or None,
                 "position_value": fnum(ex.get("position_value")) or None,
                 "unrealized_pnl": fnum(ex.get("unrealized_pnl")) or None,
-                "ledger_vs_exchange": "MISSING_LEDGER",
+                "ledger_vs_exchange": "ORPHAN_EXCHANGE",
+                "reconciliation_note": "pre-existing or non-copied exchange position; not adopted into ledger",
             })
     return rows
 
@@ -2321,17 +2417,42 @@ def _build_real_copy_positions(
 def _build_execution_quality_rows(
     recent_send_attempts: List[Dict[str, Any]],
     last_rows: List[Dict[str, Any]],
+    live_fills: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
+    if live_fills is None:
+        live_fills = _load_recent_live_fills(500)
     intent_by_id: Dict[str, Dict[str, Any]] = {}
     for row in last_rows:
         iid = str(row.get("intent_id", "")).strip()
         if iid:
             intent_by_id[iid] = row
+    # Build live_fill lookup by intent_id first, then by leader_fill_id as fallback
+    _lf_by_intent: Dict[str, Dict[str, Any]] = {}
+    _lf_by_leader_fill: Dict[str, Dict[str, Any]] = {}
+    for _lf in (live_fills or []):
+        _iid = str(_lf.get("intent_id", "")).strip()
+        if _iid and _iid not in _lf_by_intent:
+            _lf_by_intent[_iid] = _lf
+        _lfid = str(_lf.get("leader_fill_id", "")).strip()
+        if _lfid and _lfid not in _lf_by_leader_fill:
+            _lf_by_leader_fill[_lfid] = _lf
     rows: List[Dict[str, Any]] = []
     for attempt in reversed(recent_send_attempts):
         intent_id = str(attempt.get("intent_id", "")).strip()
+        leader_fill_id = str(attempt.get("leader_fill_id", "")).strip()
         intent = intent_by_id.get(intent_id, {})
+        # Resolve live_fill: intent_id first, then leader_fill_id
+        live_fill = _lf_by_intent.get(intent_id) or _lf_by_leader_fill.get(leader_fill_id) or {}
+        # fill_avg_px: parsed from exchange_response, else live_fill fill_price
         fill_px = fnum(attempt.get("fill_avg_px"))
+        if fill_px == 0 and live_fill:
+            fill_px = fnum(live_fill.get("fill_price"))
+        # fill_size: parsed from exchange_response, else live_fill fill_size
+        fill_size_val = attempt.get("fill_size")
+        if (fill_size_val is None or fnum(fill_size_val) == 0) and live_fill:
+            fill_size_val = live_fill.get("fill_size")
+        # oid: exchange_order_id column (already mapped to oid in _load_recent_send_attempts)
+        oid_val = attempt.get("oid") or attempt.get("exchange_order_id")
         limit_px = fnum(attempt.get("limit_price") or attempt.get("limit_px") or 0)
         if limit_px == 0 and intent:
             limit_px = fnum(intent.get("suggested_limit_price") or intent.get("target_price") or 0)
@@ -2353,8 +2474,8 @@ def _build_execution_quality_rows(
             "status": attempt.get("status", ""),
             "limit_px": limit_px if limit_px > 0 else None,
             "fill_avg_px": fill_px if fill_px > 0 else None,
-            "fill_size": attempt.get("fill_size"),
-            "oid": attempt.get("oid"),
+            "fill_size": fill_size_val,
+            "oid": oid_val,
             "fill_bps": fill_bps,
             "leader_bps": leader_bps,
             "marketable_bps": fnum(attempt.get("marketable_bps")) or None,

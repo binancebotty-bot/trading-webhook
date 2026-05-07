@@ -2029,6 +2029,237 @@ def test_norm_base_persistence_propagates_to_user_and_header() -> None:
               f"user={usr_rl:.6f} header={hdr_rl:.6f}")
 
 
+def test_archive_ledger_row_force_fresh_snapshot() -> None:
+    """Archive path must force-fetch snapshot; stale file must not be used for archive decisions."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        audit_dir = tmp / "hl_live_copy_audit"
+        audit_dir.mkdir(parents=True)
+
+        old_manual_pos_file = appmod.MANUAL_POSITIONS_FILE
+        old_snapshot_file = appmod.EXCHANGE_ACCOUNT_SNAPSHOT_FILE
+        old_recon_backup_dir = appmod.MANUAL_RECON_BACKUP_DIR
+        old_recon_actions_file = appmod.MANUAL_RECON_ACTIONS_FILE
+        old_fetch_fn = appmod._fetch_exchange_account_snapshot
+
+        appmod.MANUAL_POSITIONS_FILE = audit_dir / "manual_live_positions.json"
+        appmod.EXCHANGE_ACCOUNT_SNAPSHOT_FILE = audit_dir / "exchange_account_snapshot.json"
+        appmod.MANUAL_RECON_BACKUP_DIR = audit_dir / "reconciliation_backups"
+        appmod.MANUAL_RECON_ACTIONS_FILE = audit_dir / "manual_reconciliation_actions.json"
+
+        wallet = "0xtest0000000000000000000000000000000001"
+        manual_v1 = {
+            "ZEC": {
+                "signed_size": -2.94,
+                "leader_wallet": wallet,
+                "last_oid": "test-oid",
+                "last_intent_id": "test-intent",
+                "last_updated_at": "2026-01-01T00:00:00+00:00",
+            }
+        }
+        appmod.MANUAL_POSITIONS_FILE.write_text(json.dumps(manual_v1), encoding="utf-8")
+
+        # Stale file shows ZEC nonzero — old code would have blocked archive; new code must ignore it.
+        stale_snap = {"ok": True, "available": True, "positions_by_coin": {"ZEC": {"signed_size": -2.94}}}
+        appmod.EXCHANGE_ACCOUNT_SNAPSHOT_FILE.write_text(json.dumps(stale_snap), encoding="utf-8")
+
+        # Case 1: fresh fetch returns exchange zero → archive should succeed (stale file ignored).
+        def _fresh_zero(max_age_sec: float = 15.0) -> Dict[str, Any]:
+            return {"ok": True, "available": True, "status": "OK", "positions_by_coin": {}}
+
+        appmod._fetch_exchange_account_snapshot = _fresh_zero
+        r1 = appmod._archive_manual_reconciliation_ledger_row({
+            "coin": "ZEC", "issue": "MISSING_EXCHANGE", "wallet": wallet, "manual_signed_size": -2.94,
+        })
+        check("archive: force-fresh zero allows archive despite stale nonzero file", r1.get("ok") is True, str(r1))
+        remaining1 = json.loads(appmod.MANUAL_POSITIONS_FILE.read_text(encoding="utf-8"))
+        check("archive: ZEC removed from ledger after successful archive", "ZEC" not in remaining1, str(remaining1))
+
+        # Re-seed for second case.
+        appmod.MANUAL_POSITIONS_FILE.write_text(json.dumps(manual_v1), encoding="utf-8")
+
+        # Case 2: fresh fetch unavailable → archive must refuse and not mutate ledger.
+        def _fresh_unavailable(max_age_sec: float = 15.0) -> Dict[str, Any]:
+            return {"ok": False, "available": False, "status": "UNAVAILABLE", "reason": "ACCOUNT_ADDRESS_UNAVAILABLE"}
+
+        appmod._fetch_exchange_account_snapshot = _fresh_unavailable
+        r2 = appmod._archive_manual_reconciliation_ledger_row({
+            "coin": "ZEC", "issue": "MISSING_EXCHANGE", "wallet": wallet, "manual_signed_size": -2.94,
+        })
+        check("archive: unavailable fresh fetch refuses archive",
+              r2.get("ok") is False and r2.get("error") == "EXCHANGE_SNAPSHOT_UNAVAILABLE", str(r2))
+        remaining2 = json.loads(appmod.MANUAL_POSITIONS_FILE.read_text(encoding="utf-8"))
+        check("archive: ledger not mutated when fetch unavailable", "ZEC" in remaining2, str(remaining2))
+
+        appmod.MANUAL_POSITIONS_FILE = old_manual_pos_file
+        appmod.EXCHANGE_ACCOUNT_SNAPSHOT_FILE = old_snapshot_file
+        appmod.MANUAL_RECON_BACKUP_DIR = old_recon_backup_dir
+        appmod.MANUAL_RECON_ACTIONS_FILE = old_recon_actions_file
+        appmod._fetch_exchange_account_snapshot = old_fetch_fn
+
+
+def test_live_plumbing_shared_ws_health() -> None:
+    """WS_OK ws_summary with no per-wallet rows => SHARED_WS_OK, not UNKNOWN/OFFLINE/NO WS HEALTH."""
+    wallet = "0xaaa0000000000000000000000000000000000001"
+    live_config = {
+        "wallets": {wallet: {"enabled": True, "mode": "LIVE", "copy_mode": "fixed", "fixed_notional": 10}},
+        "global_controls": {},
+    }
+    # ws_summary shows healthy shared socket; no per-wallet entries
+    ws_health = {
+        "ws_summary": {"ws_status": "WS_OK", "socket_open": True, "thread_alive": True, "wallet_count": 1},
+        "wallets": {},
+    }
+    rows = appmod._build_live_wallet_rows(
+        live_config, [], [], {}, {}, ws_health,
+        live_leader_performance={}, live_fills=[],
+    )
+    check("shared WS: row exists for LIVE wallet", len(rows) == 1)
+    if rows:
+        check("shared WS: conn_status is SHARED_WS_OK not UNKNOWN/OFFLINE/NO WS HEALTH",
+              rows[0].get("conn_status") == "SHARED_WS_OK",
+              str(rows[0].get("conn_status")))
+
+
+def test_live_plumbing_manual_ledger_wallet_row() -> None:
+    """manual_live_positions with open sleeves => wallet row shows exposure > 0 and open_pos > 0."""
+    wallet = "0xaaa0000000000000000000000000000000000002"
+    live_config = {
+        "wallets": {wallet: {"enabled": True, "mode": "LIVE", "copy_mode": "fixed", "fixed_notional": 10}},
+        "global_controls": {},
+    }
+    manual_positions = {
+        "schema": "manual_live_positions.v1.wallet_sleeves",
+        "by_wallet": {
+            wallet: {
+                "VIRTUAL": {"signed_size": 13.5, "avg_entry_px": 0.88, "direction": "LONG",
+                            "coin": "VIRTUAL", "leader_wallet": wallet},
+                "HYPE": {"signed_size": 0.28, "avg_entry_px": 42.04, "direction": "LONG",
+                         "coin": "HYPE", "leader_wallet": wallet},
+            }
+        },
+        "by_coin_net": {"VIRTUAL": {"signed_size": 13.5}, "HYPE": {"signed_size": 0.28}},
+    }
+    ws_health = {"ws_summary": {"ws_status": "WS_OK", "socket_open": True, "thread_alive": True}, "wallets": {}}
+    rows = appmod._build_live_wallet_rows(
+        live_config, [], [], manual_positions, {}, ws_health,
+        live_leader_performance={}, live_fills=[],
+    )
+    check("manual ledger: row exists", len(rows) == 1)
+    if rows:
+        r = rows[0]
+        check("manual ledger: open_position_count == 2", r.get("open_position_count") == 2,
+              str(r.get("open_position_count")))
+        check("manual ledger: open_exposure > 0",
+              isinstance(r.get("open_exposure"), (int, float)) and r.get("open_exposure") > 0,
+              str(r.get("open_exposure")))
+        check("manual ledger: open_coins contains VIRTUAL and HYPE",
+              "VIRTUAL" in (r.get("open_coins") or []) and "HYPE" in (r.get("open_coins") or []),
+              str(r.get("open_coins")))
+
+
+def test_live_plumbing_execution_quality_fill_join() -> None:
+    """ORDER_FILLED send_attempt + matching live_fill => execution quality row has oid, fill_avg_px, fill_size."""
+    intent_id = "test-intent-eq-001"
+    send_attempts = [{
+        "created_at": "2026-05-07T16:20:07+00:00",
+        "intent_id": intent_id,
+        "leader_fill_id": "lf-eq-001",
+        "leader_wallet": "0xaaa0000000000000000000000000000000000003",
+        "coin": "ZEC",
+        "side": "SELL",
+        "order_type": "REAL_IOC",
+        "limit_price": "557.72",
+        "copy_size": "0.02",
+        "status": "ORDER_FILLED",
+        "exchange_response": json.dumps({
+            "status": "ok",
+            "response": {"type": "order", "data": {"statuses": [
+                {"filled": {"totalSz": "0.02", "avgPx": "559.92", "oid": 415169026806}}
+            ]}}
+        }),
+        "exchange_order_id": "415169026806",
+        "error": "",
+    }]
+    live_fills = [{
+        "intent_id": intent_id,
+        "leader_fill_id": "lf-eq-001",
+        "leader_wallet": "0xaaa0000000000000000000000000000000000003",
+        "coin": "ZEC",
+        "side": "SELL",
+        "fill_price": "559.92",
+        "fill_size": "0.02",
+        "created_at": "2026-05-07T16:20:21+00:00",
+    }]
+    # _load_recent_send_attempts is not called here; pass pre-loaded data
+    rows = appmod._build_execution_quality_rows(send_attempts, [], live_fills=live_fills)
+    check("exec quality: one row produced", len(rows) == 1)
+    if rows:
+        r = rows[0]
+        check("exec quality: oid populated",
+              r.get("oid") is not None and str(r.get("oid")) != "", str(r.get("oid")))
+        check("exec quality: fill_avg_px populated",
+              r.get("fill_avg_px") is not None and float(r.get("fill_avg_px") or 0) > 0,
+              str(r.get("fill_avg_px")))
+        check("exec quality: fill_size populated",
+              r.get("fill_size") is not None and float(r.get("fill_size") or 0) > 0,
+              str(r.get("fill_size")))
+
+
+def test_live_plumbing_owned_rows_before_orphan() -> None:
+    """manual_live_positions owned rows have row_type OWNED_COPY; orphan exchange rows have ACCOUNT_LEVEL_ONLY."""
+    wallet = "0xaaa0000000000000000000000000000000000004"
+    manual_positions = {
+        "schema": "manual_live_positions.v1.wallet_sleeves",
+        "by_wallet": {
+            wallet: {
+                "ZEC": {"signed_size": -0.02, "avg_entry_px": 559.92, "direction": "SHORT",
+                        "coin": "ZEC", "leader_wallet": wallet,
+                        "last_copy_fill_id": "cf-zec-001", "last_updated_ms": 1778170821071},
+            }
+        },
+    }
+    # Exchange snapshot has both ZEC (ours) and VVV (orphan)
+    exchange_snapshot = {
+        "available": True,
+        "positions_by_coin": {
+            "ZEC": {"signed_size": -0.02, "mark_px": 560.0, "entry_px": 559.92,
+                    "unrealized_pnl": -0.01, "position_value": 11.2},
+            "VVV": {"signed_size": 50.0, "mark_px": 1.0, "entry_px": 0.9,
+                    "unrealized_pnl": 5.0, "position_value": 50.0},
+        },
+    }
+    rows = appmod._build_real_copy_positions(manual_positions, exchange_snapshot)
+    owned = [r for r in rows if r.get("row_type") == "OWNED_COPY"]
+    orphan = [r for r in rows if r.get("row_type") == "ACCOUNT_LEVEL_ONLY"]
+    check("owned rows: ZEC is OWNED_COPY", len(owned) >= 1 and any(r.get("coin") == "ZEC" for r in owned),
+          str([r.get("coin") for r in owned]))
+    check("orphan rows: VVV is ACCOUNT_LEVEL_ONLY",
+          len(orphan) >= 1 and any(r.get("coin") == "VVV" for r in orphan),
+          str([r.get("coin") for r in orphan]))
+    check("owned rows: ORPHAN_EXCHANGE label on VVV not MISSING_LEDGER",
+          all(r.get("ledger_vs_exchange") != "MISSING_LEDGER" for r in orphan),
+          str([r.get("ledger_vs_exchange") for r in orphan]))
+    check("owned rows: OWNED_COPY has avg_entry_px",
+          all(r.get("avg_entry_px") is not None for r in owned if r.get("coin") == "ZEC"),
+          str([r.get("avg_entry_px") for r in owned]))
+    # Owned rows must appear before orphan rows in output
+    if owned and orphan:
+        first_owned_idx = next(i for i, r in enumerate(rows) if r.get("row_type") == "OWNED_COPY")
+        first_orphan_idx = next(i for i, r in enumerate(rows) if r.get("row_type") == "ACCOUNT_LEVEL_ONLY")
+        check("owned rows appear before orphan rows in output",
+              first_owned_idx < first_orphan_idx,
+              f"owned_idx={first_owned_idx} orphan_idx={first_orphan_idx}")
+
+
+def test_live_plumbing_no_core_file_touched() -> None:
+    """Dashboard plumbing must not import HL_Live_Copy_Service_Core."""
+    core_name = "HL_Live_Copy_Service_Core"
+    imported = any(core_name in str(k) for k in sys.modules)
+    check("dashboard plumbing: HL_Live_Copy_Service_Core not imported",
+          not imported, str([k for k in sys.modules if core_name in str(k)]))
+
+
 def run_test(fn) -> None:
     """Run a test function, counting any uncaught exception as a FAIL."""
     global FAIL
@@ -2104,6 +2335,13 @@ if __name__ == "__main__":
     run_test(test_global_norm_base_updates_user_and_header_base_values)
     run_test(test_ajax_success_reload_present)
     run_test(test_norm_base_persistence_propagates_to_user_and_header)
+    run_test(test_archive_ledger_row_force_fresh_snapshot)
+    # Live dashboard plumbing tests
+    run_test(test_live_plumbing_shared_ws_health)
+    run_test(test_live_plumbing_manual_ledger_wallet_row)
+    run_test(test_live_plumbing_execution_quality_fill_join)
+    run_test(test_live_plumbing_owned_rows_before_orphan)
+    run_test(test_live_plumbing_no_core_file_touched)
     print(f"\nRESULTS: {PASS} PASS / {FAIL} FAIL")
     if FAIL:
         raise SystemExit("RESULT::FAILED")
