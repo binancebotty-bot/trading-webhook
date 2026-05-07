@@ -64,6 +64,9 @@ PURGED_WALLETS_FILE = BASE_DIR / "purged_wallets.txt"
 LIVE_COPY_AUDIT_DIR = BASE_DIR / "hl_live_copy_audit"
 LIVE_COPY_CONFIG_FILE = LIVE_COPY_AUDIT_DIR / "live_config.json"
 LIVE_COPY_WS_HEALTH_FILE = LIVE_COPY_AUDIT_DIR / "live_ws_health.json"
+LIVE_COPY_SERVICE_STATE_FILE = LIVE_COPY_AUDIT_DIR / "live_service_state.json"
+LIVE_COPY_CORE_STATE_FILE = LIVE_COPY_AUDIT_DIR / "clean_core_runtime_state.json"
+LIVE_COPY_RECONCILIATION_CSV = LIVE_COPY_AUDIT_DIR / "append_only" / "reconciliation.csv"
 LIVE_COPY_ORDER_INTENTS_CSV = LIVE_COPY_AUDIT_DIR / "append_only" / "order_intents.csv"
 MANUAL_POSITIONS_FILE = LIVE_COPY_AUDIT_DIR / "manual_live_positions.json"
 SEND_ATTEMPTS_CSV = LIVE_COPY_AUDIT_DIR / "append_only" / "send_attempts.csv"
@@ -854,9 +857,29 @@ def _enforce_live_copy_cap(config: Dict[str, Any]) -> None:
 
 def _load_live_ws_health() -> Dict[str, Any]:
     data = load_json(LIVE_COPY_WS_HEALTH_FILE, None)
-    if isinstance(data, dict):
-        return data
-    return {"enabled": False, "overall": "OFFLINE", "wallets": {}}
+    if not isinstance(data, dict):
+        return {"enabled": False, "overall": "OFFLINE", "wallets": {}}
+    if "ws_summary" in data and "overall" not in data:
+        ws_summary = data.get("ws_summary") or {}
+        ws_status = str(ws_summary.get("ws_status", "OFFLINE"))
+        data = {**data, "overall": ws_status, "enabled": ws_status not in {"WS_DISABLED", "OFFLINE", ""}}
+    return data
+
+
+def _load_clean_core_status() -> Dict[str, Any]:
+    service_state = load_json(LIVE_COPY_SERVICE_STATE_FILE, {})
+    core_state = load_json(LIVE_COPY_CORE_STATE_FILE, {})
+    if not isinstance(service_state, dict):
+        service_state = {}
+    if not isinstance(core_state, dict):
+        core_state = {}
+    return {
+        "service_state": service_state,
+        "core_state": core_state,
+        "active_state": core_state if core_state else service_state,
+        "available": bool(service_state or core_state),
+        "checkpoint_available": bool(core_state),
+    }
 
 
 def _live_order_intents_path() -> Path:
@@ -917,6 +940,7 @@ def _live_audit_summary() -> Dict[str, Any]:
     manual_live_summary = _manual_live_summary(manual_positions, recent_send_attempts, exchange_snapshot)
     _append_exchange_history(exchange_snapshot, manual_live_summary)
     ws_health = _load_live_ws_health()
+    clean_core_status = _load_clean_core_status()
 
     live_config = _load_live_copy_config()
     _auto_send_enabled = os.getenv("HL_LIVE_AUTO_SEND_ENABLED", "0") == "1"
@@ -1003,6 +1027,8 @@ def _live_audit_summary() -> Dict[str, Any]:
         "auto_live_eligible_wallets": _auto_live_eligible,
         "tracked_wallet_count": len(_cfg_wallets) if isinstance(_cfg_wallets, dict) else 0,
         "auto_live_wallet_count": len(_auto_live_eligible),
+        "clean_core_status": clean_core_status,
+        "core_service_state": clean_core_status.get("service_state", {}),
     }
 
 
@@ -1946,8 +1972,12 @@ def _archive_manual_reconciliation_ledger_row(payload: Dict[str, Any]) -> Dict[s
     if abs(old_signed) <= 1e-12:
         return {"ok": False, "error": "MANUAL_LEDGER_ROW_ALREADY_ZERO"}
 
-    cached_snapshot = load_json(EXCHANGE_ACCOUNT_SNAPSHOT_FILE, {})
-    exchange_positions = cached_snapshot.get("positions_by_coin", {}) if isinstance(cached_snapshot, dict) and isinstance(cached_snapshot.get("positions_by_coin"), dict) else {}
+    # Force a live fetch so archive decisions are never based on stale cached state.
+    cached_snapshot = _fetch_exchange_account_snapshot(max_age_sec=0)
+    if not isinstance(cached_snapshot, dict) or not cached_snapshot.get("ok") or not cached_snapshot.get("available"):
+        return {"ok": False, "error": "EXCHANGE_SNAPSHOT_UNAVAILABLE",
+                "status": cached_snapshot.get("status", "UNAVAILABLE") if isinstance(cached_snapshot, dict) else "UNAVAILABLE"}
+    exchange_positions = cached_snapshot.get("positions_by_coin", {}) if isinstance(cached_snapshot.get("positions_by_coin"), dict) else {}
     ex = exchange_positions.get(coin_req, {})
     exchange_signed = fnum(ex.get("signed_size")) if isinstance(ex, dict) else 0.0
     if abs(exchange_signed) > 1e-12:

@@ -364,6 +364,8 @@ class ConfigManager:
         mode = str(cfg.get("mode", cfg.get("gate", "OFF"))).upper().strip()
         if mode == "CLOSE_ONLY":
             mode = "CLO"
+        if mode == "LIVE":
+            mode = "ON"
         return mode if mode in {"ON", "CLO", "OFF"} else "OFF"
 
     def wallet_enabled(self, wallet: str) -> bool:
@@ -1428,6 +1430,7 @@ def run_self_test() -> None:
         os.environ["HL_LIVE_MOCK_SEND"] = "1"
         cfg_payload = load_json(LIVE_CONFIG_FILE, {})
         cfg_payload["auto_send_enabled"] = True
+        cfg_payload["wallets"][wallet_a]["mode"] = "LIVE"
         atomic_write_json(LIVE_CONFIG_FILE, cfg_payload)
         _write_csv(RAW_LEADER_FILLS_CSV, [{
             "fill_id": "leader-a-eth-buy-1", "wallet": wallet_a, "coin": "ETH", "side": "BUY", "price": "1000", "size": "1", "timestamp_ms": "2000", "source": "ws", "recording_method": "WS_CAPTURED",
@@ -1436,6 +1439,7 @@ def run_self_test() -> None:
         core = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
         summary = core.run_cycle(use_source_csv=True, poll_live=False, reconcile_exchange=False)
         _check("mock auto-send writes one send_attempt", summary.leader_sends_attempted == 1 and len(read_csv_rows(SEND_ATTEMPTS_CSV)) == 1)
+        _check("UI LIVE mode maps to core active mode", summary.leader_sends_attempted >= 1, "LIVE wallet generated a send attempt")
 
         # Copy fill fallback matching: exchange fills do not carry our internal intent_id.
         core.matcher.match_and_apply({"coin": "ETH", "side": "BUY", "price": "1000", "size": "0.01", "time": 2050, "hash": "copy-eth-1"}, core.intents_by_id)
