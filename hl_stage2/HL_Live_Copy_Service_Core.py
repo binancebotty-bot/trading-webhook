@@ -759,20 +759,124 @@ class SenderGateway:
     def __init__(self, cfg: ConfigManager, audit: AuditLogWriter):
         self.cfg = cfg
         self.audit = audit
+        self._sz_dec_cache: Dict[str, int] = {}
 
     def send_if_allowed(self, intent: Intent) -> Tuple[bool, str]:
         if not intent.send_allowed:
             return False, "INTENT_NOT_SEND_ALLOWED"
         if not self.cfg.auto_send_enabled:
             return False, "AUTO_SEND_DISABLED"
-        # Optional mocked send path for tests. This is the only path in self-test.
         if bval(os.getenv("HL_LIVE_MOCK_SEND"), False):
             self._append_mock_attempt(intent, "MOCK_ORDER_SENT")
             return True, "MOCK_ORDER_SENT"
-        # Real sending intentionally requires explicit implementation/SDK availability.
-        # To preserve send_attempts semantics, we do NOT append a send_attempt row unless
-        # an exchange call is actually made. This branch returns a precheck block.
-        return False, "REAL_SENDER_NOT_CONFIGURED"
+        ok, send_status, result = self._send_real(intent)
+        if result.get("exchange_called"):
+            self._append_real_attempt(intent, send_status, result)
+        return ok, send_status
+
+    def _send_real(self, intent: Intent) -> Tuple[bool, str, Dict[str, Any]]:
+        private_key = os.getenv("HL_LIVE_HL_PRIVATE_KEY", "").strip()
+        if not private_key:
+            return False, "REAL_SENDER_NOT_CONFIGURED", {"status": "CREDENTIALS_MISSING", "exchange_called": False}
+        try:
+            from eth_account import Account  # type: ignore
+            from hyperliquid.exchange import Exchange  # type: ignore
+        except Exception as exc:
+            return False, "REAL_SENDER_NOT_CONFIGURED", {"status": "SDK_UNAVAILABLE", "error": repr(exc), "exchange_called": False}
+        bps = self.cfg.marketable_bps()
+        mult = (1.0 + bps / 10000.0) if intent.copy_side == "BUY" else (1.0 - bps / 10000.0)
+        limit_px = round(intent.fill.price * mult, 6)
+        wire_size = round(intent.copy_size, self._fetch_sz_decimals(intent.fill.coin))
+        if wire_size <= 0:
+            return False, "REAL_SENDER_NOT_CONFIGURED", {"status": "WIRE_SIZE_ZERO", "exchange_called": False}
+        try:
+            account = Account.from_key(private_key)
+            base_url = HL_EXCHANGE_URL
+            if base_url.endswith("/exchange"):
+                base_url = base_url[:-len("/exchange")]
+            account_address = os.getenv("HL_LIVE_HL_ACCOUNT_ADDRESS", "").strip() or None
+            exchange = Exchange(account, base_url=base_url, account_address=account_address)
+            response = exchange.order(
+                intent.fill.coin,
+                intent.copy_side == "BUY",
+                wire_size,
+                limit_px,
+                {"limit": {"tif": "Ioc"}},
+                reduce_only=False,
+            )
+            ok, status, oid = self._parse_hl_response(response)
+            return ok, status, {
+                "exchange_response": response, "oid": oid,
+                "limit_px": limit_px, "wire_size": wire_size,
+                "exchange_called": True, "error": "",
+            }
+        except Exception as exc:
+            log_error("send_real", exc)
+            return False, "EXCHANGE_ERROR", {
+                "exchange_response": {}, "oid": "",
+                "limit_px": limit_px, "wire_size": wire_size,
+                "exchange_called": True, "error": repr(exc),
+            }
+
+    def _fetch_sz_decimals(self, coin: str) -> int:
+        coin = str(coin).upper()
+        if coin in self._sz_dec_cache:
+            return self._sz_dec_cache[coin]
+        if requests is None:
+            return 4
+        try:
+            r = requests.post(HL_INFO_URL, json={"type": "meta"}, timeout=HTTP_TIMEOUT_SEC)
+            for asset in r.json().get("universe", []):
+                self._sz_dec_cache[str(asset.get("name", "")).upper()] = int(asset.get("szDecimals", 4))
+        except Exception:
+            pass
+        return self._sz_dec_cache.get(coin, 4)
+
+    @staticmethod
+    def _parse_hl_response(response: Any) -> Tuple[bool, str, str]:
+        try:
+            statuses = response.get("response", {}).get("data", {}).get("statuses", [])
+            if statuses:
+                s = statuses[0]
+                if isinstance(s, dict):
+                    if "filled" in s:
+                        return True, "ORDER_FILLED", str(s["filled"].get("oid", ""))
+                    if "resting" in s:
+                        return True, "ORDER_RESTING", str(s["resting"].get("oid", ""))
+                    if "error" in s:
+                        return False, "ORDER_REJECTED", ""
+        except Exception:
+            pass
+        return False, "ORDER_UNKNOWN", ""
+
+    def _append_real_attempt(self, intent: Intent, status: str, result: Dict[str, Any]) -> None:
+        delta = ManualLedger.signed_delta(intent.copy_side, intent.copy_size)
+        self.audit.append_send_attempt({
+            "created_at": utc_now_iso(),
+            "created_at_ms": utc_now_ms(),
+            "attempt_id": stable_hash(["attempt", intent.intent_id, utc_now_ms()]),
+            "intent_id": intent.intent_id,
+            "leader_fill_id": intent.fill.leader_fill_id,
+            "leader_wallet": intent.fill.leader_wallet,
+            "coin": intent.fill.coin,
+            "side": intent.copy_side,
+            "order_type": "REAL_IOC",
+            "limit_price": result.get("limit_px", intent.fill.price),
+            "copy_size": result.get("wire_size", intent.copy_size),
+            "copy_notional": intent.copy_notional,
+            "reduce_only_sent": "False",
+            "sleeve_id": intent.sleeve_id,
+            "position_id": intent.position_id,
+            "wallet_position_before": intent.wallet_position_before,
+            "wallet_position_after_expected": intent.wallet_position_before + delta,
+            "coin_net_before": intent.coin_net_before,
+            "coin_net_after_expected": intent.coin_net_before + delta,
+            "status": status,
+            "exchange_response": json.dumps(result.get("exchange_response", {})),
+            "exchange_order_id": result.get("oid", ""),
+            "error": result.get("error", ""),
+            "notes": "real exchange IOC attempt",
+        })
 
     def _append_mock_attempt(self, intent: Intent, status: str) -> None:
         delta = ManualLedger.signed_delta(intent.copy_side, intent.copy_size)
@@ -1704,6 +1808,88 @@ def run_self_test() -> None:
         _i_ro_exit = _sb3.build(_f_ro_exit)
         _check("reduce_only_sent_planned False on exit regardless of coin_net",
                _i_ro_exit.reduce_only_sent_planned is False)
+
+        # Real sender wiring tests (no network — transport mocked on instance).
+        os.environ.pop("HL_LIVE_MOCK_SEND", None)
+        os.environ["HL_LIVE_AUTO_SEND_ENABLED"] = "1"
+        atomic_write_json(LIVE_CONFIG_FILE, {
+            "auto_send_enabled": True,
+            "wallets": {
+                wallet_a: {"enabled": True, "mode": "ON", "copy_mode": "fixed", "fixed_notional": 10},
+                wallet_b: {"enabled": True, "mode": "ON", "copy_mode": "fixed", "fixed_notional": 10},
+            },
+            "global_controls": {"min_notional": 1},
+        })
+        _rs_now = utc_now_ms()
+
+        # Test: credentials missing → zero send_attempts.
+        os.environ.pop("HL_LIVE_HL_PRIVATE_KEY", None)
+        atomic_write_json(CORE_RUNTIME_STATE_FILE, {"live_start_ms": 1})
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        _write_csv(RAW_LEADER_FILLS_CSV, [{
+            "fill_id": "rs-cred-1", "wallet": wallet_a, "coin": "SOL", "side": "BUY",
+            "price": "150", "size": "1", "timestamp_ms": str(_rs_now),
+            "recording_method": "WS_CAPTURED",
+        }])
+        _rs_att0 = len(read_csv_rows(SEND_ATTEMPTS_CSV))
+        _core_rs1 = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        _sum_rs1 = _core_rs1.run_cycle(use_source_csv=True, poll_live=False)
+        _check("real sender: no credentials writes zero send_attempts",
+               _sum_rs1.leader_sends_attempted == 0 and
+               len(read_csv_rows(SEND_ATTEMPTS_CSV)) == _rs_att0,
+               str(_sum_rs1))
+
+        # Test: mocked exchange_called=True → one REAL_IOC send_attempt with oid.
+        atomic_write_json(CORE_RUNTIME_STATE_FILE, {"live_start_ms": 1})
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        _write_csv(RAW_LEADER_FILLS_CSV, [{
+            "fill_id": "rs-real-1", "wallet": wallet_a, "coin": "SOL", "side": "BUY",
+            "price": "150", "size": "1", "timestamp_ms": str(_rs_now),
+            "recording_method": "WS_CAPTURED",
+        }])
+        _ledger_snap = json.dumps(load_json(MANUAL_LIVE_POSITIONS_FILE, {}), sort_keys=True)
+        _rs_att1 = len(read_csv_rows(SEND_ATTEMPTS_CSV))
+        _core_rs2 = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        def _mock_real_send_ok(intent: Any) -> Tuple[bool, str, Dict[str, Any]]:
+            return True, "ORDER_FILLED", {
+                "exchange_response": {"response": {"data": {"statuses": [{"filled": {"oid": "test-oid-1"}}]}}},
+                "oid": "test-oid-1", "limit_px": intent.fill.price * 1.0025,
+                "wire_size": intent.copy_size, "exchange_called": True, "error": "",
+            }
+        _core_rs2.sender._send_real = _mock_real_send_ok
+        _sum_rs2 = _core_rs2.run_cycle(use_source_csv=True, poll_live=False)
+        _check("real sender: mocked exchange writes one REAL_IOC send_attempt",
+               _sum_rs2.leader_sends_attempted == 1 and
+               len(read_csv_rows(SEND_ATTEMPTS_CSV)) == _rs_att1 + 1,
+               str(_sum_rs2))
+        _rs_row = read_csv_rows(SEND_ATTEMPTS_CSV)[-1]
+        _check("real sender: send_attempt has exchange_order_id test-oid-1",
+               _rs_row.get("exchange_order_id") == "test-oid-1")
+        _check("real sender: send_attempt order_type is REAL_IOC",
+               _rs_row.get("order_type") == "REAL_IOC")
+        _check("real sender: reduce_only_sent False in real attempt row",
+               _rs_row.get("reduce_only_sent") == "False")
+        _check("real sender: manual_live_positions unchanged by send",
+               json.dumps(load_json(MANUAL_LIVE_POSITIONS_FILE, {}), sort_keys=True) == _ledger_snap)
+
+        # Test: exchange_called=False (SDK unavailable mock) → zero new send_attempts.
+        atomic_write_json(CORE_RUNTIME_STATE_FILE, {"live_start_ms": 1})
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        _write_csv(RAW_LEADER_FILLS_CSV, [{
+            "fill_id": "rs-sdk-1", "wallet": wallet_a, "coin": "SOL", "side": "BUY",
+            "price": "150", "size": "1", "timestamp_ms": str(_rs_now),
+            "recording_method": "WS_CAPTURED",
+        }])
+        _rs_att2 = len(read_csv_rows(SEND_ATTEMPTS_CSV))
+        _core_rs3 = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        def _mock_real_send_sdk_unavail(intent: Any) -> Tuple[bool, str, Dict[str, Any]]:
+            return False, "REAL_SENDER_NOT_CONFIGURED", {"status": "SDK_UNAVAILABLE", "exchange_called": False}
+        _core_rs3.sender._send_real = _mock_real_send_sdk_unavail
+        _sum_rs3 = _core_rs3.run_cycle(use_source_csv=True, poll_live=False)
+        _check("real sender: SDK unavailable exchange_called=False writes zero send_attempts",
+               _sum_rs3.leader_sends_attempted == 0 and
+               len(read_csv_rows(SEND_ATTEMPTS_CSV)) == _rs_att2,
+               str(_sum_rs3))
 
         # Heartbeat: pong message must not enqueue a fill.
         _ws_pong = WSManager(["0x" + "f" * 40], LeaderFillIngestor())
