@@ -51,6 +51,7 @@ APPEND_ONLY_DIR = AUDIT_DIR / "append_only"
 
 LIVE_CONFIG_FILE = AUDIT_DIR / "live_config.json"
 SERVICE_STATE_FILE = AUDIT_DIR / "live_service_state.json"
+CORE_RUNTIME_STATE_FILE = AUDIT_DIR / "clean_core_runtime_state.json"
 LIVE_WS_HEALTH_FILE = AUDIT_DIR / "live_ws_health.json"
 MANUAL_LIVE_POSITIONS_FILE = AUDIT_DIR / "manual_live_positions.json"
 EXCHANGE_ACCOUNT_SNAPSHOT_FILE = AUDIT_DIR / "exchange_account_snapshot.json"
@@ -270,6 +271,8 @@ class CycleSummary:
     leader_intents_written: int = 0
     leader_sends_attempted: int = 0
     copy_fills_seen: int = 0
+    copy_fills_deduped: int = 0
+    copy_fills_baselined: int = 0
     copy_fills_matched: int = 0
     copy_fills_unmatched: int = 0
     copy_account_status: str = "COPY_ACCOUNT_POLL_DISABLED"
@@ -408,6 +411,10 @@ class DedupeStore:
         state = state if isinstance(state, dict) else {}
         self.processed: set[str] = set(state.get("processed_leader_fill_ids") or [])
         self.processed_copy: set[str] = set(state.get("processed_copy_fill_ids") or [])
+        self.copy_account_baseline_set: bool = bval(state.get("copy_account_baseline_set"), False)
+        self.copy_account_baseline_at_ms: int = int(fnum(state.get("copy_account_baseline_at_ms"), 0))
+        self.copy_account_baseline_fill_count: int = int(fnum(state.get("copy_account_baseline_fill_count"), 0))
+        self.copy_account_baseline_max_ts_ms: int = int(fnum(state.get("copy_account_baseline_max_ts_ms"), 0))
 
     def accept_leader(self, fill_id: str) -> bool:
         if fill_id in self.processed:
@@ -421,10 +428,25 @@ class DedupeStore:
         self.processed_copy.add(fill_id)
         return True
 
+    def baseline_copy_account(self, copy_fills: List[Dict[str, Any]]) -> int:
+        max_ts = self.copy_account_baseline_max_ts_ms
+        for raw in copy_fills:
+            self.processed_copy.add(CopyAccountIngestor.copy_fill_id(raw))
+            max_ts = max(max_ts, int(fnum(raw.get("timestamp_ms", raw.get("time")), 0)))
+        self.copy_account_baseline_set = True
+        self.copy_account_baseline_at_ms = utc_now_ms()
+        self.copy_account_baseline_fill_count = len(copy_fills)
+        self.copy_account_baseline_max_ts_ms = max_ts
+        return len(copy_fills)
+
     def export(self) -> Dict[str, Any]:
         return {
             "processed_leader_fill_ids": sorted(self.processed)[-250000:],
             "processed_copy_fill_ids": sorted(self.processed_copy)[-250000:],
+            "copy_account_baseline_set": self.copy_account_baseline_set,
+            "copy_account_baseline_at_ms": self.copy_account_baseline_at_ms,
+            "copy_account_baseline_fill_count": self.copy_account_baseline_fill_count,
+            "copy_account_baseline_max_ts_ms": self.copy_account_baseline_max_ts_ms,
         }
 
 
@@ -1192,6 +1214,12 @@ class ServiceStateWriter:
                 "would_send_orders_exists": FORBIDDEN_WOULD_SEND_ORDERS_CSV.exists(),
             },
         }
+        core_state = {
+            "created_at": payload.get("created_at"),
+            "created_at_ms": payload.get("created_at_ms"),
+            **dedupe.export(),
+        }
+        atomic_write_json(CORE_RUNTIME_STATE_FILE, core_state)
         atomic_write_json(SERVICE_STATE_FILE, payload)
 
 
@@ -1208,7 +1236,12 @@ class LiveCopyCore:
         self.ledger = ManualLedger()
         self.audit = AuditLogWriter()
         self.ingestor = LeaderFillIngestor()
-        self.dedupe = DedupeStore(load_json(SERVICE_STATE_FILE, {}))
+        service_state = load_json(SERVICE_STATE_FILE, {})
+        core_state = load_json(CORE_RUNTIME_STATE_FILE, {})
+        merged_state = service_state if isinstance(service_state, dict) else {}
+        if isinstance(core_state, dict):
+            merged_state = {**merged_state, **core_state}
+        self.dedupe = DedupeStore(merged_state)
         self.wallets = list(self.cfg.wallets().keys())[:MAX_WALLETS]
         self.ws = WSManager(self.wallets, self.ingestor)
         self.intent_builder = IntentBuilder(self.cfg, self.ledger)
@@ -1259,19 +1292,33 @@ class LiveCopyCore:
                     # Visible decision only; send_attempts.csv remains pure.
                     self.audit.append_reconciliation("SEND_PRECHECK", "REAL_SENDER_NOT_CONFIGURED", leader_wallet=fill.leader_wallet, leader_fill_id=fill.leader_fill_id, intent_id=intent.intent_id, coin=fill.coin, notes="auto-send enabled but real sender unavailable; no exchange attempt made")
             if poll_copy:
-                start_ms = max(0, int(fnum(load_json(SERVICE_STATE_FILE, {}).get("last_copy_poll_ms"), 0)) - POLL_OVERLAP_MS)
+                copy_state = load_json(CORE_RUNTIME_STATE_FILE, {})
+                start_ms = max(0, int(fnum(copy_state.get("last_copy_poll_ms", load_json(SERVICE_STATE_FILE, {}).get("last_copy_poll_ms", 0)), 0)) - POLL_OVERLAP_MS)
                 copy_fills, copy_status = self.copy_ingestor.poll_copy_account_fills(USER_WALLET, start_ms, utc_now_ms())
                 summary.copy_account_status = copy_status
-                for raw_copy in copy_fills:
-                    copy_id = CopyAccountIngestor.copy_fill_id(raw_copy)
-                    if not self.dedupe.accept_copy(copy_id):
-                        continue
-                    summary.copy_fills_seen += 1
-                    if self.matcher.match_and_apply(raw_copy, self.intents_by_id):
-                        summary.copy_fills_matched += 1
-                        summary.ledger_updates += 1
-                    else:
-                        summary.copy_fills_unmatched += 1
+                summary.copy_fills_seen = len(copy_fills)
+                if copy_status == "COPY_ACCOUNT_POLLED" and copy_fills and not self.dedupe.copy_account_baseline_set:
+                    summary.copy_fills_baselined = self.dedupe.baseline_copy_account(copy_fills)
+                    summary.copy_account_status = "COPY_ACCOUNT_BASELINED"
+                    self.audit.append_reconciliation("COPY_ACCOUNT_BASELINE", "COPY_ACCOUNT_BASELINED", notes=f"baseline historical copy fills count={summary.copy_fills_baselined}; no ledger mutation")
+                else:
+                    for raw_copy in copy_fills:
+                        copy_id = CopyAccountIngestor.copy_fill_id(raw_copy)
+                        if not self.dedupe.accept_copy(copy_id):
+                            summary.copy_fills_deduped += 1
+                            continue
+                        if self.matcher.match_and_apply(raw_copy, self.intents_by_id):
+                            summary.copy_fills_matched += 1
+                            summary.ledger_updates += 1
+                        else:
+                            summary.copy_fills_unmatched += 1
+                if copy_status == "COPY_ACCOUNT_POLLED":
+                    state_update = load_json(CORE_RUNTIME_STATE_FILE, {})
+                    if not isinstance(state_update, dict):
+                        state_update = {}
+                    state_update["last_copy_poll_ms"] = utc_now_ms()
+                    state_update.update(self.dedupe.export())
+                    atomic_write_json(CORE_RUNTIME_STATE_FILE, state_update)
                 if copy_status not in {"COPY_ACCOUNT_POLLED", "COPY_ACCOUNT_NOT_CONFIGURED"}:
                     summary.network_errors += 1
             else:
@@ -1322,7 +1369,7 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
 def run_self_test() -> None:
     import tempfile
 
-    global BASE_DIR, ENGINE_OUTPUT_DIR, AUDIT_DIR, APPEND_ONLY_DIR, LIVE_CONFIG_FILE, SERVICE_STATE_FILE
+    global BASE_DIR, ENGINE_OUTPUT_DIR, AUDIT_DIR, APPEND_ONLY_DIR, LIVE_CONFIG_FILE, SERVICE_STATE_FILE, CORE_RUNTIME_STATE_FILE
     global LIVE_WS_HEALTH_FILE, MANUAL_LIVE_POSITIONS_FILE, EXCHANGE_ACCOUNT_SNAPSHOT_FILE, ORDER_INTENTS_CSV
     global SEND_ATTEMPTS_CSV, LIVE_FILLS_CSV, RECONCILIATION_CSV, ERRORS_CSV, RAW_LEADER_FILLS_CSV
     global MANUAL_WALLETS_FILE, WALLET_GATE_FILE, UI_STATE_FILE, FORBIDDEN_LIVE_POSITIONS_FILE, FORBIDDEN_WOULD_SEND_ORDERS_CSV
@@ -1336,6 +1383,7 @@ def run_self_test() -> None:
         APPEND_ONLY_DIR = AUDIT_DIR / "append_only"
         LIVE_CONFIG_FILE = AUDIT_DIR / "live_config.json"
         SERVICE_STATE_FILE = AUDIT_DIR / "live_service_state.json"
+        CORE_RUNTIME_STATE_FILE = AUDIT_DIR / "clean_core_runtime_state.json"
         LIVE_WS_HEALTH_FILE = AUDIT_DIR / "live_ws_health.json"
         MANUAL_LIVE_POSITIONS_FILE = AUDIT_DIR / "manual_live_positions.json"
         EXCHANGE_ACCOUNT_SNAPSHOT_FILE = AUDIT_DIR / "exchange_account_snapshot.json"
@@ -1392,6 +1440,35 @@ def run_self_test() -> None:
         # Copy fill fallback matching: exchange fills do not carry our internal intent_id.
         core.matcher.match_and_apply({"coin": "ETH", "side": "BUY", "price": "1000", "size": "0.01", "time": 2050, "hash": "copy-eth-1"}, core.intents_by_id)
         _check("copy fill fallback matches by coin/side/time", len(read_csv_rows(LIVE_FILLS_CSV)) == 1)
+
+        # Clean-start copy account baseline: historical copy fills become cursor only.
+        class FakeCopyIngestor:
+            def poll_copy_account_fills(self, user_wallet: str, start_ms: int, end_ms: Optional[int] = None):
+                return ([
+                    {"copy_fill_id": "hist-copy-1", "coin": "ETH", "side": "BUY", "price": "1000", "size": "0.01", "timestamp_ms": 2100},
+                    {"copy_fill_id": "hist-copy-2", "coin": "TON", "side": "SELL", "price": "2", "size": "1", "timestamp_ms": 2200},
+                ], "COPY_ACCOUNT_POLLED")
+
+        os.environ["HL_USER_WALLET"] = wallet_a
+        before_ledger = json.dumps(load_json(MANUAL_LIVE_POSITIONS_FILE, {}), sort_keys=True)
+        before_recon = len(read_csv_rows(RECONCILIATION_CSV))
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        try:
+            CORE_RUNTIME_STATE_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        core = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        core.copy_ingestor = FakeCopyIngestor()
+        summary = core.run_cycle(use_source_csv=False, poll_live=False, poll_copy=True, reconcile_exchange=False)
+        _check("copy account first poll baselines historical fills", summary.copy_account_status == "COPY_ACCOUNT_BASELINED" and summary.copy_fills_baselined == 2 and summary.copy_fills_unmatched == 0, str(summary))
+        _check("copy account baseline writes one recon note", len(read_csv_rows(RECONCILIATION_CSV)) == before_recon + 1)
+        _check("copy account baseline does not mutate ledger", json.dumps(load_json(MANUAL_LIVE_POSITIONS_FILE, {}), sort_keys=True) == before_ledger)
+        # Simulate the public service_state heartbeat being clobbered by legacy/other UI code; core checkpoint must still preserve dedupe.
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        core = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        core.copy_ingestor = FakeCopyIngestor()
+        summary = core.run_cycle(use_source_csv=False, poll_live=False, poll_copy=True, reconcile_exchange=False)
+        _check("copy account checkpoint survives service_state clobber", summary.copy_fills_deduped == 2 and summary.copy_fills_baselined == 0 and summary.copy_fills_unmatched == 0, str(summary))
 
         # Per-wallet sleeve isolation.
         ledger = ManualLedger()
