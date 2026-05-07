@@ -759,7 +759,9 @@ class SenderGateway:
     def __init__(self, cfg: ConfigManager, audit: AuditLogWriter):
         self.cfg = cfg
         self.audit = audit
-        self._sz_dec_cache: Dict[str, int] = {}
+        self._meta_cache: Dict[str, Dict[str, Any]] = {}
+        self._index_cache: Dict[int, str] = {}
+        self._meta_fetched: bool = False
 
     def send_if_allowed(self, intent: Intent) -> Tuple[bool, str]:
         if not intent.send_allowed:
@@ -775,6 +777,13 @@ class SenderGateway:
         return ok, send_status
 
     def _send_real(self, intent: Intent) -> Tuple[bool, str, Dict[str, Any]]:
+        resolved = self._resolve_coin(intent.fill.coin)
+        if not resolved.get("ok"):
+            return False, "REAL_SENDER_NOT_CONFIGURED", {
+                "status": resolved.get("status", "SYMBOL_UNRESOLVED"),
+                "error": resolved.get("error", ""),
+                "exchange_called": False,
+            }
         private_key = os.getenv("HL_LIVE_HL_PRIVATE_KEY", "").strip()
         if not private_key:
             return False, "REAL_SENDER_NOT_CONFIGURED", {"status": "CREDENTIALS_MISSING", "exchange_called": False}
@@ -783,10 +792,17 @@ class SenderGateway:
             from hyperliquid.exchange import Exchange  # type: ignore
         except Exception as exc:
             return False, "REAL_SENDER_NOT_CONFIGURED", {"status": "SDK_UNAVAILABLE", "error": repr(exc), "exchange_called": False}
+        sdk_coin = resolved["sdk_coin"]
+        sz_dec = resolved["sz_decimals"]
+        price_max_dec = resolved["price_max_decimals"]
+        perp_dexs = resolved.get("perp_dexs")
         bps = self.cfg.marketable_bps()
         mult = (1.0 + bps / 10000.0) if intent.copy_side == "BUY" else (1.0 - bps / 10000.0)
-        limit_px = round(intent.fill.price * mult, 6)
-        wire_size = round(intent.copy_size, self._fetch_sz_decimals(intent.fill.coin))
+        raw_px = intent.fill.price * mult
+        factor_px = 10 ** price_max_dec
+        limit_px = math.floor(raw_px * factor_px) / factor_px
+        factor_sz = 10 ** sz_dec
+        wire_size = math.floor(intent.copy_size * factor_sz + 1e-12) / factor_sz
         if wire_size <= 0:
             return False, "REAL_SENDER_NOT_CONFIGURED", {"status": "WIRE_SIZE_ZERO", "exchange_called": False}
         try:
@@ -795,9 +811,12 @@ class SenderGateway:
             if base_url.endswith("/exchange"):
                 base_url = base_url[:-len("/exchange")]
             account_address = os.getenv("HL_LIVE_HL_ACCOUNT_ADDRESS", "").strip() or None
-            exchange = Exchange(account, base_url=base_url, account_address=account_address)
+            exchange_kwargs: Dict[str, Any] = {"base_url": base_url, "account_address": account_address}
+            if perp_dexs is not None:
+                exchange_kwargs["perp_dexs"] = perp_dexs
+            exchange = Exchange(account, **exchange_kwargs)
             response = exchange.order(
-                intent.fill.coin,
+                sdk_coin,
                 intent.copy_side == "BUY",
                 wire_size,
                 limit_px,
@@ -818,19 +837,100 @@ class SenderGateway:
                 "exchange_called": True, "error": repr(exc),
             }
 
-    def _fetch_sz_decimals(self, coin: str) -> int:
-        coin = str(coin).upper()
-        if coin in self._sz_dec_cache:
-            return self._sz_dec_cache[coin]
+    def _fetch_meta(self) -> None:
+        if self._meta_fetched:
+            return
+        self._meta_fetched = True
         if requests is None:
-            return 4
+            return
         try:
             r = requests.post(HL_INFO_URL, json={"type": "meta"}, timeout=HTTP_TIMEOUT_SEC)
-            for asset in r.json().get("universe", []):
-                self._sz_dec_cache[str(asset.get("name", "")).upper()] = int(asset.get("szDecimals", 4))
+            for idx, asset in enumerate(r.json().get("universe", [])):
+                if not isinstance(asset, dict):
+                    continue
+                name = str(asset.get("name", "")).strip()
+                if not name:
+                    continue
+                self._meta_cache[name.upper()] = {
+                    "canonical_coin": name,
+                    "szDecimals": int(asset.get("szDecimals", 4)),
+                    "symbol_source": "core_meta",
+                    "perp_dex": "",
+                }
+                self._index_cache[idx] = name
         except Exception:
             pass
-        return self._sz_dec_cache.get(coin, 4)
+        if requests is None:
+            return
+        try:
+            r2 = requests.post(HL_INFO_URL, json={"type": "perpDexs"}, timeout=HTTP_TIMEOUT_SEC)
+            raw_dexs = r2.json()
+            dex_items: List[Any] = raw_dexs if isinstance(raw_dexs, list) else (raw_dexs.get("perpDexs", []) if isinstance(raw_dexs, dict) else [])
+            for dex_item in dex_items:
+                dex_name = (str(dex_item.get("name") or dex_item.get("dex") or "").strip().upper()
+                            if isinstance(dex_item, dict) else str(dex_item).strip().upper())
+                if not dex_name:
+                    continue
+                try:
+                    r3 = requests.post(HL_INFO_URL, json={"type": "meta", "dex": dex_name}, timeout=HTTP_TIMEOUT_SEC)
+                    for b_asset in r3.json().get("universe", []):
+                        if not isinstance(b_asset, dict):
+                            continue
+                        b_name = str(b_asset.get("name", "")).strip()
+                        if not b_name:
+                            continue
+                        b_key = f"{dex_name}:{b_name.upper()}"
+                        self._meta_cache[b_key] = {
+                            "canonical_coin": b_key,
+                            "szDecimals": int(b_asset.get("szDecimals", 0)),
+                            "symbol_source": "builder_meta",
+                            "perp_dex": dex_name,
+                        }
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _resolve_coin(self, coin: str) -> Dict[str, Any]:
+        raw = str(coin or "").strip()
+        key = raw.upper()
+        if key.startswith("@"):
+            return {"ok": False, "raw_coin": raw, "status": "SPOT_MARKET_SKIPPED",
+                    "error": f"{key} is a spot market; not a perp", "exchange_called": False}
+        if key.startswith("#"):
+            try:
+                idx = int(key[1:])
+            except ValueError:
+                return {"ok": False, "raw_coin": raw, "status": "SYMBOL_UNRESOLVED",
+                        "error": f"cannot parse index {key}", "exchange_called": False}
+            self._fetch_meta()
+            canonical = self._index_cache.get(idx)
+            if canonical is None:
+                return {"ok": False, "raw_coin": raw, "status": "PERP_INDEX_UNRESOLVED",
+                        "error": f"{key} not in meta.universe", "exchange_called": False}
+            result = self._resolve_coin(canonical)
+            result["raw_coin"] = raw
+            return result
+        self._fetch_meta()
+        item = self._meta_cache.get(key)
+        if item is None:
+            status = "SYMBOL_UNRESOLVED" if self._meta_fetched else "META_UNAVAILABLE"
+            return {"ok": False, "raw_coin": raw, "status": status,
+                    "error": f"{key} not in meta", "exchange_called": False}
+        canonical = item["canonical_coin"]
+        sz_dec = int(item.get("szDecimals", 4))
+        price_max_dec = max(0, 6 - sz_dec)
+        if item.get("symbol_source") == "builder_meta":
+            sdk_coin = canonical.split(":", 1)[1] if ":" in canonical else canonical
+            perp_dexs: Optional[List[str]] = ["", str(item.get("perp_dex", ""))]
+        else:
+            sdk_coin = canonical
+            perp_dexs = None
+        return {
+            "ok": True, "raw_coin": raw, "sdk_coin": sdk_coin,
+            "sz_decimals": sz_dec, "price_max_decimals": price_max_dec,
+            "perp_dexs": perp_dexs, "status": "OK", "error": "",
+        }
 
     @staticmethod
     def _parse_hl_response(response: Any) -> Tuple[bool, str, str]:
@@ -1890,6 +1990,63 @@ def run_self_test() -> None:
                _sum_rs3.leader_sends_attempted == 0 and
                len(read_csv_rows(SEND_ATTEMPTS_CSV)) == _rs_att2,
                str(_sum_rs3))
+
+        # Symbol resolution tests (injected meta, no network).
+        _sym_gw = SenderGateway(ConfigManager(), AuditLogWriter())
+        _sym_gw._meta_cache = {
+            "ETH":      {"canonical_coin": "ETH",      "szDecimals": 4, "symbol_source": "core_meta",    "perp_dex": ""},
+            "KBONK":    {"canonical_coin": "kBONK",    "szDecimals": 0, "symbol_source": "core_meta",    "perp_dex": ""},
+            "XYZ:SNDK": {"canonical_coin": "XYZ:SNDK", "szDecimals": 0, "symbol_source": "builder_meta", "perp_dex": "XYZ"},
+        }
+        _sym_gw._index_cache = {41: "ETH"}
+        _sym_gw._meta_fetched = True
+
+        _r_eth = _sym_gw._resolve_coin("ETH")
+        _check("symbol: ETH resolves sdk_coin=ETH no perp_dexs",
+               _r_eth.get("ok") and _r_eth.get("sdk_coin") == "ETH" and _r_eth.get("perp_dexs") is None)
+
+        _r_kbonk = _sym_gw._resolve_coin("KBONK")
+        _check("symbol: KBONK resolves canonical sdk_coin=kBONK",
+               _r_kbonk.get("ok") and _r_kbonk.get("sdk_coin") == "kBONK",
+               str(_r_kbonk))
+
+        _r_xyz = _sym_gw._resolve_coin("XYZ:SNDK")
+        _check("symbol: XYZ:SNDK resolves sdk_coin=SNDK perp_dexs=[,XYZ]",
+               _r_xyz.get("ok") and _r_xyz.get("sdk_coin") == "SNDK" and _r_xyz.get("perp_dexs") == ["", "XYZ"],
+               str(_r_xyz))
+
+        _r_spot = _sym_gw._resolve_coin("@230")
+        _check("symbol: @230 spot blocked SPOT_MARKET_SKIPPED exchange_called=False",
+               not _r_spot.get("ok") and _r_spot.get("status") == "SPOT_MARKET_SKIPPED" and not _r_spot.get("exchange_called"))
+
+        _r_idx = _sym_gw._resolve_coin("#41")
+        _check("symbol: #41 resolves via index_cache to ETH",
+               _r_idx.get("ok") and _r_idx.get("sdk_coin") == "ETH", str(_r_idx))
+
+        _r_fake = _sym_gw._resolve_coin("FAKECOIN")
+        _check("symbol: FAKECOIN returns SYMBOL_UNRESOLVED exchange_called=False",
+               not _r_fake.get("ok") and _r_fake.get("status") == "SYMBOL_UNRESOLVED" and not _r_fake.get("exchange_called"))
+
+        # Unresolved coin in full run_cycle → zero send_attempts, ledger unchanged.
+        atomic_write_json(CORE_RUNTIME_STATE_FILE, {"live_start_ms": 1})
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        _write_csv(RAW_LEADER_FILLS_CSV, [{
+            "fill_id": "sym-fake-1", "wallet": wallet_a, "coin": "FAKECOIN", "side": "BUY",
+            "price": "100", "size": "1", "timestamp_ms": str(_rs_now),
+            "recording_method": "WS_CAPTURED",
+        }])
+        _sym_att_before = len(read_csv_rows(SEND_ATTEMPTS_CSV))
+        _ledger_sym_snap = json.dumps(load_json(MANUAL_LIVE_POSITIONS_FILE, {}), sort_keys=True)
+        _core_sym = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        _core_sym.sender._meta_cache = {}
+        _core_sym.sender._meta_fetched = True
+        _sum_sym = _core_sym.run_cycle(use_source_csv=True, poll_live=False)
+        _check("symbol: unresolved FAKECOIN writes zero send_attempts",
+               _sum_sym.leader_sends_attempted == 0 and
+               len(read_csv_rows(SEND_ATTEMPTS_CSV)) == _sym_att_before,
+               str(_sum_sym))
+        _check("symbol: unresolved coin does not mutate ledger",
+               json.dumps(load_json(MANUAL_LIVE_POSITIONS_FILE, {}), sort_keys=True) == _ledger_sym_snap)
 
         # Heartbeat: pong message must not enqueue a fill.
         _ws_pong = WSManager(["0x" + "f" * 40], LeaderFillIngestor())
