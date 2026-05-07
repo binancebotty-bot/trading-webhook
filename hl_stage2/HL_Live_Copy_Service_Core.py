@@ -891,70 +891,113 @@ class LeaderFillIngestor:
 
 
 class WSManager:
-    """Small first-class WS manager.
+    """Single shared WebSocket connection subscribing up to MAX_WALLETS leader wallets.
 
-    WS owns transport and health only. It queues LeaderFill objects for the single
-    reconciliation cycle; it never sends orders and never mutates the manual ledger.
+    One thread, one socket, N subscribe messages on open (HOT10 design).
+    Transport health is socket-level: WS_OK when the shared connection is open
+    regardless of per-wallet fill recency. Per-wallet last_message_ms is tracked
+    for information only and does not influence the health grade.
     """
+
     def __init__(self, wallets: Iterable[str], ingestor: LeaderFillIngestor):
         self.wallets = list(wallets)[:MAX_WALLETS]
         self.ingestor = ingestor
         self.queue: "queue.Queue[LeaderFill]" = queue.Queue(maxsize=50000)
         self.last_msg_ms: Dict[str, int] = {w: 0 for w in self.wallets}
-        self.reconnect_count: Dict[str, int] = {w: 0 for w in self.wallets}
-        self.last_error: Dict[str, str] = {w: "" for w in self.wallets}
+        self.last_error: Dict[str, str] = {}
         self.enabled = bval(os.getenv("HL_LIVE_WS_ENABLED"), False)
         self.stop_event = threading.Event()
-        self.threads: List[threading.Thread] = []
-        self.apps: List[Any] = []
+        self._thread: Optional[threading.Thread] = None
+        self._app: Optional[Any] = None
+        self._socket_open: bool = False
+        self._reconnect_count: int = 0
+        self._last_socket_error: str = ""
+        self._last_ping_ms: int = 0
+        self._last_pong_ms: int = 0
+        self._heartbeat_interval: float = float(os.getenv("HL_LIVE_WS_HEARTBEAT_SEC", "25"))
+        self._hb_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        if not self.enabled or websocket is None or self.threads:
+        if not self.enabled or websocket is None or self._thread is not None:
             return
-        for wallet in self.wallets:
-            t = threading.Thread(target=self._wallet_thread, args=(wallet,), daemon=True, name=f"HLCoreWS-{wallet[-6:]}")
-            self.threads.append(t)
-            t.start()
+        self._thread = threading.Thread(
+            target=self._shared_thread, daemon=True, name="HLCoreWS-shared"
+        )
+        self._thread.start()
+        self._hb_thread = threading.Thread(
+            target=self._heartbeat_loop, daemon=True, name="HLCoreWS-heartbeat"
+        )
+        self._hb_thread.start()
 
     def stop(self) -> None:
         self.stop_event.set()
-        for app in list(self.apps):
+        app = self._app
+        if app is not None:
             try:
                 app.close()
             except Exception:
                 pass
 
-    def _wallet_thread(self, wallet: str) -> None:
+    def _heartbeat_loop(self) -> None:
+        while not self.stop_event.wait(self._heartbeat_interval):
+            if self._socket_open:
+                app = self._app
+                if app is not None:
+                    try:
+                        app.send(json.dumps({"method": "ping"}))
+                        self._last_ping_ms = utc_now_ms()
+                    except Exception:
+                        pass
+
+    def _shared_thread(self) -> None:
         backoff = 1.0
         while not self.stop_event.is_set():
+            self._socket_open = False
             try:
                 def on_open(ws: Any) -> None:
-                    self.last_msg_ms[wallet] = utc_now_ms()
-                    ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "userFills", "user": wallet}}))
+                    self._socket_open = True
+                    for wallet in self.wallets:
+                        ws.send(json.dumps({
+                            "method": "subscribe",
+                            "subscription": {"type": "userFills", "user": wallet},
+                        }))
 
                 def on_message(_ws: Any, message: str) -> None:
-                    self._on_message(wallet, message)
+                    self._on_message(message)
 
                 def on_error(_ws: Any, err: Any) -> None:
-                    self.last_error[wallet] = str(err)
+                    self._last_socket_error = str(err)
+                    self._socket_open = False
 
                 def on_close(_ws: Any, *_args: Any) -> None:
-                    self.reconnect_count[wallet] = int(self.reconnect_count.get(wallet, 0)) + 1
+                    self._socket_open = False
+                    self._reconnect_count += 1
 
-                app = websocket.WebSocketApp(HL_WS_URL, on_open=on_open, on_message=on_message, on_error=on_error, on_close=on_close)
-                self.apps.append(app)
+                app = websocket.WebSocketApp(
+                    HL_WS_URL,
+                    on_open=on_open,
+                    on_message=on_message,
+                    on_error=on_error,
+                    on_close=on_close,
+                )
+                self._app = app
                 app.run_forever(ping_interval=20, ping_timeout=10)
             except Exception as exc:
-                self.last_error[wallet] = str(exc)
+                self._last_socket_error = str(exc)
+                self._socket_open = False
             if self.stop_event.wait(min(30.0, backoff)):
                 break
             backoff = min(30.0, backoff * 1.5)
 
-    def _on_message(self, wallet: str, message: str) -> None:
-        self.last_msg_ms[wallet] = utc_now_ms()
+    def _on_message(self, message: str) -> None:
         try:
             payload = json.loads(message)
+            if isinstance(payload, dict) and payload.get("channel") == "pong":
+                self._last_pong_ms = utc_now_ms()
+                return
             data = payload.get("data", payload) if isinstance(payload, dict) else payload
+            # Hyperliquid userFills channel carries data.user — use as wallet hint
+            channel_wallet = normalise_wallet(data.get("user") or "") if isinstance(data, dict) else ""
             if isinstance(data, dict) and data.get("isSnapshot"):
                 fills = data.get("fills") or data.get("userFills") or []
                 source = "WS_SNAPSHOT"
@@ -968,8 +1011,11 @@ class WSManager:
             for raw in fills:
                 if not isinstance(raw, dict):
                     continue
-                fill = self.ingestor.parse_fill(wallet, raw, source)
+                fill = self.ingestor.parse_fill(channel_wallet, raw, source)
                 if fill:
+                    w = fill.leader_wallet
+                    if w in self.last_msg_ms:
+                        self.last_msg_ms[w] = utc_now_ms()
                     try:
                         self.queue.put_nowait(fill)
                     except queue.Full:
@@ -989,40 +1035,34 @@ class WSManager:
 
     def write_health(self) -> Dict[str, Any]:
         now = utc_now_ms()
-        wallets: Dict[str, Any] = {}
-        stale_count = 0
-        open_count = 0
+        thread_alive = self._thread is not None and self._thread.is_alive()
+        socket_open = self._socket_open and thread_alive
         if not self.enabled:
-            summary = {"wallet_count": len(self.wallets), "open_count": 0, "stale_count": 0, "total_reconnect_count": 0, "worst_health_grade": "DISABLED", "ws_status": "WS_DISABLED"}
-            payload = {"created_at": utc_now_iso(), "created_at_ms": now, "ws_summary": summary, "wallets": wallets}
-            atomic_write_json(LIVE_WS_HEALTH_FILE, payload)
-            return payload
+            ws_status, worst_grade = "WS_DISABLED", "DISABLED"
+        elif socket_open:
+            ws_status, worst_grade = "WS_OK", "OK"
+        else:
+            ws_status, worst_grade = "WS_DEGRADED", "DEGRADED"
+        wallets: Dict[str, Any] = {}
         for w in self.wallets:
             last = self.last_msg_ms.get(w, 0)
-            stale_ms = now - last if last else 10**12
-            status = "OPEN" if last else "STALE"
-            grade = "OK" if last and stale_ms < 30000 else "DEGRADED"
-            if grade != "OK":
-                stale_count += 1
-            else:
-                open_count += 1
             wallets[w] = {
-                "status": status,
-                "current_health_grade": grade,
                 "last_message_ms": last,
-                "stale_ms": stale_ms,
-                "reconnect_count": self.reconnect_count.get(w, 0),
+                "stale_ms": (now - last) if last else None,
                 "last_error": self.last_error.get(w, ""),
-                "thread_alive": any(t.is_alive() and w[-6:] in t.name for t in self.threads),
             }
-        worst = "DEGRADED" if stale_count else "OK"
         summary = {
             "wallet_count": len(self.wallets),
-            "open_count": open_count,
-            "stale_count": stale_count,
-            "total_reconnect_count": sum(self.reconnect_count.values()),
-            "worst_health_grade": worst,
-            "ws_status": "WS_DEGRADED" if stale_count else "WS_OK",
+            "open_count": 1 if socket_open else 0,
+            "stale_count": 0 if socket_open else (1 if self.enabled else 0),
+            "total_reconnect_count": self._reconnect_count,
+            "worst_health_grade": worst_grade,
+            "ws_status": ws_status,
+            "socket_open": socket_open,
+            "thread_alive": thread_alive,
+            "last_socket_error": self._last_socket_error,
+            "last_ping_ms": self._last_ping_ms,
+            "last_pong_ms": self._last_pong_ms,
         }
         payload = {"created_at": utc_now_iso(), "created_at_ms": now, "ws_summary": summary, "wallets": wallets}
         atomic_write_json(LIVE_WS_HEALTH_FILE, payload)
@@ -1509,6 +1549,65 @@ def run_self_test() -> None:
         status = recon.compare_snapshot({"positions_by_coin": {"TON": 999.0}})
         _check("exchange mismatch is reported", status == "LEDGER_EXCHANGE_NET_MISMATCH")
         _check("exchange mismatch does not auto-correct ledger", json.dumps(ledger.data, sort_keys=True) == ledger_before)
+
+        # Heartbeat: pong message must not enqueue a fill.
+        _ws_pong = WSManager(["0x" + "f" * 40], LeaderFillIngestor())
+        _ws_pong._on_message(json.dumps({"channel": "pong"}))
+        _check("heartbeat: pong does not enqueue fill", _ws_pong.queue.empty())
+        _check("heartbeat: pong updates last_pong_ms", _ws_pong._last_pong_ms > 0)
+
+        # Heartbeat: _heartbeat_loop sends ping via app.send when socket is open.
+        _pings_sent: List[str] = []
+        class _RecordingApp:
+            def send(self, data: str) -> None: _pings_sent.append(data)
+        _ws_hb = WSManager(["0x" + "f" * 40], LeaderFillIngestor())
+        _ws_hb._socket_open = True
+        _ws_hb._app = _RecordingApp()
+        _ws_hb._heartbeat_interval = 0.05
+        _ws_hb._hb_thread = threading.Thread(target=_ws_hb._heartbeat_loop, daemon=True)
+        _ws_hb._hb_thread.start()
+        time.sleep(0.15)
+        _ws_hb.stop()
+        _ws_hb._hb_thread.join(timeout=1.0)
+        _check("heartbeat: ping sent when socket open",
+               len(_pings_sent) >= 1 and json.loads(_pings_sent[0]) == {"method": "ping"})
+
+        # HOT10: 3 wallets must create exactly 1 shared WS thread, not 3.
+        import types as _types
+        _mock_ws = _types.SimpleNamespace()
+        class _NoopApp:
+            def __init__(self, *_a: Any, **_kw: Any) -> None: pass
+            def run_forever(self, **_kw: Any) -> None: pass
+            def close(self) -> None: pass
+        _mock_ws.WebSocketApp = _NoopApp
+        global websocket
+        _saved_ws = websocket
+        try:
+            websocket = _mock_ws
+            _ws3 = WSManager(["0x" + c * 40 for c in ("a", "b", "c")], LeaderFillIngestor())
+            _ws3.enabled = True
+            _ws3.start()
+            _check("HOT10: 3 wallets create exactly 1 WS thread",
+                   _ws3._thread is not None and isinstance(_ws3._thread, threading.Thread))
+            _ws3.stop()
+            _ws3._thread.join(timeout=2.0)
+        finally:
+            websocket = _saved_ws
+
+        # HOT10: shared socket open with no recent fills must be WS_OK, not DEGRADED.
+        _wsh = WSManager(["0x" + "e" * 40], LeaderFillIngestor())
+        _wsh.enabled = True
+        _wsh._socket_open = True
+        _keep_alive = threading.Event()
+        _wsh._thread = threading.Thread(target=_keep_alive.wait, daemon=True, name="fake-ws")
+        _wsh._thread.start()
+        try:
+            _wsh_result = _wsh.write_health()
+            _check("HOT10: socket open + no fills => WS_OK not DEGRADED",
+                   _wsh_result["ws_summary"]["ws_status"] == "WS_OK",
+                   str(_wsh_result["ws_summary"]))
+        finally:
+            _keep_alive.set()
 
         state = load_json(SERVICE_STATE_FILE, {})
         _check("service state exists", isinstance(state, dict) and state.get("cycle") == "run_cycle")
