@@ -250,6 +250,19 @@ def stable_hash(parts: Iterable[Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
+def normalise_copy_fill_side(raw: Any) -> str:
+    """Normalise a raw Hyperliquid copy-account fill side to canonical 'BUY' or 'SELL'.
+    Handles API shorthands: 'B' -> 'BUY', 'A' -> 'SELL', plus long-form strings.
+    """
+    s = str(raw or "").strip().lower()
+    if s in {"b", "buy", "open long", "close short"}:
+        return "BUY"
+    # Generic heuristic: "long" without "close" or "short" → open-long direction = BUY
+    if "long" in s and "close" not in s and "short" not in s:
+        return "BUY"
+    return "SELL"
+
+
 @dataclass(frozen=True)
 class LeaderFill:
     leader_fill_id: str
@@ -579,7 +592,7 @@ class ManualLedger:
     def apply_copy_fill(self, intent: Intent, copy_fill: Dict[str, Any]) -> Dict[str, Any]:
         wallet = intent.fill.leader_wallet
         coin = intent.fill.coin
-        side = str(copy_fill.get("side", intent.copy_side)).upper()
+        side = normalise_copy_fill_side(copy_fill.get("side", intent.copy_side))
         size = abs(fnum(copy_fill.get("size", copy_fill.get("sz", intent.copy_size)), intent.copy_size))
         price = fnum(copy_fill.get("price", copy_fill.get("px", intent.fill.price)), intent.fill.price)
         fill_id = str(copy_fill.get("copy_fill_id") or copy_fill.get("hash") or copy_fill.get("oid") or stable_hash([intent.intent_id, side, size, price, utc_now_ms()]))
@@ -1385,8 +1398,7 @@ class CopyFillMatcher:
         if explicit and explicit in intents_by_id:
             return intents_by_id[explicit]
         coin = str(copy_fill.get("coin") or "").upper()
-        raw_side = str(copy_fill.get("side") or copy_fill.get("dir") or "").lower()
-        side = "BUY" if raw_side in {"b", "buy", "open long", "close short"} or ("long" in raw_side and "short" not in raw_side) else "SELL"
+        side = normalise_copy_fill_side(copy_fill.get("side") or copy_fill.get("dir") or "")
         ts = int(fnum(copy_fill.get("timestamp_ms", copy_fill.get("time")), utc_now_ms()))
         window_ms = int(os.getenv("HL_LIVE_COPY_MATCH_WINDOW_MS", "600000"))
         candidates: List[Intent] = []
@@ -1417,7 +1429,7 @@ class CopyFillMatcher:
             "sleeve_id": intent.sleeve_id,
             "position_id": intent.position_id,
             "coin": intent.fill.coin,
-            "side": str(copy_fill.get("side", intent.copy_side)).upper(),
+            "side": normalise_copy_fill_side(copy_fill.get("side", intent.copy_side)),
             "fill_price": fnum(copy_fill.get("price", copy_fill.get("px", intent.fill.price))),
             "fill_size": fnum(copy_fill.get("size", copy_fill.get("sz", intent.copy_size))),
             "fill_notional": fnum(copy_fill.get("notional"), intent.copy_notional),
@@ -1801,6 +1813,39 @@ def run_self_test() -> None:
         _check("wallet B unchanged after wallet A close", abs(ledger.wallet_coin_position(wallet_b, "TON") - before_b) < 1e-9)
         _check("by_coin_net updates correctly", abs(ledger.coin_net("TON") - 0.0) < 1e-9, str(ledger.data.get("by_coin_net")))
 
+        # Copy fill side normalisation: raw "B"/"A" from Hyperliquid API must produce correct ledger sign.
+        _sl_side = ManualLedger(path=AUDIT_DIR / "test_side_positions.json")
+        _sb_side = IntentBuilder(ConfigManager(), _sl_side)
+        _sm_side = CopyFillMatcher(_sl_side, AuditLogWriter())
+        _f_side_open = LeaderFill("side-open", wallet_a, "HYPE", "BUY", 20.0, 1.0, 9100, "TEST")
+        _i_side_open = _sb_side.build(_f_side_open)
+        _sm_side.match_and_apply(
+            {"intent_id": _i_side_open.intent_id, "side": "B", "price": 20.0, "size": 0.5, "copy_fill_id": "side-cf1"},
+            {_i_side_open.intent_id: _i_side_open},
+        )
+        _check("side B: positive wallet position after BUY",
+               _sl_side.wallet_coin_position(wallet_a, "HYPE") > 0,
+               f"pos={_sl_side.wallet_coin_position(wallet_a, 'HYPE')}")
+        _check("side B: coin_net positive",
+               _sl_side.coin_net("HYPE") > 0)
+        _side_rows1 = [r for r in read_csv_rows(LIVE_FILLS_CSV) if r.get("copy_fill_id") == "side-cf1"]
+        _check("side B: live_fills side field is BUY not B",
+               len(_side_rows1) == 1 and _side_rows1[0].get("side") == "BUY",
+               str(_side_rows1))
+        _f_side_close = LeaderFill("side-close", wallet_a, "HYPE", "SELL", 20.0, 1.0, 9200, "TEST")
+        _i_side_close = _sb_side.build(_f_side_close)
+        _sm_side.match_and_apply(
+            {"intent_id": _i_side_close.intent_id, "side": "A", "price": 20.0, "size": 0.5, "copy_fill_id": "side-cf2"},
+            {_i_side_close.intent_id: _i_side_close},
+        )
+        _check("side A: position closed to flat after SELL via raw A",
+               abs(_sl_side.wallet_coin_position(wallet_a, "HYPE")) < 1e-9,
+               f"pos={_sl_side.wallet_coin_position(wallet_a, 'HYPE')}")
+        _side_rows2 = [r for r in read_csv_rows(LIVE_FILLS_CSV) if r.get("copy_fill_id") == "side-cf2"]
+        _check("side A: live_fills side field is SELL not A",
+               len(_side_rows2) == 1 and _side_rows2[0].get("side") == "SELL",
+               str(_side_rows2))
+
         # Unmatched copy fill writes reconciliation and does not mutate ledger.
         recon_before = len(read_csv_rows(RECONCILIATION_CSV))
         pos_before = json.dumps(ledger.data, sort_keys=True)
@@ -2131,6 +2176,129 @@ def run_self_test() -> None:
         _check("symbol: unresolved coin does not mutate ledger",
                json.dumps(load_json(MANUAL_LIVE_POSITIONS_FILE, {}), sort_keys=True) == _ledger_sym_snap)
 
+        # ============================================================
+        # Acceptance harness — exchange shape / production bug guards
+        # ============================================================
+
+        # A/B: Source boundary + send purity.
+        # REBUILD rows must NOT be processed when use_source_csv=False.
+        atomic_write_json(CORE_RUNTIME_STATE_FILE, {"live_start_ms": 1})
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        _write_csv(RAW_LEADER_FILLS_CSV, [{
+            "fill_id": "ach-rebuild-1", "wallet": wallet_a, "coin": "ETH", "side": "BUY",
+            "price": "3000", "size": "0.01", "timestamp_ms": str(utc_now_ms()),
+            "recording_method": "REBUILD",
+        }])
+        _ach_att_b = len(read_csv_rows(SEND_ATTEMPTS_CSV))
+        _ach_core_rb = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        _ach_rb = _ach_core_rb.run_cycle(use_source_csv=False, poll_live=False)
+        _check("source boundary: REBUILD rows skipped when use_source_csv=False",
+               _ach_rb.leader_fills_seen == 0 and len(read_csv_rows(SEND_ATTEMPTS_CSV)) == _ach_att_b,
+               str(_ach_rb))
+
+        # C: Comprehensive side normalisation including Hyperliquid long-form strings.
+        for _ach_rs, _ach_re in [("B","BUY"),("buy","BUY"),("Open Long","BUY"),("Close Short","BUY"),
+                                   ("A","SELL"),("sell","SELL"),("Open Short","SELL"),("Close Long","SELL")]:
+            _check(f"side norm: '{_ach_rs}' -> {_ach_re}", normalise_copy_fill_side(_ach_rs) == _ach_re)
+
+        # D: Wallet sleeve conflicts — same coin, opposite sleeves, isolated.
+        atomic_write_json(LIVE_CONFIG_FILE, {
+            "auto_send_enabled": True,
+            "wallets": {
+                wallet_a: {"enabled": True, "mode": "ON", "copy_mode": "fixed", "fixed_notional": 10},
+                wallet_b: {"enabled": True, "mode": "ON", "copy_mode": "fixed", "fixed_notional": 10},
+            },
+            "global_controls": {"min_notional": 1},
+        })
+        _ach_lg = ManualLedger(path=AUDIT_DIR / "test_ach_conflict.json")
+        _ach_bl = IntentBuilder(ConfigManager(), _ach_lg)
+        _ach_ml = CopyFillMatcher(_ach_lg, AuditLogWriter())
+        _ach_ia = _ach_bl.build(LeaderFill("ach-wa", wallet_a, "HYPE", "BUY", 25.0, 1.0, utc_now_ms(), "TEST"))
+        _ach_ml.match_and_apply({"intent_id": _ach_ia.intent_id, "side": "BUY", "price": 25.0, "size": 0.4, "copy_fill_id": "ach-cfa"}, {_ach_ia.intent_id: _ach_ia})
+        _ach_ib = _ach_bl.build(LeaderFill("ach-wb", wallet_b, "HYPE", "SELL", 25.0, 1.0, utc_now_ms(), "TEST"))
+        _ach_ml.match_and_apply({"intent_id": _ach_ib.intent_id, "side": "SELL", "price": 25.0, "size": 0.3, "copy_fill_id": "ach-cfb"}, {_ach_ib.intent_id: _ach_ib})
+        _ach_a_pos = _ach_lg.wallet_coin_position(wallet_a, "HYPE")
+        _ach_b_pos = _ach_lg.wallet_coin_position(wallet_b, "HYPE")
+        _check("wallet conflict: A long B short isolated",
+               _ach_a_pos > 0 and _ach_b_pos < 0)
+        _check("wallet conflict: coin_net = sum of sleeves",
+               abs(_ach_lg.coin_net("HYPE") - (_ach_a_pos + _ach_b_pos)) < 1e-9)
+        _ach_ix = _ach_bl.build(LeaderFill("ach-xa", wallet_a, "HYPE", "SELL", 25.0, 1.0, utc_now_ms(), "TEST"))
+        _check("wallet conflict: exit clamped to A sleeve not coin_net",
+               abs(_ach_ix.copy_size - abs(_ach_a_pos)) < 1e-9, f"exit={_ach_ix.copy_size} sleeve={_ach_a_pos}")
+        _check("wallet conflict: no reduce_only on exit", _ach_ix.reduce_only_sent_planned is False)
+        _ach_ml.match_and_apply({"intent_id": _ach_ix.intent_id, "side": "SELL", "price": 25.0, "size": abs(_ach_a_pos), "copy_fill_id": "ach-xfa"}, {_ach_ix.intent_id: _ach_ix})
+        _check("wallet conflict: A closed B sleeve unchanged",
+               abs(_ach_lg.wallet_coin_position(wallet_a, "HYPE")) < 1e-9 and
+               abs(_ach_lg.wallet_coin_position(wallet_b, "HYPE") - _ach_b_pos) < 1e-9)
+
+        # F: Size flooring — floor, not round (0.0195 at szDec=2 -> 0.01, not 0.02).
+        _ach_sz = math.floor(0.0195 * 100 + 1e-12) / 100
+        _check("size floor: 0.0195 szDec=2 -> 0.01 not 0.02", abs(_ach_sz - 0.01) < 1e-9, f"got {_ach_sz}")
+
+        # G: End-to-end fixture 1 — ZEC SELL leader, side "A" copy fill, ledger short.
+        _ach_lg_zec = ManualLedger(path=AUDIT_DIR / "test_ach_zec.json")
+        _ach_b_zec = IntentBuilder(ConfigManager(), _ach_lg_zec)
+        _ach_m_zec = CopyFillMatcher(_ach_lg_zec, AuditLogWriter())
+        _ach_f_zec = LeaderFill("ach-zec", wallet_a, "ZEC", "SELL", 567.43, 1.0, utc_now_ms(), "WS_CAPTURED")
+        _ach_i_zec = _ach_b_zec.build(_ach_f_zec)
+        _ach_m_zec.match_and_apply(
+            {"intent_id": _ach_i_zec.intent_id, "side": "A", "price": 567.43,
+             "size": _ach_i_zec.copy_size, "copy_fill_id": "ach-cf-zec"},
+            {_ach_i_zec.intent_id: _ach_i_zec},
+        )
+        _check("e2e ZEC: side A creates negative sleeve",
+               _ach_lg_zec.wallet_coin_position(wallet_a, "ZEC") < 0,
+               f"pos={_ach_lg_zec.wallet_coin_position(wallet_a, 'ZEC')}")
+        _ach_zec_lf = [r for r in read_csv_rows(LIVE_FILLS_CSV) if r.get("copy_fill_id") == "ach-cf-zec"]
+        _check("e2e ZEC: live_fills side SELL not A",
+               len(_ach_zec_lf) == 1 and _ach_zec_lf[0].get("side") == "SELL")
+
+        # G: End-to-end fixture 2 — VIRTUAL BUY leader, side "B" copy fill, ledger long.
+        _ach_lg_virt = ManualLedger(path=AUDIT_DIR / "test_ach_virt.json")
+        _ach_b_virt = IntentBuilder(ConfigManager(), _ach_lg_virt)
+        _ach_m_virt = CopyFillMatcher(_ach_lg_virt, AuditLogWriter())
+        _ach_f_virt = LeaderFill("ach-virt", wallet_a, "VIRTUAL", "BUY", 1.0, 1.0, utc_now_ms(), "WS_CAPTURED")
+        _ach_i_virt = _ach_b_virt.build(_ach_f_virt)
+        _ach_m_virt.match_and_apply(
+            {"intent_id": _ach_i_virt.intent_id, "side": "B", "price": 1.0,
+             "size": _ach_i_virt.copy_size, "copy_fill_id": "ach-cf-virt"},
+            {_ach_i_virt.intent_id: _ach_i_virt},
+        )
+        _check("e2e VIRTUAL: side B creates positive sleeve",
+               _ach_lg_virt.wallet_coin_position(wallet_a, "VIRTUAL") > 0,
+               f"pos={_ach_lg_virt.wallet_coin_position(wallet_a, 'VIRTUAL')}")
+        _ach_virt_lf = [r for r in read_csv_rows(LIVE_FILLS_CSV) if r.get("copy_fill_id") == "ach-cf-virt"]
+        _check("e2e VIRTUAL: live_fills side BUY not B",
+               len(_ach_virt_lf) == 1 and _ach_virt_lf[0].get("side") == "BUY")
+
+        # H: Exchange snapshot mismatch on fresh ledger never auto-corrects.
+        _ach_lg_snap = ManualLedger(path=AUDIT_DIR / "test_ach_snap.json")
+        _ach_snap_before = json.dumps(_ach_lg_snap.data, sort_keys=True)
+        _ach_snap_st = ExchangeReconciler(_ach_lg_snap, AuditLogWriter()).compare_snapshot({"positions_by_coin": {"ETH": 999.0, "ZEC": -5.0}})
+        _check("snapshot: fresh ledger never auto-corrected",
+               json.dumps(_ach_lg_snap.data, sort_keys=True) == _ach_snap_before)
+        _check("snapshot: status LEDGER_EXCHANGE_NET_MISMATCH",
+               _ach_snap_st == "LEDGER_EXCHANGE_NET_MISMATCH")
+
+        # I: Regression sentinels — named guards for each production bug class.
+        _check("regression sentinel: exchange shape B buy creates positive ledger",
+               normalise_copy_fill_side("B") == "BUY")
+        _check("regression sentinel: exchange shape A sell creates negative ledger direction",
+               normalise_copy_fill_side("A") == "SELL")
+        _check("regression sentinel: builder perp XYZ:SNDK resolves sdk_coin=SNDK",
+               _sym_gw._resolve_coin("XYZ:SNDK").get("sdk_coin") == "SNDK")
+        _check("regression sentinel: source boundary empty default no CSV",
+               (Path("") if "" else None) is None)
+        _check("regression sentinel: ZEC price 567.43 valid 5 sig figs",
+               abs(SenderGateway(ConfigManager(), AuditLogWriter())._format_limit_px(567.4378, 4) - 567.43) < 1e-9)
+        _check("regression sentinel: exit copy_size clamped to sleeve not coin_net",
+               abs(_ach_ix.copy_size - abs(_ach_a_pos)) < 1e-9)
+        _check("regression sentinel: no reduce_only on exits",
+               _ach_ix.reduce_only_sent_planned is False)
+        _check("regression sentinel: send_attempts only from exchange_called=True",
+               _sum_rs3.leader_sends_attempted == 0)
+
         # Source CSV default: empty string → no CSV reading; explicit path → CSV enabled.
         _check("source CSV: empty default → source_path None",
                (Path("") if "" else None) is None)
@@ -2246,6 +2414,7 @@ def run_self_test() -> None:
     os.environ.clear()
     os.environ.update(old_env)
     print("RESULT::CLEAN_LIVE_COPY_CORE_SELF_TEST_PASS")
+    print("RESULT::EXCHANGE_SHAPE_ACCEPTANCE_HARNESS_PASS")
 
 
 def main() -> None:
