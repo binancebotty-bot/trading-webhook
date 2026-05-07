@@ -417,6 +417,7 @@ class DedupeStore:
         self.copy_account_baseline_at_ms: int = int(fnum(state.get("copy_account_baseline_at_ms"), 0))
         self.copy_account_baseline_fill_count: int = int(fnum(state.get("copy_account_baseline_fill_count"), 0))
         self.copy_account_baseline_max_ts_ms: int = int(fnum(state.get("copy_account_baseline_max_ts_ms"), 0))
+        self.live_start_ms: int = int(fnum(state.get("live_start_ms"), 0))
 
     def accept_leader(self, fill_id: str) -> bool:
         if fill_id in self.processed:
@@ -449,6 +450,7 @@ class DedupeStore:
             "copy_account_baseline_at_ms": self.copy_account_baseline_at_ms,
             "copy_account_baseline_fill_count": self.copy_account_baseline_fill_count,
             "copy_account_baseline_max_ts_ms": self.copy_account_baseline_max_ts_ms,
+            "live_start_ms": self.live_start_ms,
         }
 
 
@@ -868,7 +870,7 @@ class LeaderFillIngestor:
                 page: List[LeaderFill] = []
                 for raw in data:
                     if isinstance(raw, dict):
-                        fill = self.parse_fill(wallet, raw, "REBUILD")
+                        fill = self.parse_fill(wallet, raw, "POLL")
                         if fill:
                             page.append(fill)
                 fills.extend(page)
@@ -1277,6 +1279,8 @@ class LiveCopyCore:
         if isinstance(core_state, dict):
             merged_state = {**merged_state, **core_state}
         self.dedupe = DedupeStore(merged_state)
+        if not self.dedupe.live_start_ms:
+            self.dedupe.live_start_ms = utc_now_ms()
         self.wallets = list(self.cfg.wallets().keys())[:MAX_WALLETS]
         self.ws = WSManager(self.wallets, self.ingestor)
         self.intent_builder = IntentBuilder(self.cfg, self.ledger)
@@ -1320,12 +1324,14 @@ class LiveCopyCore:
                 self.audit.append_order_intent(intent)
                 self.intents_by_id[intent.intent_id] = intent
                 summary.leader_intents_written += 1
-                sent, send_status = self.sender.send_if_allowed(intent)
-                if sent:
-                    summary.leader_sends_attempted += 1
-                elif send_status == "REAL_SENDER_NOT_CONFIGURED" and intent.send_allowed and self.cfg.auto_send_enabled:
-                    # Visible decision only; send_attempts.csv remains pure.
-                    self.audit.append_reconciliation("SEND_PRECHECK", "REAL_SENDER_NOT_CONFIGURED", leader_wallet=fill.leader_wallet, leader_fill_id=fill.leader_fill_id, intent_id=intent.intent_id, coin=fill.coin, notes="auto-send enabled but real sender unavailable; no exchange attempt made")
+                is_pre_cutover = self.dedupe.live_start_ms > 0 and fill.timestamp_ms < self.dedupe.live_start_ms
+                if not is_pre_cutover:
+                    sent, send_status = self.sender.send_if_allowed(intent)
+                    if sent:
+                        summary.leader_sends_attempted += 1
+                    elif send_status == "REAL_SENDER_NOT_CONFIGURED" and intent.send_allowed and self.cfg.auto_send_enabled:
+                        # Visible decision only; send_attempts.csv remains pure.
+                        self.audit.append_reconciliation("SEND_PRECHECK", "REAL_SENDER_NOT_CONFIGURED", leader_wallet=fill.leader_wallet, leader_fill_id=fill.leader_fill_id, intent_id=intent.intent_id, coin=fill.coin, notes="auto-send enabled but real sender unavailable; no exchange attempt made")
             if poll_copy:
                 copy_state = load_json(CORE_RUNTIME_STATE_FILE, {})
                 start_ms = max(0, int(fnum(copy_state.get("last_copy_poll_ms", load_json(SERVICE_STATE_FILE, {}).get("last_copy_poll_ms", 0)), 0)) - POLL_OVERLAP_MS)
@@ -1469,6 +1475,7 @@ def run_self_test() -> None:
             "fill_id": "leader-a-eth-buy-1", "wallet": wallet_a, "coin": "ETH", "side": "BUY", "price": "1000", "size": "1", "timestamp_ms": "2000", "source": "ws", "recording_method": "WS_CAPTURED",
         }])
         atomic_write_json(SERVICE_STATE_FILE, {})
+        atomic_write_json(CORE_RUNTIME_STATE_FILE, {"live_start_ms": 1})
         core = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
         summary = core.run_cycle(use_source_csv=True, poll_live=False, reconcile_exchange=False)
         _check("mock auto-send writes one send_attempt", summary.leader_sends_attempted == 1 and len(read_csv_rows(SEND_ATTEMPTS_CSV)) == 1)
@@ -1542,6 +1549,84 @@ def run_self_test() -> None:
         status = recon.compare_snapshot({"positions_by_coin": {"TON": 999.0}})
         _check("exchange mismatch is reported", status == "LEDGER_EXCHANGE_NET_MISMATCH")
         _check("exchange mismatch does not auto-correct ledger", json.dumps(ledger.data, sort_keys=True) == ledger_before)
+
+        # Live cutover boundary: pre-cutover fills write intents but never send.
+        os.environ["HL_LIVE_AUTO_SEND_ENABLED"] = "1"
+        os.environ["HL_LIVE_MOCK_SEND"] = "1"
+        _cutover_ms = utc_now_ms()
+
+        # Tests 1+2: pre-cutover intent-only / post-cutover sends.
+        atomic_write_json(CORE_RUNTIME_STATE_FILE, {"live_start_ms": _cutover_ms})
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        _write_csv(RAW_LEADER_FILLS_CSV, [{
+            "fill_id": "co-pre-1", "wallet": wallet_a, "coin": "ETH", "side": "BUY",
+            "price": "1000", "size": "0.01", "timestamp_ms": str(_cutover_ms - 5000),
+            "recording_method": "WS_CAPTURED",
+        }])
+        _co_intents_before = len(read_csv_rows(ORDER_INTENTS_CSV))
+        _co_attempts_before = len(read_csv_rows(SEND_ATTEMPTS_CSV))
+        _core_co1 = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        _sum_co1 = _core_co1.run_cycle(use_source_csv=True, poll_live=False)
+        _check("cutover: pre-cutover fill writes intent",
+               _sum_co1.leader_intents_written == 1 and
+               len(read_csv_rows(ORDER_INTENTS_CSV)) == _co_intents_before + 1,
+               str(_sum_co1))
+        _check("cutover: pre-cutover fill does not send",
+               _sum_co1.leader_sends_attempted == 0 and
+               len(read_csv_rows(SEND_ATTEMPTS_CSV)) == _co_attempts_before,
+               str(_sum_co1))
+
+        atomic_write_json(CORE_RUNTIME_STATE_FILE, {"live_start_ms": _cutover_ms})
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        _write_csv(RAW_LEADER_FILLS_CSV, [{
+            "fill_id": "co-post-1", "wallet": wallet_a, "coin": "ETH", "side": "BUY",
+            "price": "1000", "size": "0.01", "timestamp_ms": str(_cutover_ms + 5000),
+            "recording_method": "WS_CAPTURED",
+        }])
+        _co_attempts_before2 = len(read_csv_rows(SEND_ATTEMPTS_CSV))
+        _core_co2 = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        _sum_co2 = _core_co2.run_cycle(use_source_csv=True, poll_live=False)
+        _check("cutover: post-cutover fill sends with mock sender",
+               _sum_co2.leader_sends_attempted == 1 and
+               len(read_csv_rows(SEND_ATTEMPTS_CSV)) == _co_attempts_before2 + 1,
+               str(_sum_co2))
+
+        # Tests 3+4: live_start_ms set on first construction; unchanged across restart.
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        atomic_write_json(CORE_RUNTIME_STATE_FILE, {})
+        _core_t1 = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        _check("cutover: live_start_ms set on first construction",
+               _core_t1.dedupe.live_start_ms > 0)
+        _t1 = _core_t1.dedupe.live_start_ms
+        _core_t1.run_cycle(use_source_csv=False)
+        _core_t2 = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        _check("cutover: live_start_ms unchanged across restart",
+               _core_t2.dedupe.live_start_ms == _t1,
+               f"t1={_t1} t2={_core_t2.dedupe.live_start_ms}")
+
+        # Test 5: deleted state file still produces a fresh live_start_ms.
+        try:
+            CORE_RUNTIME_STATE_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        _core_t3 = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        _check("cutover: wiped state creates fresh live_start_ms",
+               _core_t3.dedupe.live_start_ms > 0)
+
+        # Test 6: WS_CAPTURED post-cutover fill is send-eligible.
+        atomic_write_json(CORE_RUNTIME_STATE_FILE, {"live_start_ms": _cutover_ms})
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        _core_ws = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        _ws_fill = LeaderFill("ws-co-1", wallet_a, "BTC", "BUY", 50000.0, 0.001,
+                              _cutover_ms + 2000, "WS_CAPTURED")
+        _core_ws.ws.queue.put_nowait(_ws_fill)
+        _co_ws_attempts_before = len(read_csv_rows(SEND_ATTEMPTS_CSV))
+        _sum_ws = _core_ws.run_cycle(use_source_csv=False, poll_live=False)
+        _check("cutover: WS_CAPTURED post-cutover fill is send-eligible",
+               _sum_ws.leader_sends_attempted == 1 and
+               len(read_csv_rows(SEND_ATTEMPTS_CSV)) == _co_ws_attempts_before + 1,
+               str(_sum_ws))
 
         # Sleeve exit policy: exit clamped to sleeve size, not current config notional.
         atomic_write_json(LIVE_CONFIG_FILE, {
