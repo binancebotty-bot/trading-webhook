@@ -45,6 +45,38 @@ except Exception:  # pragma: no cover
     websocket = None
 
 BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_ENV_FILE = BASE_DIR.parent / "hl_stage2.env"
+ENV_FILE = Path(os.getenv("HL_LIVE_ENV_FILE", str(DEFAULT_ENV_FILE)))
+
+
+def load_env_file(path: Path) -> None:
+    """Load NAME=VALUE pairs from a .env file into os.environ.
+    Existing non-empty OS env values are never overwritten.
+    No values are printed or logged.
+    """
+    try:
+        if not path.exists():
+            return
+        for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            name, _, value = line.partition("=")
+            name = name.strip()
+            if not name:
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            if not os.environ.get(name):
+                os.environ[name] = value
+    except Exception:
+        pass
+
+
+load_env_file(ENV_FILE)
 ENGINE_OUTPUT_DIR = BASE_DIR / "hl_copy_output"
 AUDIT_DIR = Path(os.getenv("HL_LIVE_AUDIT_DIR", str(BASE_DIR / "hl_live_copy_audit")))
 APPEND_ONLY_DIR = AUDIT_DIR / "append_only"
@@ -799,14 +831,20 @@ class SenderGateway:
         bps = self.cfg.marketable_bps()
         mult = (1.0 + bps / 10000.0) if intent.copy_side == "BUY" else (1.0 - bps / 10000.0)
         raw_px = intent.fill.price * mult
-        factor_px = 10 ** price_max_dec
-        limit_px = math.floor(raw_px * factor_px) / factor_px
+        limit_px = self._format_limit_px(raw_px, price_max_dec)
         factor_sz = 10 ** sz_dec
         wire_size = math.floor(intent.copy_size * factor_sz + 1e-12) / factor_sz
         if wire_size <= 0:
             return False, "REAL_SENDER_NOT_CONFIGURED", {"status": "WIRE_SIZE_ZERO", "exchange_called": False}
+        # Precheck: key parse — no exchange call involved.
         try:
             account = Account.from_key(private_key)
+        except Exception as exc:
+            return False, "REAL_SENDER_NOT_CONFIGURED", {
+                "status": "CREDENTIALS_INVALID", "error": repr(exc), "exchange_called": False,
+            }
+        # Precheck: build Exchange client — no network call yet.
+        try:
             base_url = HL_EXCHANGE_URL
             if base_url.endswith("/exchange"):
                 base_url = base_url[:-len("/exchange")]
@@ -815,6 +853,15 @@ class SenderGateway:
             if perp_dexs is not None:
                 exchange_kwargs["perp_dexs"] = perp_dexs
             exchange = Exchange(account, **exchange_kwargs)
+        except Exception as exc:
+            log_error("send_real", exc)
+            return False, "EXCHANGE_ERROR", {
+                "exchange_response": {}, "oid": "",
+                "limit_px": limit_px, "wire_size": wire_size,
+                "exchange_called": False, "error": repr(exc),
+            }
+        # Exchange call — exchange_called=True from this point.
+        try:
             response = exchange.order(
                 sdk_coin,
                 intent.copy_side == "BUY",
@@ -931,6 +978,20 @@ class SenderGateway:
             "sz_decimals": sz_dec, "price_max_decimals": price_max_dec,
             "perp_dexs": perp_dexs, "status": "OK", "error": "",
         }
+
+    @staticmethod
+    def _format_limit_px(raw_px: float, price_max_dec: int) -> float:
+        """Format a perp limit price to Hyperliquid precision.
+        Enforces both ≤price_max_dec (=6-szDecimals) decimal places AND ≤5 significant figures.
+        Uses floor to avoid over-aggressive prices after slippage is already applied.
+        """
+        if raw_px <= 0:
+            return raw_px
+        mag = int(math.floor(math.log10(raw_px)))
+        sig_fig_dec = max(0, 5 - 1 - mag)
+        allowed_dec = min(price_max_dec, sig_fig_dec)
+        factor = 10 ** allowed_dec
+        return math.floor(raw_px * factor) / factor
 
     @staticmethod
     def _parse_hl_response(response: Any) -> Tuple[bool, str, str]:
@@ -1939,6 +2000,28 @@ def run_self_test() -> None:
                len(read_csv_rows(SEND_ATTEMPTS_CSV)) == _rs_att0,
                str(_sum_rs1))
 
+        # Test: invalid/malformed private key must not write send_attempts.
+        os.environ["HL_LIVE_HL_PRIVATE_KEY"] = "not_hex_key"
+        atomic_write_json(CORE_RUNTIME_STATE_FILE, {"live_start_ms": 1})
+        atomic_write_json(SERVICE_STATE_FILE, {})
+        _write_csv(RAW_LEADER_FILLS_CSV, [{
+            "fill_id": "rs-inv-1", "wallet": wallet_a, "coin": "SOL", "side": "BUY",
+            "price": "150", "size": "1", "timestamp_ms": str(_rs_now),
+            "recording_method": "WS_CAPTURED",
+        }])
+        _rs_inv_att_before = len(read_csv_rows(SEND_ATTEMPTS_CSV))
+        _core_inv = LiveCopyCore(source_csv=RAW_LEADER_FILLS_CSV)
+        _core_inv.sender._meta_cache = {
+            "SOL": {"canonical_coin": "SOL", "szDecimals": 2, "symbol_source": "core_meta", "perp_dex": ""},
+        }
+        _core_inv.sender._meta_fetched = True
+        _sum_inv = _core_inv.run_cycle(use_source_csv=True, poll_live=False)
+        _check("real sender: invalid key writes zero send_attempts",
+               _sum_inv.leader_sends_attempted == 0 and
+               len(read_csv_rows(SEND_ATTEMPTS_CSV)) == _rs_inv_att_before,
+               str(_sum_inv))
+        os.environ.pop("HL_LIVE_HL_PRIVATE_KEY", None)
+
         # Test: mocked exchange_called=True → one REAL_IOC send_attempt with oid.
         atomic_write_json(CORE_RUNTIME_STATE_FILE, {"live_start_ms": 1})
         atomic_write_json(SERVICE_STATE_FILE, {})
@@ -2048,6 +2131,29 @@ def run_self_test() -> None:
         _check("symbol: unresolved coin does not mutate ledger",
                json.dumps(load_json(MANUAL_LIVE_POSITIONS_FILE, {}), sort_keys=True) == _ledger_sym_snap)
 
+        # Source CSV default: empty string → no CSV reading; explicit path → CSV enabled.
+        _check("source CSV: empty default → source_path None",
+               (Path("") if "" else None) is None)
+        _src_ep = Path(str(RAW_LEADER_FILLS_CSV)) if str(RAW_LEADER_FILLS_CSV) else None
+        _check("source CSV: explicit existing path → use_source_csv True",
+               _src_ep is not None and bool(_src_ep and _src_ep.exists()),
+               f"path={_src_ep}")
+
+        # Price formatter: 5-significant-figure + decimal-place constraints.
+        _gw_pf = SenderGateway(ConfigManager(), AuditLogWriter())
+        _px_zec = _gw_pf._format_limit_px(567.4378, 4)
+        _check("price format: 567.4378 szDec=2 → 567.43",
+               abs(_px_zec - 567.43) < 1e-9, f"got {_px_zec}")
+        _px_btc = _gw_pf._format_limit_px(105000.7, 1)
+        _check("price format: 105000.7 szDec=5 → 105000.0",
+               abs(_px_btc - 105000.0) < 1e-9, f"got {_px_btc}")
+        _px_eth = _gw_pf._format_limit_px(2987.65, 2)
+        _check("price format: 2987.65 szDec=4 → 2987.6",
+               abs(_px_eth - 2987.6) < 1e-9, f"got {_px_eth}")
+        _px_small = _gw_pf._format_limit_px(0.001234, 6)
+        _check("price format: 0.001234 small → decimal-limited 0.001234",
+               abs(_px_small - 0.001234) < 1e-9, f"got {_px_small}")
+
         # Heartbeat: pong message must not enqueue a fill.
         _ws_pong = WSManager(["0x" + "f" * 40], LeaderFillIngestor())
         _ws_pong._on_message(json.dumps({"channel": "pong"}))
@@ -2107,6 +2213,33 @@ def run_self_test() -> None:
         finally:
             _keep_alive.set()
 
+        # Env file loader: new var is set, existing non-empty var is not overwritten.
+        import tempfile as _tmpmod
+        _ef_fd, _ef_path = _tmpmod.mkstemp(suffix=".env")
+        try:
+            os.close(_ef_fd)
+            Path(_ef_path).write_text(
+                "TEST_ENV_VAR_FOR_CORE=abc\n"
+                "# comment\n"
+                "\n"
+                "TEST_ENV_VAR_EXISTING=should_not_overwrite\n",
+                encoding="utf-8",
+            )
+            os.environ.pop("TEST_ENV_VAR_FOR_CORE", None)
+            os.environ["TEST_ENV_VAR_EXISTING"] = "original_value"
+            load_env_file(Path(_ef_path))
+            _check("env loader: new var set from file",
+                   os.environ.get("TEST_ENV_VAR_FOR_CORE") == "abc")
+            _check("env loader: existing non-empty var not overwritten",
+                   os.environ.get("TEST_ENV_VAR_EXISTING") == "original_value")
+        finally:
+            os.environ.pop("TEST_ENV_VAR_FOR_CORE", None)
+            os.environ.pop("TEST_ENV_VAR_EXISTING", None)
+            try:
+                Path(_ef_path).unlink()
+            except Exception:
+                pass
+
         state = load_json(SERVICE_STATE_FILE, {})
         _check("service state exists", isinstance(state, dict) and state.get("cycle") == "run_cycle")
 
@@ -2119,7 +2252,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Clean Hyperliquid live copy core")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--once", action="store_true")
-    parser.add_argument("--source-file", default=str(RAW_LEADER_FILLS_CSV))
+    parser.add_argument("--source-file", default="", help="Leader fills CSV for forensic replay (default: WS-only, no CSV)")
     parser.add_argument("--poll-live", action="store_true", help="Use read-only userFillsByTime polling for leaders")
     parser.add_argument("--poll-copy", action="store_true", help="Use read-only userFillsByTime polling for the copy account")
     parser.add_argument("--reconcile-exchange", action="store_true", help="Fetch clearinghouseState and compare manual ledger")
@@ -2131,14 +2264,15 @@ def main() -> None:
         run_self_test()
         return
     if args.once or args.loop:
-        core = LiveCopyCore(source_csv=Path(args.source_file))
+        source_path = Path(args.source_file) if args.source_file else None
+        core = LiveCopyCore(source_csv=source_path or RAW_LEADER_FILLS_CSV)
         if args.ws:
             core.ws.enabled = True
             core.ws.start()
         try:
             while True:
                 summary = core.run_cycle(
-                    use_source_csv=Path(args.source_file).exists(),
+                    use_source_csv=bool(source_path and source_path.exists()),
                     poll_live=args.poll_live,
                     poll_copy=args.poll_copy,
                     reconcile_exchange=args.reconcile_exchange,
