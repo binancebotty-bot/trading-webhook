@@ -272,6 +272,7 @@ class CycleSummary:
     copy_fills_seen: int = 0
     copy_fills_matched: int = 0
     copy_fills_unmatched: int = 0
+    copy_account_status: str = "COPY_ACCOUNT_POLL_DISABLED"
     ledger_updates: int = 0
     recovery_limits_placed: int = 0
     poll_loop_status: str = "POLL_DISABLED"
@@ -286,6 +287,9 @@ class ConfigManager:
     def __init__(self, config_path: Optional[Path] = None):
         self.config_path = config_path or LIVE_CONFIG_FILE
         self.config = self._load()
+        self.wallet_gate = load_json(WALLET_GATE_FILE, {})
+        if not isinstance(self.wallet_gate, dict):
+            self.wallet_gate = {}
 
     def _load(self) -> Dict[str, Any]:
         cfg = load_json(self.config_path, {})
@@ -308,14 +312,45 @@ class ConfigManager:
 
     def wallets(self) -> Dict[str, Dict[str, Any]]:
         raw = self.config.get("wallets")
-        if isinstance(raw, dict) and raw:
-            return {normalise_wallet(k): (v if isinstance(v, dict) else {}) for k, v in raw.items() if is_valid_wallet(normalise_wallet(k))}
         out: Dict[str, Dict[str, Any]] = {}
+        if isinstance(raw, dict) and raw:
+            for key, value in raw.items():
+                w = normalise_wallet(key)
+                if not is_valid_wallet(w):
+                    continue
+                cfg = dict(value) if isinstance(value, dict) else {}
+                gate = self._gate_cfg(w)
+                if gate:
+                    # live_config wins; wallet_gate fills compatibility gaps only.
+                    cfg.setdefault("mode", gate.get("mode"))
+                    if "enabled" not in cfg and "live_enabled" in gate:
+                        cfg["enabled"] = bval(gate.get("live_enabled"), True)
+                out[w] = cfg
+            return out
         if MANUAL_WALLETS_FILE.exists():
             for line in MANUAL_WALLETS_FILE.read_text(encoding="utf-8-sig").splitlines():
                 w = normalise_wallet(line)
                 if is_valid_wallet(w):
-                    out[w] = {"mode": "OFF", "enabled": True}
+                    gate = self._gate_cfg(w)
+                    out[w] = {"mode": gate.get("mode", "OFF") if gate else "OFF", "enabled": True}
+        return out
+
+    def _gate_cfg(self, wallet: str) -> Dict[str, Any]:
+        wallet = normalise_wallet(wallet)
+        raw = self.wallet_gate.get(wallet)
+        if not isinstance(raw, dict):
+            return {}
+        out = dict(raw)
+        # Compatibility with older app gate schema.
+        if "mode" not in out:
+            if bval(out.get("live_enabled"), False):
+                out["mode"] = "ON"
+            elif str(out.get("off_mode", "")).upper() in {"CLO", "CLOSE_ONLY"}:
+                out["mode"] = "CLO"
+            else:
+                out["mode"] = "OFF"
+        if str(out.get("mode", "")).upper() == "CLOSE_ONLY":
+            out["mode"] = "CLO"
         return out
 
     def wallet_cfg(self, wallet: str) -> Dict[str, Any]:
@@ -324,6 +359,8 @@ class ConfigManager:
     def wallet_mode(self, wallet: str) -> str:
         cfg = self.wallet_cfg(wallet)
         mode = str(cfg.get("mode", cfg.get("gate", "OFF"))).upper().strip()
+        if mode == "CLOSE_ONLY":
+            mode = "CLO"
         return mode if mode in {"ON", "CLO", "OFF"} else "OFF"
 
     def wallet_enabled(self, wallet: str) -> bool:
@@ -830,10 +867,10 @@ class LeaderFillIngestor:
 
 
 class WSManager:
-    """Small WS manager shell.
+    """Small first-class WS manager.
 
-    Full production deployment can run start() in a thread. The clean core only
-    consumes queued fills and writes health. No business logic lives here.
+    WS owns transport and health only. It queues LeaderFill objects for the single
+    reconciliation cycle; it never sends orders and never mutates the manual ledger.
     """
     def __init__(self, wallets: Iterable[str], ingestor: LeaderFillIngestor):
         self.wallets = list(wallets)[:MAX_WALLETS]
@@ -841,7 +878,80 @@ class WSManager:
         self.queue: "queue.Queue[LeaderFill]" = queue.Queue(maxsize=50000)
         self.last_msg_ms: Dict[str, int] = {w: 0 for w in self.wallets}
         self.reconnect_count: Dict[str, int] = {w: 0 for w in self.wallets}
+        self.last_error: Dict[str, str] = {w: "" for w in self.wallets}
         self.enabled = bval(os.getenv("HL_LIVE_WS_ENABLED"), False)
+        self.stop_event = threading.Event()
+        self.threads: List[threading.Thread] = []
+        self.apps: List[Any] = []
+
+    def start(self) -> None:
+        if not self.enabled or websocket is None or self.threads:
+            return
+        for wallet in self.wallets:
+            t = threading.Thread(target=self._wallet_thread, args=(wallet,), daemon=True, name=f"HLCoreWS-{wallet[-6:]}")
+            self.threads.append(t)
+            t.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        for app in list(self.apps):
+            try:
+                app.close()
+            except Exception:
+                pass
+
+    def _wallet_thread(self, wallet: str) -> None:
+        backoff = 1.0
+        while not self.stop_event.is_set():
+            try:
+                def on_open(ws: Any) -> None:
+                    self.last_msg_ms[wallet] = utc_now_ms()
+                    ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "userFills", "user": wallet}}))
+
+                def on_message(_ws: Any, message: str) -> None:
+                    self._on_message(wallet, message)
+
+                def on_error(_ws: Any, err: Any) -> None:
+                    self.last_error[wallet] = str(err)
+
+                def on_close(_ws: Any, *_args: Any) -> None:
+                    self.reconnect_count[wallet] = int(self.reconnect_count.get(wallet, 0)) + 1
+
+                app = websocket.WebSocketApp(HL_WS_URL, on_open=on_open, on_message=on_message, on_error=on_error, on_close=on_close)
+                self.apps.append(app)
+                app.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception as exc:
+                self.last_error[wallet] = str(exc)
+            if self.stop_event.wait(min(30.0, backoff)):
+                break
+            backoff = min(30.0, backoff * 1.5)
+
+    def _on_message(self, wallet: str, message: str) -> None:
+        self.last_msg_ms[wallet] = utc_now_ms()
+        try:
+            payload = json.loads(message)
+            data = payload.get("data", payload) if isinstance(payload, dict) else payload
+            if isinstance(data, dict) and data.get("isSnapshot"):
+                fills = data.get("fills") or data.get("userFills") or []
+                source = "WS_SNAPSHOT"
+            else:
+                fills = (data.get("fills") or data.get("userFills")) if isinstance(data, dict) else data
+                source = "WS_CAPTURED"
+            if isinstance(fills, dict):
+                fills = [fills]
+            if not isinstance(fills, list):
+                return
+            for raw in fills:
+                if not isinstance(raw, dict):
+                    continue
+                fill = self.ingestor.parse_fill(wallet, raw, source)
+                if fill:
+                    try:
+                        self.queue.put_nowait(fill)
+                    except queue.Full:
+                        log_error("ws_queue_full", RuntimeError("WS queue full"))
+        except Exception as exc:
+            log_error("ws_message", exc)
 
     def drain(self) -> List[LeaderFill]:
         out: List[LeaderFill] = []
@@ -872,7 +982,15 @@ class WSManager:
                 stale_count += 1
             else:
                 open_count += 1
-            wallets[w] = {"status": status, "current_health_grade": grade, "last_message_ms": last, "stale_ms": stale_ms, "reconnect_count": self.reconnect_count.get(w, 0)}
+            wallets[w] = {
+                "status": status,
+                "current_health_grade": grade,
+                "last_message_ms": last,
+                "stale_ms": stale_ms,
+                "reconnect_count": self.reconnect_count.get(w, 0),
+                "last_error": self.last_error.get(w, ""),
+                "thread_alive": any(t.is_alive() and w[-6:] in t.name for t in self.threads),
+            }
         worst = "DEGRADED" if stale_count else "OK"
         summary = {
             "wallet_count": len(self.wallets),
@@ -887,24 +1005,84 @@ class WSManager:
         return payload
 
 
-class CopyFillMatcher:
-    def __init__(self, ledger: ManualLedger, audit: AuditLogWriter):
-        self.ledger = ledger
-        self.audit = audit
-
+class CopyAccountIngestor:
     @staticmethod
     def copy_fill_id(raw: Dict[str, Any]) -> str:
         return str(raw.get("copy_fill_id") or raw.get("hash") or raw.get("tid") or raw.get("oid") or stable_hash([
             raw.get("coin"), raw.get("side", raw.get("dir")), raw.get("px", raw.get("price")), raw.get("sz", raw.get("size")), raw.get("time"), raw.get("intent_id"),
         ]))
 
+    def poll_copy_account_fills(self, user_wallet: str, start_ms: int, end_ms: Optional[int] = None) -> Tuple[List[Dict[str, Any]], str]:
+        user_wallet = normalise_wallet(user_wallet)
+        if not is_valid_wallet(user_wallet):
+            return [], "COPY_ACCOUNT_NOT_CONFIGURED"
+        if requests is None:
+            return [], "COPY_ACCOUNT_POLL_NETWORK_ERROR"
+        start = max(0, int(start_ms))
+        end = int(end_ms or utc_now_ms())
+        out: List[Dict[str, Any]] = []
+        for _ in range(POLL_MAX_PAGES_PER_WALLET):
+            payload = {"type": "userFillsByTime", "user": user_wallet, "startTime": start, "endTime": end, "aggregateByTime": False}
+            try:
+                r = requests.post(HL_INFO_URL, json=payload, timeout=HTTP_TIMEOUT_SEC)
+                data = r.json()
+                if not isinstance(data, list):
+                    return out, "COPY_ACCOUNT_POLL_NETWORK_ERROR"
+                page: List[Dict[str, Any]] = []
+                for raw in data:
+                    if isinstance(raw, dict):
+                        item = dict(raw)
+                        item.setdefault("copy_fill_id", self.copy_fill_id(item))
+                        item.setdefault("timestamp_ms", int(fnum(item.get("time", item.get("timestamp_ms")), utc_now_ms())))
+                        page.append(item)
+                out.extend(page)
+                if len(data) < 2000 or not page:
+                    break
+                start = max(int(fnum(x.get("timestamp_ms"), start)) for x in page) + 1
+            except Exception as exc:
+                log_error("poll_copy_account_fills", exc)
+                return out, "COPY_ACCOUNT_POLL_NETWORK_ERROR"
+        out.sort(key=lambda r: (int(fnum(r.get("timestamp_ms"), 0)), str(r.get("copy_fill_id"))))
+        return out, "COPY_ACCOUNT_POLLED"
+
+
+class CopyFillMatcher:
+    def __init__(self, ledger: ManualLedger, audit: AuditLogWriter):
+        self.ledger = ledger
+        self.audit = audit
+        self.matched_intent_ids = {str(r.get("intent_id") or "") for r in read_csv_rows(LIVE_FILLS_CSV) if r.get("intent_id")}
+
+    @staticmethod
+    def copy_fill_id(raw: Dict[str, Any]) -> str:
+        return CopyAccountIngestor.copy_fill_id(raw)
+
+    def _choose_intent(self, copy_fill: Dict[str, Any], intents_by_id: Dict[str, Intent]) -> Optional[Intent]:
+        explicit = str(copy_fill.get("intent_id") or "")
+        if explicit and explicit in intents_by_id:
+            return intents_by_id[explicit]
+        coin = str(copy_fill.get("coin") or "").upper()
+        raw_side = str(copy_fill.get("side") or copy_fill.get("dir") or "").lower()
+        side = "BUY" if raw_side in {"b", "buy", "open long", "close short"} or ("long" in raw_side and "short" not in raw_side) else "SELL"
+        ts = int(fnum(copy_fill.get("timestamp_ms", copy_fill.get("time")), utc_now_ms()))
+        window_ms = int(os.getenv("HL_LIVE_COPY_MATCH_WINDOW_MS", "600000"))
+        candidates: List[Intent] = []
+        for intent in intents_by_id.values():
+            if intent.intent_id in self.matched_intent_ids:
+                continue
+            if intent.fill.coin != coin or intent.copy_side != side:
+                continue
+            if intent.fill.timestamp_ms <= ts + window_ms and abs(ts - intent.fill.timestamp_ms) <= window_ms:
+                candidates.append(intent)
+        candidates.sort(key=lambda i: (abs(ts - i.fill.timestamp_ms), i.fill.timestamp_ms, i.intent_id))
+        return candidates[0] if len(candidates) == 1 else None
+
     def match_and_apply(self, copy_fill: Dict[str, Any], intents_by_id: Dict[str, Intent]) -> bool:
-        intent_id = str(copy_fill.get("intent_id") or "")
-        intent = intents_by_id.get(intent_id)
+        intent = self._choose_intent(copy_fill, intents_by_id)
         if not intent:
             self.audit.append_reconciliation("COPY_FILL", "COPY_FILL_UNMATCHED", copy_fill_id=self.copy_fill_id(copy_fill), coin=copy_fill.get("coin", ""), notes="copy fill has no matching intent")
             return False
         result = self.ledger.apply_copy_fill(intent, copy_fill)
+        self.matched_intent_ids.add(intent.intent_id)
         self.audit.append_live_fill({
             "created_at": utc_now_iso(),
             "created_at_ms": utc_now_ms(),
@@ -1035,13 +1213,14 @@ class LiveCopyCore:
         self.ws = WSManager(self.wallets, self.ingestor)
         self.intent_builder = IntentBuilder(self.cfg, self.ledger)
         self.sender = SenderGateway(self.cfg, self.audit)
+        self.copy_ingestor = CopyAccountIngestor()
         self.matcher = CopyFillMatcher(self.ledger, self.audit)
         self.reconciler = ExchangeReconciler(self.ledger, self.audit)
         self.state_writer = ServiceStateWriter()
         self.source_csv = source_csv or RAW_LEADER_FILLS_CSV
         self.intents_by_id: Dict[str, Intent] = {}
 
-    def run_cycle(self, use_source_csv: bool = True, poll_live: bool = False, reconcile_exchange: bool = False) -> CycleSummary:
+    def run_cycle(self, use_source_csv: bool = True, poll_live: bool = False, poll_copy: bool = False, reconcile_exchange: bool = False) -> CycleSummary:
         summary = CycleSummary(auto_send_enabled=self.cfg.auto_send_enabled, active_wallets=len(self.wallets))
         started = time.monotonic()
         try:
@@ -1079,6 +1258,24 @@ class LiveCopyCore:
                 elif send_status == "REAL_SENDER_NOT_CONFIGURED" and intent.send_allowed and self.cfg.auto_send_enabled:
                     # Visible decision only; send_attempts.csv remains pure.
                     self.audit.append_reconciliation("SEND_PRECHECK", "REAL_SENDER_NOT_CONFIGURED", leader_wallet=fill.leader_wallet, leader_fill_id=fill.leader_fill_id, intent_id=intent.intent_id, coin=fill.coin, notes="auto-send enabled but real sender unavailable; no exchange attempt made")
+            if poll_copy:
+                start_ms = max(0, int(fnum(load_json(SERVICE_STATE_FILE, {}).get("last_copy_poll_ms"), 0)) - POLL_OVERLAP_MS)
+                copy_fills, copy_status = self.copy_ingestor.poll_copy_account_fills(USER_WALLET, start_ms, utc_now_ms())
+                summary.copy_account_status = copy_status
+                for raw_copy in copy_fills:
+                    copy_id = CopyAccountIngestor.copy_fill_id(raw_copy)
+                    if not self.dedupe.accept_copy(copy_id):
+                        continue
+                    summary.copy_fills_seen += 1
+                    if self.matcher.match_and_apply(raw_copy, self.intents_by_id):
+                        summary.copy_fills_matched += 1
+                        summary.ledger_updates += 1
+                    else:
+                        summary.copy_fills_unmatched += 1
+                if copy_status not in {"COPY_ACCOUNT_POLLED", "COPY_ACCOUNT_NOT_CONFIGURED"}:
+                    summary.network_errors += 1
+            else:
+                summary.copy_account_status = "COPY_ACCOUNT_POLL_DISABLED"
             if reconcile_exchange:
                 summary.exchange_recon_status = self.reconciler.compare_snapshot()
             else:
@@ -1192,6 +1389,10 @@ def run_self_test() -> None:
         summary = core.run_cycle(use_source_csv=True, poll_live=False, reconcile_exchange=False)
         _check("mock auto-send writes one send_attempt", summary.leader_sends_attempted == 1 and len(read_csv_rows(SEND_ATTEMPTS_CSV)) == 1)
 
+        # Copy fill fallback matching: exchange fills do not carry our internal intent_id.
+        core.matcher.match_and_apply({"coin": "ETH", "side": "BUY", "price": "1000", "size": "0.01", "time": 2050, "hash": "copy-eth-1"}, core.intents_by_id)
+        _check("copy fill fallback matches by coin/side/time", len(read_csv_rows(LIVE_FILLS_CSV)) == 1)
+
         # Per-wallet sleeve isolation.
         ledger = ManualLedger()
         audit = AuditLogWriter()
@@ -1242,15 +1443,34 @@ def main() -> None:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--source-file", default=str(RAW_LEADER_FILLS_CSV))
     parser.add_argument("--poll-live", action="store_true", help="Use read-only userFillsByTime polling for leaders")
+    parser.add_argument("--poll-copy", action="store_true", help="Use read-only userFillsByTime polling for the copy account")
     parser.add_argument("--reconcile-exchange", action="store_true", help="Fetch clearinghouseState and compare manual ledger")
+    parser.add_argument("--ws", action="store_true", help="Start WS manager before running cycles; requires HL_LIVE_WS_ENABLED=1")
+    parser.add_argument("--loop", action="store_true", help="Run repeatedly")
+    parser.add_argument("--interval", type=float, default=5.0)
     args = parser.parse_args()
     if args.self_test:
         run_self_test()
         return
-    if args.once:
+    if args.once or args.loop:
         core = LiveCopyCore(source_csv=Path(args.source_file))
-        summary = core.run_cycle(use_source_csv=Path(args.source_file).exists(), poll_live=args.poll_live, reconcile_exchange=args.reconcile_exchange)
-        print(json.dumps(asdict(summary), indent=2, sort_keys=True))
+        if args.ws:
+            core.ws.enabled = True
+            core.ws.start()
+        try:
+            while True:
+                summary = core.run_cycle(
+                    use_source_csv=Path(args.source_file).exists(),
+                    poll_live=args.poll_live,
+                    poll_copy=args.poll_copy,
+                    reconcile_exchange=args.reconcile_exchange,
+                )
+                print(json.dumps(asdict(summary), indent=2, sort_keys=True))
+                if not args.loop:
+                    break
+                time.sleep(max(0.5, float(args.interval)))
+        finally:
+            core.ws.stop()
         return
     parser.print_help()
 
