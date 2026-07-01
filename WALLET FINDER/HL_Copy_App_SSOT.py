@@ -7316,8 +7316,9 @@ def api_cache_health() -> JSONResponse:
             rs = dict(_MODEL_REFRESH_STATUS)
         with _MODEL_BUILD_LOCK:
             model_present = bool(_MODEL_CACHE.get("state"))
+        status = "FRESH" if (rs.get("ok") and not rs.get("in_progress")) else "STALE_REBUILDING" if rs.get("in_progress") else "STALE_BLOCKED" if rs.get("error") else "STALE"
         return JSONResponse({
-            "status": "FRESH" if (rs.get("ok") and not rs.get("in_progress")) else "STALE_REBUILDING" if rs.get("in_progress") else "STALE",
+            "status": status,
             "model_state_present": model_present,
             "refresh_status": rs,
             "cache_loaded_at": utc_now_iso(),
