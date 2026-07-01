@@ -1,0 +1,262 @@
+﻿diff --git "a/C:\\Users\\wigmore\\trading_stack\\Hyperliquid scanner\\WALLET FINDER\\proofs\\PE_CACHE_REBUILD_FIX_20260701_083910\\HL_Copy_App_SSOT.py.pre_cache_fix" "b/C:\\Users\\wigmore\\trading_stack\\Hyperliquid scanner\\WALLET FINDER\\HL_Copy_App_SSOT.py"
+index 3ee6c0a..82ceb73 100644
+--- "a/C:\\Users\\wigmore\\trading_stack\\Hyperliquid scanner\\WALLET FINDER\\proofs\\PE_CACHE_REBUILD_FIX_20260701_083910\\HL_Copy_App_SSOT.py.pre_cache_fix"	
++++ "b/C:\\Users\\wigmore\\trading_stack\\Hyperliquid scanner\\WALLET FINDER\\HL_Copy_App_SSOT.py"	
+@@ -66,6 +66,8 @@ import time
+ 
+ import threading
+ 
++import traceback
++
+ import urllib.request
+ 
+ from dataclasses import asdict, dataclass, field, replace
+@@ -120,6 +122,10 @@ PORTFOLIO_HISTORY_FILE = DATA_DIR / "portfolio_history.json"
+ 
+ EQUITY_HISTORY_FILE = DATA_DIR / "equity_history.json"
+ 
++APP_CACHE_DIR = DATA_DIR / "app_cache"
++
++MODEL_DASHBOARD_LAST_GOOD_HTML_FILE = APP_CACHE_DIR / "model_dashboard_last_good.html"
++
+ UI_STATE_FILE = BASE_DIR / "ui_state.json"
+ 
+ WALLET_GATE_FILE = BASE_DIR / "wallet_gate.json"
+@@ -280,6 +286,12 @@ async def _startup_build():
+ 
+         )
+ 
++        if _CACHE_FRESHNESS.get("status") in (CACHE_STALE, CACHE_MISSING, CACHE_STALE_BLOCKED):
++
++            if _kick_model_cache_refresh_background():
++
++                _CACHE_FRESHNESS["status"] = CACHE_STALE_REBUILDING
++
+         return
+ 
+ 
+@@ -348,7 +360,7 @@ async def _startup_build():
+ 
+             # --- stale / missing: load old cache first for instant UI ----------
+ 
+-            if status in (CACHE_STALE_REBUILDING, CACHE_STALE_BLOCKED) and APP_MODEL_STATE_JSON.exists():
++            if status in (CACHE_STALE, CACHE_STALE_REBUILDING, CACHE_STALE_BLOCKED) and APP_MODEL_STATE_JSON.exists():
+ 
+                 print("[cache] STALE — loading old cache for instant UI, then rebuilding", flush=True)
+ 
+@@ -386,6 +398,12 @@ async def _startup_build():
+ 
+             if _MODEL_CACHE.get("state") is not None:
+ 
++                if status in (CACHE_STALE, CACHE_STALE_REBUILDING, CACHE_STALE_BLOCKED):
++
++                    if _kick_model_cache_refresh_background():
++
++                        _CACHE_FRESHNESS["status"] = CACHE_STALE_REBUILDING
++
+                 return
+ 
+             # --- full rebuild ----------------------------------------------------
+@@ -567,6 +585,38 @@ _RENDER_DEBOUNCE_TIMER = None
+ 
+ _RENDER_DIRTY = False  # True when a render was requested while one was in progress
+ 
++_MODEL_REFRESH_LOCK = threading.RLock()
++
++_MODEL_REFRESH_IN_PROGRESS = False
++
++_MODEL_REFRESH_STATUS: Dict[str, Any] = {
++
++    "in_progress": False,
++
++    "queued_at": "",
++
++    "started_at": "",
++
++    "finished_at": "",
++
++    "ok": False,
++
++    "error": "",
++
++    "traceback": "",
++
++    "state_present": False,
++
++    "html_present": False,
++
++    "last_marker": "IDLE",
++
++}
++
++_MODEL_DASHBOARD_HTML_CACHE_LOCK = threading.RLock()
++
++_MODEL_DASHBOARD_HTML_CACHE: Dict[str, Any] = {"html": "", "built_at": 0.0, "state_built_at": 0.0}
++
+ 
+ 
+ 
+@@ -699,6 +749,8 @@ SOURCE_FILES: List[Path] = [
+ 
+ CACHE_FRESH = "FRESH"
+ 
++CACHE_STALE = "STALE"
++
+ CACHE_STALE_REBUILDING = "STALE_REBUILDING"
+ 
+ CACHE_STALE_BLOCKED = "STALE_BLOCKED"
+@@ -819,7 +871,7 @@ def _check_cache_freshness() -> Dict[str, Any]:
+ 
+     else:
+ 
+-        status = CACHE_STALE_REBUILDING  # will be overwritten if a build is in progress
++        status = CACHE_STALE
+ 
+         error = f"source {newest_src_name} newer than cache"
+ 
+@@ -9601,6 +9653,8 @@ def render_home(state: Dict[str, Any], refresh_chart: bool = True) -> str:
+ 
+         CACHE_FRESH: ("#0d419d", "#58a6ff"),
+ 
++        CACHE_STALE: ("#3d2d00", "#d29922"),
++
+         CACHE_STALE_REBUILDING: ("#3d2d00", "#d29922"),
+ 
+         CACHE_STALE_BLOCKED: ("#3d1515", "#ff4d4f"),
+@@ -9635,7 +9689,7 @@ def render_home(state: Dict[str, Any], refresh_chart: bool = True) -> str:
+ 
+     )
+ 
+-    if fr_status in (CACHE_STALE_REBUILDING, CACHE_STALE_BLOCKED) and stale_src:
++    if fr_status in (CACHE_STALE, CACHE_STALE_REBUILDING, CACHE_STALE_BLOCKED) and stale_src:
+ 
+         banner += f" &mdash; stale source: <b>{stale_src}</b>"
+ 
+@@ -10224,7 +10278,41 @@ def api_cache_health() -> JSONResponse:
+ 
+     import datetime as _dt
+ 
+-    fr = dict(_CACHE_FRESHNESS)
++    global _CACHE_FRESHNESS
++
++    fr = _check_cache_freshness()
++
++    cached_state = _MODEL_CACHE.get("state")
++
++    if isinstance(cached_state, dict):
++
++        fr["model_asof"] = cached_state.get("model_asof", "")
++
++    with _MODEL_REFRESH_LOCK:
++
++        refresh_status = dict(_MODEL_REFRESH_STATUS)
++
++        refresh_in_progress = bool(_MODEL_REFRESH_IN_PROGRESS or refresh_status.get("in_progress"))
++
++    if refresh_in_progress:
++
++        fr["status"] = CACHE_STALE_REBUILDING
++
++    elif fr.get("status") != CACHE_FRESH and refresh_status.get("error"):
++
++        fr["status"] = CACHE_STALE_BLOCKED
++
++        fr["error"] = refresh_status.get("error") or fr.get("error", "")
++
++    fr["cache_loaded_at"] = _CACHE_FRESHNESS.get("cache_loaded_at", "")
++
++    fr["refresh_status"] = refresh_status
++
++    fr["app_health"] = dict(APP_HEALTH)
++
++    fr["model_state_present"] = bool(cached_state)
++
++    _CACHE_FRESHNESS = dict(fr)
+ 
+     fr["cache_mtime_iso"] = (
+ 
+@@ -12074,7 +12162,39 @@ def reset_app_history() -> JSONResponse:
+ 
+ def snapshot() -> JSONResponse:
+ 
+-    state = get_model_state_cached(max_age_sec=0.0, force=True)
++    fr = _check_cache_freshness()
++
++    cached_state = _MODEL_CACHE.get("state")
++
++    if fr.get("status") != CACHE_FRESH:
++
++        queued = _kick_model_cache_refresh_background()
++
++        with _MODEL_REFRESH_LOCK:
++
++            refresh_status = dict(_MODEL_REFRESH_STATUS)
++
++        return JSONResponse(
++
++            {
++
++                "ok": True,
++
++                "status": "REBUILD_QUEUED" if queued else "REBUILD_ALREADY_RUNNING",
++
++                "cache_status": fr,
++
++                "refresh_status": refresh_status,
++
++                "note": "Snapshot rebuild is running in background; poll /api/cache-health for freshness.",
++
++            },
++
++            status_code=202,
++
++        )
++
++    state = cached_state if isinstance(cached_state, dict) else get_model_state_cached(max_age_sec=3600.0, force=False)
+ 
+     SNAP_DIR.mkdir(parents=True, exist_ok=True)
+ 
+@@ -13695,10 +13815,11 @@ def _kick_model_cache_refresh_background() -> bool:
+         if _MODEL_REFRESH_IN_PROGRESS:
+             return False
+         _MODEL_REFRESH_IN_PROGRESS = True
++        _MODEL_REFRESH_STATUS["queued_at"] = utc_now_iso()
+         _MODEL_REFRESH_STATUS["last_marker"] = "MODEL_DASHBOARD_BACKGROUND_QUEUED"
+ 
+     def _refresh() -> None:
+-        global _MODEL_REFRESH_IN_PROGRESS
++        global _MODEL_REFRESH_IN_PROGRESS, _CACHE_FRESHNESS
+         started = time.time()
+         with _MODEL_REFRESH_LOCK:
+             _MODEL_REFRESH_STATUS.update({
+@@ -13714,15 +13835,18 @@ def _kick_model_cache_refresh_background() -> bool:
+             })
+         try:
+             APP_HEALTH["last_build_started_at"] = utc_now_iso()
+-            refreshed = build_model_state()
+-            refreshed_built_at = time.time()
+             with _MODEL_BUILD_LOCK:
++                refreshed = build_model_state()
++                refreshed_built_at = time.time()
+                 _MODEL_CACHE["state"] = refreshed
+                 _MODEL_CACHE["built_at"] = refreshed_built_at
+             APP_HEALTH["last_build_finished_at"] = utc_now_iso()
+             APP_HEALTH["last_build_seconds"] = round(time.time() - started, 4)
+             APP_HEALTH["last_error"] = ""
+             APP_HEALTH["build_count"] = int(APP_HEALTH.get("build_count", 0)) + 1
++            _CACHE_FRESHNESS = _check_cache_freshness()
++            _CACHE_FRESHNESS["cache_loaded_at"] = utc_now_iso()
++            _CACHE_FRESHNESS["model_asof"] = refreshed.get("model_asof", "")
+             _render_model_dashboard_html_cached(refreshed, refreshed_built_at)
+             with _MODEL_REFRESH_LOCK:
+                 _MODEL_REFRESH_STATUS.update({
+@@ -13738,6 +13862,9 @@ def _kick_model_cache_refresh_background() -> bool:
+             tb = traceback.format_exc()
+             APP_HEALTH["last_error"] = err
+             APP_HEALTH["last_build_seconds"] = round(time.time() - started, 4)
++            _CACHE_FRESHNESS = _check_cache_freshness()
++            _CACHE_FRESHNESS["status"] = CACHE_STALE_BLOCKED
++            _CACHE_FRESHNESS["error"] = err
+             with _MODEL_REFRESH_LOCK:
+                 _MODEL_REFRESH_STATUS.update({
+                     "ok": False,

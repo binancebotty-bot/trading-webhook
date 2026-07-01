@@ -1,0 +1,156 @@
+﻿ M .gitignore
+ M 3hl_stage2_useful_wallet_scanner.py
+ m "LIVE WALLET TRADING"
+ D Unused/hl_probe.py
+ D Unused/wallet_copyability_debug.py
+ D dashboard_app.py
+ D hl_stage2/HL_Copy_App.py
+ M hl_stage2/HL_Copy_App_SSOT.py
+ D hl_stage2/HL_Copy_Engine.py
+ M hl_stage2/HL_Copy_Engine_SSOT.py
+ D hl_stage2/HL_Live_Copy_Service.py
+ M hl_stage2/HL_Live_Copy_Service_Core.py
+ D hl_stage2/test_harness.py
+ M hl_stage2/test_harness_ssot.py
+ M wallet_copyability_test.py
+?? .aider.chat.history.md
+?? .aider.input.history
+?? .codex/
+?? .graphifyignore
+?? .opencode/
+?? .run/
+?? AGENTS.md
+?? CLAUDE.md
+?? GRAPHIFY_PROJECT_README.md
+?? "HL link"
+?? HL_Live_Copy_Shadow_App.py
+?? HL_Live_Copy_Shadow_Core.py
+?? "HYPERLIQUID SCANNER RUN INSTRUCTIONS"
+?? HYPERLIQUID_FAILURE_ANALYSIS.md
+?? HYPERLIQUID_PIPELINE.H4s
+?? HYPERLIQUID_PIPELINE.md
+?? HYPERLIQUID_REBUILD_COUNCIL_PLAN.md
+?? HYPERLIQUID_SCANNER_WORKING_UNDERSTANDING.md
+?? "Hyperliquid Wallet Dashboard First Draft.html"
+?? LIVE_MONEY_REVIEW_FINDINGS.md
+?? "Live Copy Final/"
+?? TRUTH_RESTORATION_SUMMARY.md
+?? "USER MANUAL V1"
+?? "WALLET FINDER/"
+?? "WALLETS TO TRACK"
+?? WINAGENT_HYPERLIQUID_OPS_REFINED.md
+?? WINAGENT_HYPERLIQUID_OPS_REFINEMENT.md
+?? WinAgent_Hyperliquid_Refined_Ops.md
+?? _CLEANUP_QUARANTINE_/
+?? _endpoint_snippet.txt
+?? _health_links_snippet.txt
+?? _purge_js_snippet.txt
+?? _test_build.py
+?? _wallet_detail.txt
+?? analyze_wallets.py
+?? app.py
+?? check_titles.py
+?? check_titles2.py
+?? check_titles3.py
+?? check_trades.py
+?? copycandidates.txt
+?? enrich_summary_mtm.py
+?? extract_hl_leaderboard_wallets.py
+?? fix_toggle.py
+?? fix_toggle2.py
+?? fix_toggle3.py
+?? fix_toggle4.py
+?? fix_toggle5.py
+?? graphify-out.backup_20260611_114731/
+?? graphify-out.backup_20260611_124439/
+?? graphify-out.empty_or_prior_backup_20260611_114824/
+?? graphify-out/
+?? graphify.cmd
+?? graphify.cmd.backup_20260611_124057
+?? graphify.cmd.bad_literal_backup_20260611_124120
+?? graphify_query.ps1
+?? graphify_query.py
+?? hl_mtm_lookup.py
+?? hl_stage1_5_mtm_filter.py
+?? hl_stage2.env
+?? hl_stage2/.gitignore
+?? hl_stage2/.graphifyignore
+?? hl_stage2/CONVERGENCE_SIDECAR_RUNBOOK.md
+?? hl_stage2/CONVERGENCE_WIRING_ROLLBACK.md
+?? hl_stage2/GPTDEV/
+?? hl_stage2/GRAPHIFY_PROJECT_README.md
+?? hl_stage2/HL_Copy_App_SSOT.py.bak_truth_visibility_v4_20260511_203137
+?? hl_stage2/HL_Copy_App_SSOT.py.bak_truth_visibility_v5_20260511_203215
+?? hl_stage2/HL_Live_Copy_Service_Core.py.bak_copy_fill_xproc_dedupe_20260512_104411
+?? hl_stage2/HL_Live_Copy_Service_Core.py.bak_copy_fill_xproc_dedupe_b64_20260512_105115
+?? hl_stage2/HL_Live_Copy_Service_Core.py.bak_copy_fill_xproc_dedupe_v2_20260512_104519
+?? hl_stage2/HL_Live_Copy_Service_Core.py.bak_false_active_red_20260513_155840
+?? hl_stage2/HL_Live_Copy_Service_Core.py.bak_hot_config_reload_20260511_212819
+?? hl_stage2/HL_Live_Copy_Service_Core.py.bak_import_re_20260512_110315
+?? hl_stage2/HL_Live_Copy_Service_Core.py.bak_latency_recon_restart_filter_20260513_160804
+?? hl_stage2/HL_Live_Copy_Service_Core.py.bak_pre_convergence_wiring_20260602
+?? hl_stage2/HL_Live_Copy_Service_Core.py.bak_prestart_latency_amber_20260513_160530
+?? hl_stage2/LIVE_SPLIT_PLAN.md
+?? hl_stage2/MONITOR_DIVERGENCE_STATUS.md
+?? hl_stage2/READONLY_HARNESS_RUN_20260530_235100.txt
+?? hl_stage2/REALISED_VS_MTM_DRAWDOWN.md
+?? hl_stage2/SEPARATION_REPORT.md
+?? "hl_stage2/TEST DATA"
+?? hl_stage2/_health_gen.py
+?? hl_stage2/_restart_plan_gen.py
+?? hl_stage2/all_trades.zip
+?? hl_stage2/brentoil_investigation_out/
+?? hl_stage2/brentoil_sign_flip_investigation.py
+?? hl_stage2/build_hl_asset_universe_cache.py
+?? hl_stage2/clo_containment_out/
+?? hl_stage2/codex_independent_verification_20260604T084313Z.md
+?? hl_stage2/codex_sleeve_aware_verify.py
+?? hl_stage2/codex_sleeve_verification_out/
+?? hl_stage2/convergence_shadow.py
+?? hl_stage2/convergence_would_send_sidecar.py
+?? hl_stage2/copy_selection_run/
+?? hl_stage2/copyable_wallets.csv.pre_mtm_gate_backup
+?? hl_stage2/core_integration_harness.py
+?? hl_stage2/core_integration_harness_out/
+?? hl_stage2/dangerous_diff_investigation.py
+?? hl_stage2/dangerous_diff_investigation_out/
+?? hl_stage2/disabled_core_stability_monitor.py
+?? hl_stage2/durable_core_watchdog.py
+?? hl_stage2/fetch_hl_portfolios.py
+?? hl_stage2/fresh_fill_review.py
+?? hl_stage2/graphify-out.backup_20260611_124439/
+?? hl_stage2/graphify-out/
+?? hl_stage2/graphify.cmd
+?? hl_stage2/graphify_query.py
+?? hl_stage2/hl_info_readonly.py
+?? hl_stage2/hl_live_copy_audit/
+?? hl_stage2/live_health_out/
+?? hl_stage2/live_risk_containment_out/
+?? hl_stage2/live_risk_containment_plan.py
+?? hl_stage2/manual_wallets.txt
+?? hl_stage2/monitor_out/
+?? hl_stage2/operator_readonly_watchdog.py
+?? hl_stage2/post_patch_restart_send_check.py
+?? hl_stage2/process_control_out/
+?? hl_stage2/purged_wallets.txt
+?? hl_stage2/recent_trade_replay_comparator.py
+?? hl_stage2/replay_compare_out/
+?? hl_stage2/restart_readiness_out/
+?? hl_stage2/run_integrity_gate.py
+?? hl_stage2/send_attempt_breakdown.py
+?? hl_stage2/shadow_comparator.py
+?? hl_stage2/shadow_compare_out/
+?? hl_stage2/sleeve_aware_verification.py
+?? hl_stage2/stale_leader_diag_out/
+?? hl_stage2/stale_leader_diagnosis.py
+?? hl_stage2/test_live_copy_integrity_gate.py
+?? hl_stage2/triage_allowed_risk.py
+?? hl_stage2/triage_no_fills.py
+?? hl_stage2/triage_post_config_decisions.py
+?? hl_stage2/visible_stack_monitor.py
+?? leaderboard_wallets.txt
+?? manual_wallets.txt
+?? nul
+?? server.err
+?? templates/
+?? universe_builder.py
