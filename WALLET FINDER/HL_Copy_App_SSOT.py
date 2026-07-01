@@ -390,21 +390,18 @@ async def _startup_build():
 
                         print(f"[startup] Pre-render failed (non-fatal): {exc}", flush=True)
 
-                except Exception:
-
-                    pass  # corrupt — fall through to full rebuild
-
-
+                except Exception as exc:
+                    print(f"[cache] Failed to load stale cache ({exc}) — will attempt full rebuild", flush=True)
 
             if _MODEL_CACHE.get("state") is not None:
-
                 if _cache_rebuild_required(_CACHE_FRESHNESS):
-
+                    # Stale cache loaded — rebuild in background, serve old UI now
                     if _kick_model_cache_refresh_background():
-
                         _CACHE_FRESHNESS["status"] = CACHE_STALE_REBUILDING
-
                 return
+            # State is None (load failed) — fall through to synchronous full rebuild
+            if _cache_rebuild_required(_CACHE_FRESHNESS):
+                print("[cache] No model state available — initiating full rebuild", flush=True)
 
             # --- full rebuild ----------------------------------------------------
 
@@ -10169,24 +10166,28 @@ def wants_json_response(request: Request) -> bool:
 @app.get("/", response_class=HTMLResponse)
 
 def home(request: Request) -> str:
-
     if _MODEL_CACHE.get("state") is None:
-
-        return HTMLResponse(
-
-            "<html><head><meta http-equiv='refresh' content='5'>"
-
-            "<title>Wallet Proof Engine</title></head><body>"
-
-            "<h2>Building model state from fills...</h2>"
-
-            "<p>This page will auto-refresh in 5 seconds.</p>"
-
-            "</body></html>",
-
-            status_code=202,
-
-        )
+        # Last resort: try to load stale cache from disk if background refresh is stuck
+        if APP_MODEL_STATE_JSON.exists():
+            try:
+                with APP_MODEL_STATE_JSON.open("r", encoding="utf-8") as f:
+                    _MODEL_CACHE["state"] = json.load(f)
+                _MODEL_CACHE["built_at"] = time.time()
+                print("[home] Loaded stale model state from disk as last resort", flush=True)
+            except Exception as exc:
+                print(f"[home] Failed to load stale model state: {exc}", flush=True)
+        if _MODEL_CACHE.get("state") is None:
+            # Still no state — trigger a rebuild if we can
+            if _cache_rebuild_required(_CACHE_FRESHNESS) and not _MODEL_REFRESH_IN_PROGRESS:
+                _kick_model_cache_refresh_background()
+            return HTMLResponse(
+                "<html><head><meta http-equiv='refresh' content='5'>"
+                "<title>Wallet Proof Engine</title></head><body>"
+                "<h2>Building model state from fills...</h2>"
+                "<p>This page will auto-refresh in 5 seconds.</p>"
+                "</body></html>",
+                status_code=202,
+            )
 
     # Serve stale HTML only while a render/build is actively in progress.
 
