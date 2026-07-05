@@ -1,0 +1,1658 @@
+﻿"""
+app.py â€” WALLET FINDER EDITION
+Hyperliquid Proving Engine (Pre-Live Forward-Testing Dashboard)
+
+FastAPI + HTMX dashboard running on port 8012.
+Reads from data/wallet_universe.csv, data/summary.csv, and data/equity_curves/.
+Retains all SSOT mechanics of the proof dash before live copy module.
+
+Compound score replaces the old simplistic copy_score:
+  - MTM Calmar (40%): Risk-adjusted return from accountValueHistory
+  - PnL stability (15%): Chunk-level win rate consistency
+  - Fee resilience (15%): Net PnL / Gross PnL â€” does profit survive fees?
+  - Recency (10%): Fraction of trades in last 7 days
+  - Hard penalty flags: martingale -25pts, one_big_trade -50pts,
+    equity_collapse -30pts, equity_collapse_mtm -30pts
+"""
+import atexit
+import json
+import logging
+import math
+import os
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+from markupsafe import Markup
+
+log = logging.getLogger("ui_state")
+
+# â”€â”€ Paths (WALLET FINDER edition) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+BASE_DIR = Path(__file__).parent
+STATE_FILE = BASE_DIR / "ui_state.json"
+UNIVERSE_PATH = BASE_DIR / "data" / "wallet_universe.csv"
+# Compound scoring needs KPI columns from the scanner's summary output
+SUMMARY_PATH = BASE_DIR / "data" / "summary.csv"
+CURVE_PATH = BASE_DIR / "data" / "equity_curves"
+TEMPLATES_DIR = BASE_DIR / "templates"
+PURGED_WALLETS_FILE = BASE_DIR / "purged_wallets.txt"
+DATA_PURGED_WALLETS_FILE = BASE_DIR / "data" / "purged_wallets.txt"
+
+ALL_TRADES_CANDIDATES = [
+    BASE_DIR / "data" / "all_trades.csv",
+    BASE_DIR / "data" / "all_trades.zip",
+]
+ENABLE_ALL_TRADES_TABLE_ENRICH = False
+
+# â”€â”€ WALLET FINDER port â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+WALLET_FINDER_PORT = 8012
+
+SLIPPAGE_RATES = {
+    "pnl_slip_05": 0.0005,
+    "pnl_slip_10": 0.0010,
+    "pnl_slip_30": 0.0030,
+}
+
+_VALID_MODES = ("raw", "slip_05", "slip_10", "slip_30")
+_MODE_COL = {
+    "raw": "realised_pnl",
+    "slip_05": "pnl_slip_05",
+    "slip_10": "pnl_slip_10",
+    "slip_30": "pnl_slip_30",
+}
+_MODE_RATE = {
+    "raw": 0.0,
+    "slip_05": 0.0005,
+    "slip_10": 0.0010,
+    "slip_30": 0.0030,
+}
+
+SORTABLE_COLUMNS = {
+    "rank": "rank", "wallet": "wallet", "score": "score",
+    "realised_pnl": "realised_pnl", "pnl_slip_05": "pnl_slip_05",
+    "pnl_slip_10": "pnl_slip_10", "pnl_slip_30": "pnl_slip_30",
+    "risk_pnl": "risk_pnl", "slip_deg_03": "slip_deg_03",
+    "efficiency": "efficiency", "max_dd": "max_dd",
+    "trades": "trades", "trades_7d": "trades_7d",
+    "total_notional": "total_notional",
+    "compound_score": "compound_score", "mtm_calmar": "mtm_calmar",
+    "last_trade_time": "last_trade_time",
+}
+
+# â”€â”€ Jinja2 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+_jinja = Environment(
+    loader=FileSystemLoader(str(TEMPLATES_DIR)),
+    autoescape=select_autoescape(["html"]),
+)
+
+
+def render(template_name: str, **ctx) -> str:
+    return _jinja.get_template(template_name).render(**ctx)
+
+
+def _js_num(v) -> str:
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return ""
+    return str(round(float(v), 6))
+
+
+_jinja.filters["js_num"] = _js_num
+
+
+# â”€â”€ State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+_state: dict = {
+    "universe": pd.DataFrame(),
+    "selected": {},
+    "trade_stats": {},
+    "trade_stats_key": None,
+    "days": "30",
+    "filters": {},
+    "mode": "raw",
+    "sort": "last_trade_time",
+    "dir": "desc",
+    "risk_per_wallet": 100.0,
+    "normalize": True,
+    "wallet_order": [],
+    "wallet_weights": {},
+    "start_date": None,
+    "end_date": None,
+    "hide_dormant": False,
+}
+
+
+def _save_state():
+    """Atomic save: write to temp file, then os.replace() — no partial writes possible.
+    Preserves keys owned by other apps (e.g. HL_Copy_App_SSOT.py)."""
+    # Read existing file first to preserve keys owned by other apps
+    existing = {}
+    if STATE_FILE.exists():
+        try:
+            existing = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                existing = {}
+        except Exception:
+            existing = {}
+    # Update only keys this app owns; preserve everything else
+    existing.update({
+        "sort": _state.get("sort"),
+        "dir": _state.get("dir"),
+        "selected": _state.get("selected", {}),
+        "wallet_order": _state.get("wallet_order", []),
+        "wallet_weights": _state.get("wallet_weights", {}),
+        "mode": _state.get("mode"),
+        "filters": _state.get("filters"),
+        "risk_per_wallet": _state.get("risk_per_wallet"),
+        "normalize": _state.get("normalize"),
+        "days": _state.get("days"),
+        "start_date": _state.get("start_date"),
+        "end_date": _state.get("end_date"),
+        "hide_dormant": _state.get("hide_dormant", False),
+    })
+    if "wallet_include" in _state:
+        existing["wallet_include"] = _state.get("wallet_include", {})
+    payload = json.dumps(existing, indent=2)
+    try:
+        # Write to temp file in SAME directory (same filesystem = atomic rename)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(BASE_DIR), prefix=".ui_state_", suffix=".tmp"
+        )
+        try:
+            os.write(fd, payload.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        # Backup previous good copy before overwriting
+        if STATE_FILE.exists():
+            try:
+                BACKUP_FILE = STATE_FILE.with_suffix(".json.bak")
+                BACKUP_FILE.write_bytes(STATE_FILE.read_bytes())
+            except Exception:
+                pass
+        # Atomic rename — no reader will ever see a half-written file
+        os.replace(tmp_path, str(STATE_FILE))
+        log.debug("ui_state saved (%d selected wallets)", len(existing.get("selected", {})))
+    except Exception as exc:
+        log.error("FAILED to save ui_state: %s", exc)
+        # Last resort: direct write so at least something persists
+        try:
+            STATE_FILE.write_text(payload, encoding="utf-8")
+            log.warning("ui_state saved via fallback direct write")
+        except Exception as exc2:
+            log.error("CRITICAL: ui_state fallback write also failed: %s", exc2)
+
+
+def _load_state():
+    """Load state from disk. Falls back to .bak if main file is corrupt."""
+    backup_file = STATE_FILE.with_suffix(".json.bak")
+    for attempt_path in (STATE_FILE, backup_file):
+        if not attempt_path.exists():
+            continue
+        try:
+            raw = attempt_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError(f"Expected dict, got {type(data).__name__}")
+            _state.update(data)
+            selected_count = sum(1 for v in _state.get("selected", {}).values() if v)
+            log.info(
+                "Loaded ui_state from %s (%d total wallets, %d selected)",
+                attempt_path.name,
+                len(_state.get("selected", {})),
+                selected_count,
+            )
+            return
+        except Exception as exc:
+            log.warning("Failed to load %s: %s", attempt_path.name, exc)
+    log.warning("No valid ui_state file found — using defaults")
+
+
+atexit.register(_save_state)  # Guarantee save on ANY process exit
+
+
+# â”€â”€ Data helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+def _load_curve(wallet: str) -> pd.Series:
+    p = CURVE_PATH / f"{wallet}.csv"
+    if not p.exists():
+        return pd.Series(dtype=float)
+    try:
+        df = pd.read_csv(p)
+        df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
+        df["equity"] = pd.to_numeric(df["equity"], errors="coerce")
+        df = df.dropna()
+        if df.empty:
+            return pd.Series(dtype=float)
+        df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+        return df.set_index("ts")["equity"].sort_index()
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def _curve_metrics(s: pd.Series) -> dict[str, float]:
+    nan = float("nan")
+    if s.empty:
+        return {"pnl": nan, "dd": nan, "peak": nan}
+    running_max = s.cummax()
+    return {
+        "pnl": float(s.iloc[-1]),
+        "dd": float((s - running_max).min()),
+        "peak": float(running_max.max()),
+    }
+
+
+def _safe_div(numerator: float, denominator: float) -> float:
+    if denominator is None or pd.isna(denominator) or abs(float(denominator)) < 1e-12:
+        return float("nan")
+    return float(numerator) / float(denominator)
+
+
+def _num(value, default: float = 0.0) -> float:
+    if value is None or pd.isna(value):
+        return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _find_all_trades_path() -> Path | None:
+    for path in ALL_TRADES_CANDIDATES:
+        if path.exists() and path.stat().st_size > 0:
+            return path
+    return None
+
+
+def _load_trade_stats() -> dict[str, dict[str, float]]:
+    path = _find_all_trades_path()
+    if path is None:
+        _state["trade_stats"] = {}
+        _state["trade_stats_key"] = None
+        return {}
+    cache_key = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+    if _state.get("trade_stats_key") == cache_key:
+        return _state.get("trade_stats", {})
+    agg: dict[str, dict[str, float]] = {}
+    read_kwargs = {
+        "usecols": ["wallet", "px", "sz", "closedPnl"],
+        "dtype": {"wallet": "string"},
+        "chunksize": 250_000,
+        "compression": "zip" if path.suffix.lower() == ".zip" else None,
+        "low_memory": False,
+    }
+    for chunk in pd.read_csv(path, **read_kwargs):
+        chunk["wallet"] = chunk["wallet"].astype("string").str.strip().str.lower()
+        chunk["px"] = pd.to_numeric(chunk["px"], errors="coerce")
+        chunk["sz"] = pd.to_numeric(chunk["sz"], errors="coerce")
+        chunk["closedPnl"] = pd.to_numeric(chunk["closedPnl"], errors="coerce")
+        chunk = chunk.dropna(subset=["wallet", "px", "sz"])
+        if chunk.empty:
+            continue
+        chunk["notional"] = chunk["px"].abs() * chunk["sz"].abs()
+        grouped = chunk.groupby("wallet", dropna=False).agg(
+            total_notional=("notional", "sum"),
+            trades=("wallet", "size"),
+            realised_pnl_trades=("closedPnl", "sum"),
+        )
+        for wallet, row in grouped.iterrows():
+            wallet = str(wallet)
+            entry = agg.setdefault(wallet, {"total_notional": 0.0, "trades": 0.0, "realised_pnl_trades": 0.0})
+            entry["total_notional"] += float(row["total_notional"])
+            entry["trades"] += float(row["trades"])
+            entry["realised_pnl_trades"] += float(row["realised_pnl_trades"])
+    _state["trade_stats"] = agg
+    _state["trade_stats_key"] = cache_key
+    return agg
+
+
+def _load_summary_kpis() -> pd.DataFrame:
+    """Load KPI columns from summary.csv for compound scoring.
+
+    These columns come from the Stage 2+3 scanner and contain the detailed
+    trade-by-trade statistics and MTM truth that the compound score needs.
+    Soft-fails to empty DataFrame if summary.csv is missing or corrupted.
+    """
+    needed = {
+        "wallet",
+        # MTM truth (40% weight)
+        "mtm_calmar", "max_drawdown_mtm", "max_drawdown",
+        "month_acctV_start", "month_acctV_end", "month_acctV_peak",
+        "month_pnl_chg_mtm", "allTime_max_drawdown_mtm", "allTime_pnl_chg_mtm", "allTime_acctV_peak",
+        # PnL stability (15% weight)
+        "pnl_stability_score", "consistency_score",
+        # Fee resilience (15% weight)
+        "total_pnl", "total_pnl_net_fees_est", "est_fee_drag",
+        # Recency (10% weight)
+        "trades_7d", "trades",
+        # Hard penalty flags
+        "martingale_flag", "one_big_trade_flag", "equity_collapse_flag",
+        "equity_collapse_flag_mtm", "negative_total_flag", "negative_total_flag_mtm",
+        # Display extras
+        "win_rate", "avg_pnl", "profit_factor", "largest_win_ratio",
+        "edge_score_raw", "timespan_hours", "symbol_count",
+    }
+    if not SUMMARY_PATH.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(SUMMARY_PATH, usecols=lambda c: c in needed, dtype={"wallet": str}, low_memory=False)
+        if df.empty:
+            return pd.DataFrame()
+        df["wallet"] = df["wallet"].fillna("").astype(str).str.strip().str.lower()
+        df = df[df["wallet"] != ""]
+        # Convert numeric columns (excluding wallet) to float
+        for col in (set(needed) - {"wallet"}) & set(df.columns):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _compute_compound_score(r) -> float:
+    """Compute compound risk-adjusted copy score (0-100 scale).
+
+    Weights are empirically chosen to surface elite steady earners:
+      - MTM Calmar (40%): Truth from accountValueHistory. >=2 is healthy.
+      - PnL stability (15%): Consistency of chunk-level win rates over time.
+      - Fee resilience (15%): Net PnL / Gross PnL â€” does profit survive fees?
+      - Recency (10%): Fraction of trades in last 7 days.
+      - Penalty flags subtract directly: martingale -25, one_big_trade -50,
+        equity_collapse -30, equity_collapse_mtm -30.
+    """
+    weights = [0.40, 0.15, 0.15, 0.10]
+    penalties = 0.0
+
+    # â”€â”€ 1. MTM Calmar (40%) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    calmar = _num(r.get("mtm_calmar"))
+    if calmar > 0 and not math.isnan(calmar):
+        # Sigmoid-like: 0â†’0, 1â†’0.50, 2â†’0.75, 3â†’0.88, 5â†’0.97
+        component = 1.0 - math.exp(-calmar * 0.7)
+    else:
+        # Fallback: use MTM DD if available, otherwise full-history scanner DD.
+        # The UI curve can be windowed/resampled and is not safe for scoring.
+        pnl = _num(r.get("realised_pnl"))
+        mtm_dd = _num(r.get("max_dd_mtm"))
+        scanner_dd = abs(_num(r.get("max_dd")))
+        dd = abs(mtm_dd) if mtm_dd < 0 and abs(mtm_dd) > 1.0 else scanner_dd
+        if dd > 1.0 and pnl > 0:
+            component = min(1.0, (pnl / dd) / 5.0)
+        else:
+            component = 0.0
+
+    # â”€â”€ 2. PnL stability (15%) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    cons = _num(r.get("consistency_score"))
+    pnl_stab = _num(r.get("pnl_stability_score"))
+    if not math.isnan(cons) and cons > 0:
+        stab_component = cons  # already [0,1]
+    elif not math.isnan(pnl_stab) and pnl_stab > 0:
+        stab_component = min(1.0, pnl_stab / 5.0)
+    else:
+        stab_component = 0.0
+
+    # â”€â”€ 3. Fee resilience (15%) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    gross_pnl = _num(r.get("total_pnl"))
+    net_pnl = _num(r.get("total_pnl_net_fees_est"))
+    est_fee = _num(r.get("est_fee_drag"))
+    if gross_pnl > 1.0 and not math.isnan(net_pnl):
+        ratio = max(0.0, min(1.0, net_pnl / gross_pnl))
+        fee_component = ratio
+    elif est_fee > 0 and gross_pnl > 0:
+        fee_component = max(0.0, min(1.0, (gross_pnl - est_fee) / gross_pnl))
+    else:
+        fee_component = 0.5  # neutral â€” no fee data
+
+    # â”€â”€ 4. Recency (10%) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    trades = max(1, int(_num(r.get("trades"))))
+    trades_7d = min(trades, int(_num(r.get("trades_7d"))))
+    recency_raw = trades_7d / trades
+    recency_component = min(1.0, recency_raw * 2.0)
+
+    # â”€â”€ Weighted sum â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    scores = [component, stab_component, fee_component, recency_component]
+    total_weight = sum(weights)
+    weighted = sum(s * w for s, w in zip(scores, weights)) / total_weight if total_weight > 0 else 0.0
+
+    # â”€â”€ Hard penalty flags â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if int(_num(r.get("martingale_flag"))) == 1:
+        penalties -= 0.25
+    if int(_num(r.get("one_big_trade_flag"))) == 1:
+        penalties -= 0.50
+    if int(_num(r.get("equity_collapse_flag"))) == 1:
+        penalties -= 0.30
+    if int(_num(r.get("equity_collapse_flag_mtm"))) == 1:
+        penalties -= 0.30
+
+    final = weighted + penalties
+    return round(max(0.0, final) * 100.0, 2)
+
+
+_series_cache: dict = {}
+_curve_cache: dict = {}
+
+
+def _load_purged_wallets() -> set:
+    """Return set of purged wallet addresses (lowercase) from purged_wallets.txt."""
+    purged = set()
+    for path in (PURGED_WALLETS_FILE, DATA_PURGED_WALLETS_FILE):
+        if not path.exists():
+            continue
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                w = line.strip().lower()
+                if w and len(w) == 42 and w.startswith("0x"):
+                    purged.add(w)
+    return purged
+
+
+def _save_purged_wallets(wallets: set[str]) -> None:
+    valid = sorted(w for w in wallets if isinstance(w, str) and len(w) == 42 and w.startswith("0x"))
+    body = "".join(f"{w}\n" for w in valid)
+    for path in (PURGED_WALLETS_FILE, DATA_PURGED_WALLETS_FILE):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, path)
+
+
+def _purge_losing_wallets_from_df(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Count losing proof rows without mutating purge files or hiding wallets."""
+    if df.empty or "wallet" not in df.columns:
+        return df, 0
+    losing = pd.Series(False, index=df.index)
+    if "total_pnl" in df.columns:
+        total_pnl = pd.to_numeric(df["total_pnl"], errors="coerce")
+        losing |= total_pnl.notna() & (total_pnl <= 0)
+    if "allTime_pnl_chg_mtm" in df.columns:
+        alltime_mtm = pd.to_numeric(df["allTime_pnl_chg_mtm"], errors="coerce")
+        losing |= alltime_mtm.notna() & (alltime_mtm <= 0)
+    for col in ("negative_total_flag", "negative_total_flag_mtm"):
+        if col in df.columns:
+            losing |= pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int).eq(1)
+    wallets = set(df.loc[losing, "wallet"].dropna().astype(str).str.strip().str.lower())
+    wallets = {w for w in wallets if len(w) == 42 and w.startswith("0x")}
+    return df, len(wallets)
+
+
+def load_universe(preserve_selection: bool = True) -> None:
+    _series_cache.clear()
+    _curve_cache.clear()
+    if not UNIVERSE_PATH.exists() or UNIVERSE_PATH.stat().st_size == 0:
+        _state["universe"] = pd.DataFrame()
+        return
+    df = pd.read_csv(UNIVERSE_PATH)
+    if df.empty:
+        _state["universe"] = pd.DataFrame()
+        return
+    df["wallet"] = df["wallet"].astype(str).str.strip().str.lower()
+    # Drop purged wallets (safety net â€” universe_builder should already exclude them)
+    purged = _load_purged_wallets()
+    if purged:
+        df = df[~df["wallet"].isin(purged)]
+    # Drop losing wallets (negative or zero realised PnL)
+    if "realised_pnl" in df.columns:
+        df = df[df["realised_pnl"] > 0]
+    numeric_cols = ("realised_pnl", "total_notional", "efficiency", "trades", "trades_7d", "last_trade_time", "score")
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            df[col] = float("nan")
+
+    # Merge summary KPI columns for compound scoring
+    summary_kpis = _load_summary_kpis()
+    if not summary_kpis.empty:
+        df = df.merge(summary_kpis, on="wallet", how="left", suffixes=("", "_sum"))
+        for dup_col in ["trades_7d", "trades"]:
+            if f"{dup_col}_sum" in df.columns:
+                df[dup_col] = df[f"{dup_col}_sum"].combine_first(df[dup_col])
+                df = df.drop(columns=[f"{dup_col}_sum"])
+        df, losing_proof_rows = _purge_losing_wallets_from_df(df)
+        _state["last_losing_proof_rows"] = losing_proof_rows
+
+    # Enrich with trade stats from all_trades (notional + trade counts)
+    needs_trade_stats = (
+        ENABLE_ALL_TRADES_TABLE_ENRICH
+        and (
+            "total_notional" not in df.columns
+            or "trades" not in df.columns
+            or df["total_notional"].isna().any()
+            or df["trades"].isna().any()
+        )
+    )
+    trade_stats = _load_trade_stats() if needs_trade_stats else {}
+    if trade_stats:
+        trade_df = pd.DataFrame.from_dict(trade_stats, orient="index")
+        trade_df.index.name = "wallet"
+        trade_df = trade_df.reset_index()
+        df = df.merge(trade_df, on="wallet", how="left", suffixes=("", "_trade"))
+        if "total_notional_trade" in df.columns:
+            df["total_notional"] = df["total_notional_trade"].combine_first(df["total_notional"])
+            df = df.drop(columns=["total_notional_trade"])
+        if "trades_trade" in df.columns:
+            df["trades"] = df["trades_trade"].combine_first(df["trades"])
+            df = df.drop(columns=["trades_trade"])
+
+    # Compute curve-based DD stats only as a last-resort display fallback. It is
+    # not safe for wallet selection because resampling/windowing can turn real
+    # drawdowns into tiny or zero values.
+    def _curve_dd_stats(wallet: str) -> tuple[float, float]:
+        s = _load_curve(wallet)
+        m = _curve_metrics(s)
+        pct = (m["dd"] / abs(m["peak"]) * 100) if abs(m["peak"]) > 1e-12 else float("nan")
+        return m["dd"], pct
+
+    dd_stats = df["wallet"].apply(_curve_dd_stats)
+    curve_max_dd = dd_stats.apply(lambda t: t[0])
+    curve_max_dd_pct = dd_stats.apply(lambda t: t[1])
+
+    # Drawdown truth hierarchy:
+    # 1. MTM accountValueHistory DD, including unrealised PnL.
+    # 2. Full-history scanner replay DD from summary.csv max_drawdown.
+    # 3. UI curve DD only if no stronger source exists, with unknown DD%.
+    has_mtm_dd = "max_drawdown_mtm" in df.columns
+    has_mtm_start = "month_acctV_start" in df.columns
+    if "max_drawdown" in df.columns:
+        df["max_dd_scanner"] = pd.to_numeric(df["max_drawdown"], errors="coerce")
+    else:
+        df["max_dd_scanner"] = float("nan")
+    scanner_valid = df["max_dd_scanner"].notna() & (df["max_dd_scanner"] < 0)
+    scanner_pnl_ref = (
+        pd.to_numeric(df["total_pnl"], errors="coerce")
+        if "total_pnl" in df.columns else pd.to_numeric(df["realised_pnl"], errors="coerce")
+    )
+    scanner_ref = scanner_pnl_ref.abs() + df["max_dd_scanner"].abs()
+    df["max_dd_scanner_pct"] = (df["max_dd_scanner"].abs() / scanner_ref * 100).where(
+        scanner_valid & scanner_ref.notna() & (scanner_ref > 1),
+        float("nan"),
+    )
+
+    if has_mtm_dd:
+        # max_drawdown_mtm is negative account-value drawdown from Hyperliquid's
+        # accountValueHistory. Use the exported account peak for a real DD% when
+        # available; falling back to current_value - DD is only an approximation.
+        df["max_dd_mtm"] = pd.to_numeric(df["max_drawdown_mtm"], errors="coerce")
+        mtm_valid = df["max_dd_mtm"].notna() & (df["max_dd_mtm"] < 0)
+
+        if "month_acctV_peak" in df.columns:
+            df["mtm_peak_ref"] = pd.to_numeric(df["month_acctV_peak"], errors="coerce")
+            df["max_dd_mtm_pct"] = df.apply(
+                lambda r: min(100.0, (abs(r["max_dd_mtm"]) / r["mtm_peak_ref"] * 100))
+                if pd.notna(r.get("max_dd_mtm")) and pd.notna(r.get("mtm_peak_ref")) and r.get("mtm_peak_ref", 0) > 1
+                else float("nan"),
+                axis=1,
+            )
+        elif "month_acctV_end" in df.columns:
+            df["mtm_acctV_end"] = pd.to_numeric(df["month_acctV_end"], errors="coerce")
+            # Approx peak = current value - DD (where DD is negative)
+            df["mtm_approx_peak"] = df["mtm_acctV_end"] - df["max_dd_mtm"]
+            df["max_dd_mtm_pct"] = df.apply(
+                lambda r: min(100.0, (abs(r["max_dd_mtm"]) / r["mtm_approx_peak"] * 100))
+                if pd.notna(r.get("max_dd_mtm")) and pd.notna(r.get("mtm_approx_peak")) and r.get("mtm_approx_peak", 0) > 1
+                else float("nan"),
+                axis=1,
+            )
+        elif has_mtm_start:
+            # Fall back to month-start (less accurate but better than nothing)
+            df["mtm_acctV_ref"] = pd.to_numeric(df["month_acctV_start"], errors="coerce")
+            df["max_dd_mtm_pct"] = df.apply(
+                lambda r: min(100.0, (abs(r["max_dd_mtm"]) / r["mtm_acctV_ref"] * 100))
+                if pd.notna(r.get("max_dd_mtm")) and pd.notna(r.get("mtm_acctV_ref")) and r.get("mtm_acctV_ref", 0) > 1
+                else float("nan"),
+                axis=1,
+            )
+        else:
+            df["max_dd_mtm_pct"] = float("nan")
+
+        if "allTime_max_drawdown_mtm" in df.columns:
+            df["max_dd_alltime_mtm"] = pd.to_numeric(df["allTime_max_drawdown_mtm"], errors="coerce")
+        else:
+            df["max_dd_alltime_mtm"] = float("nan")
+        if "allTime_acctV_peak" in df.columns:
+            df["alltime_mtm_peak_ref"] = pd.to_numeric(df["allTime_acctV_peak"], errors="coerce")
+            df["max_dd_alltime_mtm_pct"] = df.apply(
+                lambda r: min(100.0, (abs(r["max_dd_alltime_mtm"]) / r["alltime_mtm_peak_ref"] * 100))
+                if pd.notna(r.get("max_dd_alltime_mtm")) and pd.notna(r.get("alltime_mtm_peak_ref")) and r.get("alltime_mtm_peak_ref", 0) > 1
+                else float("nan"),
+                axis=1,
+            )
+        else:
+            df["max_dd_alltime_mtm_pct"] = float("nan")
+
+        def _choose_dd(r):
+            candidates = []
+            if pd.notna(r.get("max_dd_alltime_mtm")) and r.get("max_dd_alltime_mtm") < 0:
+                candidates.append((float(r["max_dd_alltime_mtm"]), r.get("max_dd_alltime_mtm_pct"), "alltime_mtm"))
+            if pd.notna(r.get("max_dd_mtm")) and r.get("max_dd_mtm") < 0:
+                candidates.append((float(r["max_dd_mtm"]), r.get("max_dd_mtm_pct"), "MTM"))
+            if pd.notna(r.get("max_dd_scanner")) and r.get("max_dd_scanner") < 0:
+                candidates.append((float(r["max_dd_scanner"]), r.get("max_dd_scanner_pct"), "scanner"))
+            if candidates:
+                return min(candidates, key=lambda item: item[0])
+            return (r.get("curve_max_dd", float("nan")), float("nan"), "curve_untrusted")
+
+        df["_curve_max_dd_tmp"] = curve_max_dd
+        chosen_dd = df.rename(columns={"_curve_max_dd_tmp": "curve_max_dd"}).apply(_choose_dd, axis=1)
+        df["max_dd"] = chosen_dd.apply(lambda item: item[0])
+        df["max_dd_pct"] = chosen_dd.apply(lambda item: item[1])
+        df["max_dd_source"] = chosen_dd.apply(lambda item: item[2])
+        df = df.drop(columns=["_curve_max_dd_tmp"])
+    else:
+        df["max_dd"] = df["max_dd_scanner"].where(scanner_valid, curve_max_dd)
+        df["max_dd_pct"] = df["max_dd_scanner_pct"].where(scanner_valid, float("nan"))
+        df["max_dd_source"] = "curve_untrusted"
+        df.loc[scanner_valid, "max_dd_source"] = "scanner"
+        df["max_dd_mtm"] = float("nan")
+        df["max_dd_mtm_pct"] = float("nan")
+    df["total_notional"] = pd.to_numeric(df["total_notional"], errors="coerce").fillna(0.0)
+    df["realised_pnl"] = pd.to_numeric(df["realised_pnl"], errors="coerce")
+    for col, rate in SLIPPAGE_RATES.items():
+        df[col] = df["realised_pnl"] - (df["total_notional"] * rate)
+    def _risk_pnl_basis(r) -> float:
+        source = str(r.get("max_dd_source", ""))
+        if source == "alltime_mtm":
+            return _num(r.get("allTime_pnl_chg_mtm"), float("nan"))
+        if source == "MTM":
+            return _num(r.get("month_pnl_chg_mtm"), float("nan"))
+        if source == "scanner":
+            return _num(r.get("total_pnl"), float("nan"))
+        return float("nan")
+
+    df["risk_pnl_basis"] = df.apply(_risk_pnl_basis, axis=1)
+    df["risk_pnl"] = df.apply(
+        lambda r: _safe_div(r.get("risk_pnl_basis"), abs(r.get("max_dd")))
+        if pd.notna(r.get("risk_pnl_basis")) and pd.notna(r.get("max_dd")) and abs(_num(r.get("max_dd"))) > 1e-9
+        else float("nan"), axis=1,
+    )
+
+    def _slip_deg_03(r):
+        pnl = r.get("realised_pnl")
+        slip = r.get("pnl_slip_30")
+        if pnl is None or slip is None or pd.isna(pnl) or pd.isna(slip) or abs(float(pnl)) < 1e-12:
+            return float("nan")
+        return ((float(pnl) - float(slip)) / abs(float(pnl))) * 100
+
+    df["slip_deg_03"] = df.apply(_slip_deg_03, axis=1)
+
+    # Compound score replaces old copy_score
+    df["compound_score"] = df.apply(_compute_compound_score, axis=1)
+
+    # Sort by compound_score descending, then realised_pnl
+    df = df.sort_values(["compound_score", "realised_pnl"], ascending=[False, False], na_position="last").reset_index(drop=True)
+    df["rank"] = df.index + 1
+
+    _state["universe"] = df
+    prev = _state["selected"] if preserve_selection else {}
+    if not prev:
+        top10 = set(df.head(10)["wallet"])
+        _state["selected"] = {w: (w in top10) for w in df["wallet"]}
+    else:
+        new_selected = {str(w): bool(v) for w, v in prev.items()}
+        for w in df["wallet"]:
+            new_selected.setdefault(w, False)
+        _state["selected"] = new_selected
+    selected_set = {w for w, v in _state["selected"].items() if v}
+    existing_order = _state.get("wallet_order", [])
+    new_order = [w for w in existing_order if w in selected_set]
+    order_set = set(new_order)
+    for w in df["wallet"]:
+        w = str(w)
+        if w in selected_set and w not in order_set:
+            new_order.append(w)
+            order_set.add(w)
+    _state["wallet_order"] = new_order
+    weights = _state.setdefault("wallet_weights", {})
+    for w in new_order:
+        weights.setdefault(w, 1.0)
+    for w in list(weights.keys()):
+        if w not in selected_set:
+            weights.pop(w, None)
+
+
+# â”€â”€ Context builders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+def _fmt(val, spec: str, na: str = "\u2014") -> str:
+    try:
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            return na
+        return spec.format(val)
+    except Exception:
+        return na
+
+
+def _get_sort(sort: str | None, direction: str | None) -> tuple[str, str]:
+    sort_key = SORTABLE_COLUMNS.get((sort or "").strip(), "compound_score")
+    sort_dir = "asc" if (direction or "").strip().lower() == "asc" else "desc"
+    _state["sort"] = sort_key
+    _state["dir"] = sort_dir
+    return sort_key, sort_dir
+
+
+def _sort_universe(df: pd.DataFrame, sort: str, direction: str) -> pd.DataFrame:
+    sort_key, sort_dir = _get_sort(sort, direction)
+    if df.empty:
+        return df
+    ascending = sort_dir == "asc"
+    if sort_key == "wallet":
+        ordered = df.sort_values(["wallet", "compound_score"], ascending=[ascending, False], na_position="last", kind="mergesort")
+    else:
+        ordered = df.sort_values([sort_key, "compound_score", "wallet"], ascending=[ascending, False, True], na_position="last", kind="mergesort")
+    ordered = ordered.reset_index(drop=True).copy()
+    ordered["display_rank"] = ordered.index + 1
+    return ordered
+
+
+def _sort_universe_pinned(df: pd.DataFrame, sort: str, direction: str) -> pd.DataFrame:
+    sort_key, sort_dir = _get_sort(sort, direction)
+    if df.empty:
+        return df
+    ascending = sort_dir == "asc"
+    if sort_key == "wallet":
+        ordered = df.sort_values(["_is_selected", "wallet", "compound_score"], ascending=[False, ascending, False], na_position="last", kind="mergesort")
+    else:
+        ordered = df.sort_values(["_is_selected", sort_key, "compound_score", "wallet"], ascending=[False, ascending, False, True], na_position="last", kind="mergesort")
+    ordered = ordered.reset_index(drop=True).copy()
+    ordered["display_rank"] = ordered.index + 1
+    return ordered
+
+
+def _build_sparkline(wallet: str) -> str:
+    s = _load_curve(wallet)
+    if s.empty:
+        return ""
+    pts = s.iloc[-50:]
+    mn, mx = float(pts.min()), float(pts.max())
+    rng = mx - mn
+    if rng < 1e-12:
+        return " ".join(f"{round(i * 160 / max(len(pts) - 1, 1), 2)},15" for i in range(len(pts)))
+    result = []
+    for i, v in enumerate(pts):
+        x = round(i * 160 / max(len(pts) - 1, 1), 2)
+        y = round(30 - ((float(v) - mn) / rng) * 28 - 1, 2)
+        result.append(f"{x},{y}")
+    return " ".join(result)
+
+
+def _is_dormant(last_trade_time) -> bool:
+    """True if wallet has no trade in 24h+."""
+    if last_trade_time is None or (isinstance(last_trade_time, float) and math.isnan(last_trade_time)):
+        return True
+    try:
+        ts = float(last_trade_time)
+        if ts < 1e9:
+            return True
+        if ts < 1e12:
+            ts *= 1000
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        return (now_ms - int(ts)) > 86_400_000
+    except Exception:
+        return True
+
+
+def _is_stale(last_trade_time) -> bool:
+    """True if wallet last traded 1h-24h ago (not dormant, not recently active)."""
+    if last_trade_time is None or (isinstance(last_trade_time, float) and math.isnan(last_trade_time)):
+        return False
+    try:
+        ts = float(last_trade_time)
+        if ts < 1e9:
+            return False
+        if ts < 1e12:
+            ts *= 1000
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        delta_ms = now_ms - int(ts)
+        return 3_600_000 <= delta_ms <= 86_400_000
+    except Exception:
+        return False
+
+
+def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
+    f = _state.get("filters", {})
+    if not f and not _state.get("hide_dormant"):
+        return df
+    mask = pd.Series(True, index=df.index)
+    if f.get("min_trades") is not None:
+        mask &= df["trades"].fillna(0) >= f["min_trades"]
+    if f.get("max_dd_pct") is not None:
+        mask &= df["max_dd_pct"].notna() & (df["max_dd_pct"].abs() <= f["max_dd_pct"])
+    if f.get("max_slip_deg_03") is not None:
+        mask &= df["slip_deg_03"].fillna(float("inf")) <= f["max_slip_deg_03"]
+    if f.get("min_score") is not None:
+        mask &= df["compound_score"].fillna(float("-inf")) >= f["min_score"]
+    if f.get("min_pnl") is not None:
+        # Filter on risk_pnl_basis (displayed PnL) not realised_pnl (raw Hyperliquid column)
+        # display_pnl in get_table_rows() uses risk_pnl_basis when available, else canonical_pnl
+        pnl_col = df["risk_pnl_basis"] if "risk_pnl_basis" in df.columns else df["realised_pnl"]
+        mask &= pnl_col.fillna(float("-inf")) >= f["min_pnl"]
+    if f.get("min_risk_pnl") is not None:
+        mask &= df["risk_pnl"].fillna(float("-inf")) >= f["min_risk_pnl"]
+    # wallet_include filter: exclude wallets marked false in ui_state.json
+    wallet_include = _state.get("wallet_include", {})
+    if wallet_include:
+        excluded = {w for w, v in wallet_include.items() if v is False}
+        if excluded:
+            mask &= ~df["wallet"].isin(excluded)
+    # Dormancy filter: hide wallets with no trade in 24h+
+    if _state.get("hide_dormant"):
+        dormant_mask = df["last_trade_time"].apply(_is_dormant)
+        mask &= ~dormant_mask
+    return df[mask]
+
+
+def _get_visible_universe(sort: str = "compound_score", direction: str = "desc") -> pd.DataFrame:
+    uni = _state["universe"]
+    if uni.empty:
+        return uni
+    selected_set = {w for w, v in _state["selected"].items() if v}
+    selected_mask = uni["wallet"].isin(selected_set)
+    filtered_others = _apply_filters(uni[~selected_mask])
+    visible = pd.concat([uni[selected_mask], filtered_others], ignore_index=True)
+    if visible.empty:
+        return visible
+    visible = visible.copy()
+    visible["_is_selected"] = visible["wallet"].isin(selected_set).astype(int)
+    return _sort_universe_pinned(visible, sort, direction)
+
+
+def _active_filter_count() -> int:
+    count = len(_state.get("filters", {}))
+    if _state.get("hide_dormant"):
+        count += 1
+    return count
+
+
+def _activity_counts() -> dict[str, int]:
+    """Return active (<1h), stale (1h-24h), and dormant (24h+) wallet counts from the full universe."""
+    uni = _state.get("universe")
+    if uni is None or uni.empty or "last_trade_time" not in uni.columns:
+        return {"active": 0, "stale": 0, "dormant": 0}
+    ltt = uni["last_trade_time"]
+    dormant = int(ltt.apply(_is_dormant).sum())
+    stale = int(ltt.apply(_is_stale).sum())
+    active = len(uni) - dormant - stale
+    return {"active": active, "stale": stale, "dormant": dormant}
+
+
+def _parse_date_ts(s: str | None) -> "pd.Timestamp | None":
+    if not s:
+        return None
+    try:
+        return pd.Timestamp(s, tz="UTC")
+    except Exception:
+        return None
+
+
+def _get_wallet_pnl_series(wallet: str, mode: str, normalize: bool, risk_per_wallet: float, days: str) -> pd.Series:
+    key = (wallet, mode, normalize, risk_per_wallet, days)
+    if key in _series_cache:
+        return _series_cache[key]
+    s = _load_curve(wallet)
+    if s.empty:
+        _series_cache[key] = pd.Series(dtype=float)
+        return _series_cache[key]
+    if days not in ("all", "none"):
+        try:
+            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=int(days))
+            s = s[s.index >= cutoff]
+        except (ValueError, TypeError):
+            pass
+    if s.empty:
+        _series_cache[key] = pd.Series(dtype=float)
+        return _series_cache[key]
+    mode_col = _MODE_COL.get(mode, "realised_pnl")
+    slip_scale = 1.0
+    if mode != "raw":
+        uni = _state["universe"]
+        rows = uni[uni["wallet"] == wallet]
+        if not rows.empty:
+            row = rows.iloc[0]
+            w_raw_total = _num(row.get("realised_pnl"))
+            w_slip_total = _num(row.get(mode_col))
+            if abs(w_raw_total) > 1e-6:
+                slip_scale = w_slip_total / w_raw_total
+    s_start = float(s.iloc[0])
+    w_period_dd = abs(_curve_metrics(s)["dd"])
+    risk_scale = (risk_per_wallet / w_period_dd) if (w_period_dd > 1e-6 and normalize) else 1.0
+    s_final = s_start + (s - s_start) * (slip_scale * risk_scale)
+    result = (s_final - s_start).resample("1h").last().sort_index().ffill().fillna(0)
+    _series_cache[key] = result
+    return result
+
+
+def _last_trade_age_fmt(last_trade_time) -> str:
+    """Format last trade time as a human-readable age string."""
+    if last_trade_time is None or (isinstance(last_trade_time, float) and math.isnan(last_trade_time)):
+        return "\u2014"
+    try:
+        ts = float(last_trade_time)
+        if ts < 1e9:
+            return "\u2014"
+        if ts < 1e12:
+            ts *= 1000
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        delta_ms = max(0, now_ms - int(ts))
+        if delta_ms < 60_000:
+            return f"{int(delta_ms / 1000)}s ago"
+        if delta_ms < 3_600_000:
+            return f"{int(delta_ms / 60_000)}m ago"
+        if delta_ms < 86_400_000:
+            return f"{round(delta_ms / 3_600_000, 1)}h ago"
+        return f"{round(delta_ms / 86_400_000, 1)}d ago"
+    except Exception:
+        return "\u2014"
+
+
+def get_table_rows(sort: str = "compound_score", direction: str = "desc") -> list[dict]:
+    uni = _get_visible_universe(sort, direction)
+    if uni.empty:
+        return []
+    rows: list[dict] = []
+    tbl_mode = _state.get("mode", "raw")
+    tbl_normalize = bool(_state.get("normalize", True))
+    tbl_risk = float(_state.get("risk_per_wallet", 100.0))
+    for _, r in uni.iterrows():
+        w = r["wallet"]
+        m_canonical = _curve_metrics(_get_wallet_pnl_series(w, tbl_mode, tbl_normalize, tbl_risk, "none"))
+        canonical_pnl = m_canonical["pnl"]
+        canonical_dd = m_canonical["dd"]
+
+        # Prefer MTM DD (accountValueHistory â€” includes unrealised) over curve-based
+        # (realised-only) DD. The MTM dollar value is the truth; the curve DD
+        # systematically understates drawdown by ignoring open-position PnL.
+        mtm_dd_val = _num(r.get("max_dd_mtm"))
+        mtm_dd_pct_val = r.get("max_dd_mtm_pct")
+        mtm_source = str(r.get("max_dd_source", "realised"))
+        using_mtm_dd = bool(mtm_dd_val < 0 and mtm_source == "MTM")
+        dd_source_label = "A" if mtm_source == "alltime_mtm" else ("M" if mtm_source == "MTM" else ("S" if mtm_source == "scanner" else "?"))
+        dd_source_title = (
+            "All-time MTM - includes unrealised PnL from accountValueHistory"
+            if mtm_source == "alltime_mtm"
+            else "Monthly MTM - includes unrealised PnL from accountValueHistory"
+            if mtm_source == "MTM"
+            else (
+                "Scanner - full-history realised trade replay"
+                if mtm_source == "scanner"
+                else "Untrusted fallback - DD percentage is unknown"
+            )
+        )
+        display_dd = mtm_dd_val if using_mtm_dd else r.get("max_dd")
+        display_dd_pct = mtm_dd_pct_val if using_mtm_dd and pd.notna(mtm_dd_pct_val) else r.get("max_dd_pct")
+        display_pnl = r.get("risk_pnl_basis") if pd.notna(r.get("risk_pnl_basis")) else canonical_pnl
+
+        rows.append({
+            "wallet": w,
+            "wallet_label": f"{w[:10]}\u2026{w[-6:]}",
+            "rank": int(r["display_rank"]),
+            "base_rank": int(r.get("rank", r["display_rank"])),
+            "score": r.get("score"), "score_fmt": _fmt(r.get("score"), "{:.4f}"),
+            "compound_score": r.get("compound_score"), "compound_score_fmt": _fmt(r.get("compound_score"), "{:.1f}"),
+            "mtm_calmar": r.get("mtm_calmar"), "mtm_calmar_fmt": _fmt(r.get("mtm_calmar"), "{:.2f}"),
+            "pnl": display_pnl, "pnl_fmt": _fmt(display_pnl, "${:,.2f}"),
+            "pnl_positive": bool(pd.notna(display_pnl) and display_pnl >= 0),
+            "exec_pnl": canonical_pnl, "exec_pnl_fmt": _fmt(canonical_pnl, "${:,.2f}"),
+            "pnl_title": f"Source-consistent historical PnL for {dd_source_label}. Current execution/range PnL: {_fmt(canonical_pnl, '${:,.2f}')}",
+            "pnl_slip_05": r.get("pnl_slip_05"), "pnl_slip_05_fmt": _fmt(r.get("pnl_slip_05"), "${:,.2f}"),
+            "pnl_slip_10": r.get("pnl_slip_10"), "pnl_slip_10_fmt": _fmt(r.get("pnl_slip_10"), "${:,.2f}"),
+            "pnl_slip_30": r.get("pnl_slip_30"), "pnl_slip_30_fmt": _fmt(r.get("pnl_slip_30"), "${:,.2f}"),
+            "risk_pnl": r.get("risk_pnl"), "risk_pnl_fmt": _fmt(r.get("risk_pnl"), "{:.3f}"),
+            "risk_pnl_basis": r.get("risk_pnl_basis"), "risk_pnl_basis_fmt": _fmt(r.get("risk_pnl_basis"), "${:,.2f}"),
+            "risk_pnl_title": f"Source-consistent PnL/DD: {dd_source_label} PnL { _fmt(r.get('risk_pnl_basis'), '${:,.2f}') } / DD { _fmt(display_dd, '${:,.2f}') }",
+            "slip_deg_03": r.get("slip_deg_03"), "slip_deg_03_fmt": _fmt(r.get("slip_deg_03"), "{:.2f}%"),
+            "slip_deg_03_cls": (
+                "" if (lambda v: v is None or (isinstance(v, float) and math.isnan(v)))(r.get("slip_deg_03"))
+                else ("pos" if r.get("slip_deg_03") < 10 else ("warn" if r.get("slip_deg_03") <= 30 else "neg"))
+            ),
+            "efficiency": r.get("efficiency"), "eff_fmt": _fmt(r.get("efficiency"), "{:.6f}"),
+            "max_dd": display_dd, "max_dd_fmt": _fmt(display_dd, "${:,.2f}"),
+            "max_dd_pct": display_dd_pct, "max_dd_pct_fmt": _fmt(display_dd_pct, "{:.1f}%"),
+            # MTM truth DD (accountValueHistory â€” includes unrealised)
+            "max_dd_mtm": mtm_dd_val, "max_dd_mtm_fmt": _fmt(mtm_dd_val, "${:,.2f}"),
+            "max_dd_mtm_pct": mtm_dd_pct_val, "max_dd_mtm_pct_fmt": _fmt(mtm_dd_pct_val, "{:.1f}%"),
+            "max_dd_source": mtm_source,
+            "max_dd_is_mtm": using_mtm_dd,
+            "max_dd_source_label": dd_source_label,
+            "max_dd_source_title": dd_source_title,
+            "trades": r.get("trades"), "trades_fmt": _fmt(r.get("trades"), "{:,.0f}"),
+            "trades_7d": r.get("trades_7d"), "trades_7d_fmt": _fmt(r.get("trades_7d"), "{:,.0f}"),
+            "last_trade_time": r.get("last_trade_time"),
+            "last_trade_age_fmt": _last_trade_age_fmt(r.get("last_trade_time")),
+            "is_dormant": _is_dormant(r.get("last_trade_time")),
+            "is_stale": _is_stale(r.get("last_trade_time")),
+            "penalty_flags": _penalty_flags(r),
+            "selected": bool(_state["selected"].get(w, False)),
+            "sparkline": _build_sparkline(w),
+        })
+    return rows
+
+
+def _penalty_flags(r) -> str:
+    """Return a short string showing penalty flags (empty if none)."""
+    parts = []
+    if int(_num(r.get("martingale_flag"))) == 1:
+        parts.append("M")
+    if int(_num(r.get("one_big_trade_flag"))) == 1:
+        parts.append("1B")
+    if int(_num(r.get("equity_collapse_flag"))) == 1 or int(_num(r.get("equity_collapse_flag_mtm"))) == 1:
+        parts.append("EC")
+    return " ".join(parts)
+
+
+def get_portfolio_data(days: str = "30") -> dict:
+    selected = [w for w, v in _state["selected"].items() if v]
+    uni = _state["universe"]
+    mode = _state.get("mode", "raw")
+    risk_per_wallet = float(_state.get("risk_per_wallet", 100.0))
+    normalize = bool(_state.get("normalize", True))
+    mode_col = _MODE_COL.get(mode, "realised_pnl")
+    _empty = {
+        "n_selected": 0, "total_pnl_fmt": "\u2014", "exec_loss_fmt": "\u2014",
+        "max_dd_fmt": "\u2014", "trades_fmt": "\u2014", "avg_eff_fmt": "\u2014",
+        "avg_compound_score_fmt": "\u2014", "labels_json": Markup("[]"), "values_json": Markup("[]"),
+        "has_data": False, "pnl_positive": True, "days": days, "mode": mode,
+        "risk_per_wallet": risk_per_wallet, "normalize": normalize,
+        "raw_total_pnl_fmt": "\u2014", "raw_max_dd_fmt": "\u2014",
+        "selected_wallets": [], "start_date": _state.get("start_date") or "",
+        "end_date": _state.get("end_date") or "",
+        "empty_message": "No wallets selected \u2014 select wallets to build portfolio.",
+    }
+    if not selected or uni.empty:
+        return _empty
+    portfolio_df = uni[uni["wallet"].isin(selected)]
+    n_trades = int(portfolio_df["trades"].fillna(0).sum())
+    avg_eff = float(portfolio_df["efficiency"].mean()) if not portfolio_df.empty else 0.0
+    _cs = portfolio_df["compound_score"].dropna() if "compound_score" in portfolio_df.columns else pd.Series(dtype=float)
+    avg_compound_score = float(_cs.mean()) if not _cs.empty else float("nan")
+    weights = _state.get("wallet_weights", {})
+    start_ts = _parse_date_ts(_state.get("start_date"))
+    _end_raw = _state.get("end_date")
+    end_ts = (_parse_date_ts(_end_raw) + pd.Timedelta(hours=23, minutes=59, seconds=59)) if _end_raw else None
+    exec_series: dict[str, pd.Series] = {}
+    raw_series: dict[str, pd.Series] = {}
+    wallet_exec_pnls: dict[str, float] = {}
+    wallet_dds: dict[str, tuple[float, float]] = {}
+    use_days = "none" if (start_ts is not None or end_ts is not None) else days
+    for w in selected:
+        s_exec = _get_wallet_pnl_series(w, mode, normalize, risk_per_wallet, use_days)
+        s_raw = _get_wallet_pnl_series(w, "raw", False, 1.0, use_days)
+        if start_ts is not None:
+            s_exec = s_exec.loc[start_ts:]
+            if not s_exec.empty:
+                s_exec = s_exec - s_exec.iloc[0]
+            s_raw = s_raw.loc[start_ts:]
+            if not s_raw.empty:
+                s_raw = s_raw - s_raw.iloc[0]
+        if end_ts is not None:
+            s_exec = s_exec.loc[:end_ts]
+            s_raw = s_raw.loc[:end_ts]
+        if not s_exec.empty:
+            exec_series[w] = s_exec
+            m_exec = _curve_metrics(s_exec)
+            wallet_exec_pnls[w] = m_exec["pnl"]
+            w_dd_dollar = m_exec["dd"]
+            w_dd_pct = (w_dd_dollar / abs(m_exec["peak"]) * 100) if abs(m_exec["peak"]) > 1e-12 else float("nan")
+            wallet_dds[w] = (w_dd_dollar, w_dd_pct)
+        if not s_raw.empty:
+            raw_series[w] = s_raw
+
+    if exec_series:
+        _exec_idx = pd.concat(list(exec_series.values()), axis=1).sort_index().index
+        port = pd.DataFrame({
+            w: exec_series[w].reindex(_exec_idx).ffill().fillna(0) * float(weights.get(w, 1.0))
+            for w in exec_series
+        }).sum(axis=1)
+        m_port = _curve_metrics(port)
+        portfolio_pnl = m_port["pnl"]
+        portfolio_dd = m_port["dd"]
+    else:
+        port = pd.Series(dtype=float)
+        portfolio_pnl = float("nan")
+        portfolio_dd = float("nan")
+
+    if raw_series:
+        _raw_idx = pd.concat(list(raw_series.values()), axis=1).sort_index().index
+        raw_port = pd.DataFrame({
+            w: raw_series[w].reindex(_raw_idx).ffill().fillna(0) * float(weights.get(w, 1.0))
+            for w in raw_series
+        }).sum(axis=1)
+        m_raw = _curve_metrics(raw_port)
+        raw_total_pnl = m_raw["pnl"]
+        raw_max_dd = m_raw["dd"]
+    else:
+        raw_total_pnl = float("nan")
+        raw_max_dd = float("nan")
+
+    exec_loss_pct = (
+        (raw_total_pnl - portfolio_pnl) / abs(raw_total_pnl) * 100
+        if abs(raw_total_pnl) > 1e-6 else 0.0
+    )
+
+    selected_wallets = []
+    for w in selected:
+        w_row = portfolio_df[portfolio_df["wallet"] == w]
+        if w_row.empty:
+            continue
+        r = w_row.iloc[0]
+        w_exec_pnl_disp = wallet_exec_pnls.get(w, float(r[mode_col]) if pd.notna(r.get(mode_col)) else float("nan"))
+        wt = float(weights.get(w, 1.0))
+        contribution = (w_exec_pnl_disp * wt / portfolio_pnl * 100) if abs(portfolio_pnl) > 1e-12 else float("nan")
+        w_dd_dollar, w_dd_pct = wallet_dds.get(w, (float("nan"), float("nan")))
+        _sd = r.get("slip_deg_03")
+        _slip_cls = (
+            "" if (_sd is None or (isinstance(_sd, float) and math.isnan(float(_sd))))
+            else ("pos" if float(_sd) < 10 else ("warn" if float(_sd) <= 30 else "neg"))
+        )
+        selected_wallets.append({
+            "wallet": w, "wallet_label": f"{w[:10]}\u2026{w[-6:]}",
+            "pnl": w_exec_pnl_disp, "pnl_fmt": _fmt(w_exec_pnl_disp, "${:,.2f}"),
+            "pnl_positive": bool(pd.notna(w_exec_pnl_disp) and w_exec_pnl_disp >= 0),
+            "max_dd": w_dd_dollar, "max_dd_fmt": _fmt(w_dd_dollar, "${:,.2f}"),
+            "max_dd_pct_fmt": _fmt(w_dd_pct, "{:.1f}%"),
+            # MTM drawdown truth (accountValueHistory â€” includes unrealised)
+            "max_dd_mtm": _num(r.get("max_dd_mtm")), "max_dd_mtm_fmt": _fmt(_num(r.get("max_dd_mtm")), "${:,.2f}"),
+            "max_dd_mtm_pct_fmt": _fmt(r.get("max_dd_mtm_pct"), "{:.1f}%"),
+            "max_dd_source": str(r.get("max_dd_source", "realised")),
+            "slip_deg_03": _num(r.get("slip_deg_03")), "slip_deg_03_fmt": _fmt(r.get("slip_deg_03"), "{:.2f}%"),
+            "slip_deg_03_cls": _slip_cls,
+            "contribution": _num(contribution), "contribution_fmt": _fmt(contribution, "{:+.1f}%"),
+            "contribution_positive": bool(pd.notna(contribution) and contribution >= 0),
+            "score": _num(r.get("score")), "score_fmt": _fmt(r.get("score"), "{:.4f}"),
+            "compound_score": _num(r.get("compound_score")), "compound_score_fmt": _fmt(r.get("compound_score"), "{:.1f}"),
+            "mtm_calmar": _num(r.get("mtm_calmar")), "mtm_calmar_fmt": _fmt(r.get("mtm_calmar"), "{:.2f}"),
+            "risk_pnl": _num(r.get("risk_pnl")), "risk_pnl_fmt": _fmt(r.get("risk_pnl"), "{:.3f}"),
+            "trades": _num(r.get("trades")), "trades_fmt": _fmt(r.get("trades"), "{:,.0f}"),
+        })
+
+    _shared = {
+        "n_selected": len(selected),
+        "total_pnl_fmt": _fmt(portfolio_pnl, "${:,.2f}"),
+        "exec_loss_fmt": _fmt(exec_loss_pct, "{:.1f}%"),
+        "trades_fmt": f"{n_trades:,}",
+        "avg_eff_fmt": _fmt(avg_eff, "{:.6f}"),
+        "avg_compound_score_fmt": _fmt(avg_compound_score, "{:.1f}"),
+        "pnl_positive": not math.isnan(portfolio_pnl) and portfolio_pnl >= 0,
+        "days": days, "mode": mode, "risk_per_wallet": risk_per_wallet, "normalize": normalize,
+        "raw_total_pnl_fmt": _fmt(raw_total_pnl, "${:,.2f}"),
+        "raw_max_dd_fmt": _fmt(raw_max_dd, "${:,.2f}"),
+        "selected_wallets": selected_wallets,
+        "start_date": _state.get("start_date") or "",
+        "end_date": _state.get("end_date") or "",
+        "empty_message": "No equity data available for the selected wallets.",
+    }
+
+    if not exec_series:
+        return {**_shared, "max_dd_fmt": "\u2014", "labels_json": Markup("[]"), "values_json": Markup("[]"), "has_data": False}
+
+    step = max(1, len(port) // 300)
+    port_ds = port.iloc[::step]
+    labels = [ts.strftime("%Y-%m-%d %H:%M") for ts in port_ds.index]
+    values = [round(float(v), 2) for v in port_ds.tolist()]
+    return {
+        **_shared,
+        "max_dd_fmt": _fmt(portfolio_dd, "${:,.2f}"),
+        "labels_json": Markup(json.dumps(labels)),
+        "values_json": Markup(json.dumps(values)),
+        "has_data": bool(values),
+    }
+
+
+# â”€â”€ FastAPI app â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+app = FastAPI(title="Wallet Finding Engine")
+EXPORT_PATH = BASE_DIR / "copycandidates.txt"
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
+    _load_state()
+    load_universe(preserve_selection=True)
+    _save_state()  # Ensure file exists on disk with current state
+
+
+def _selected_wallets_ordered() -> list[str]:
+    selected = {str(w).strip().lower() for w, v in _state.get("selected", {}).items() if v}
+    ordered = [str(w).strip().lower() for w in _state.get("wallet_order", []) if str(w).strip().lower() in selected]
+    remaining = sorted(selected - set(ordered))
+    return ordered + remaining
+
+
+def _wallet_text(wallets: list[str]) -> str:
+    return "\n".join(wallets) + ("\n" if wallets else "")
+
+
+@app.get("/selected_wallets.txt", response_class=PlainTextResponse)
+async def selected_wallets_txt() -> PlainTextResponse:
+    return PlainTextResponse(_wallet_text(_selected_wallets_ordered()))
+
+
+@app.get("/selected_wallets.json")
+async def selected_wallets_json() -> JSONResponse:
+    wallets = _selected_wallets_ordered()
+    return JSONResponse({"count": len(wallets), "wallets": wallets})
+
+
+@app.get("/visible_wallets.txt", response_class=PlainTextResponse)
+async def visible_wallets_txt(sort: str = "compound_score", dir: str = "desc") -> PlainTextResponse:
+    visible = _get_visible_universe(sort, dir)
+    wallets = [] if visible.empty else [str(w).strip().lower() for w in visible["wallet"].tolist()]
+    return PlainTextResponse(_wallet_text(wallets))
+
+
+@app.get("/proof_wallets.txt", response_class=PlainTextResponse)
+async def proof_wallets_txt() -> PlainTextResponse:
+    return PlainTextResponse(_wallet_text(_selected_wallets_ordered()))
+
+
+@app.post("/export_selected")
+async def export_selected():
+    wallets = _selected_wallets_ordered()
+    try:
+        EXPORT_PATH.write_text(_wallet_text(wallets), encoding="utf-8")
+        return {"ok": True, "count": len(wallets)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request, sort: str = "last_trade_time", dir: str = "desc", page: int = 1, per_page: int = 100) -> HTMLResponse:
+    sort, dir = _get_sort(sort, dir)
+    all_rows = get_table_rows(sort, dir)
+    total = len(all_rows)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * per_page
+    rows = all_rows[start:start + per_page]
+    html = render(
+        "index.html",
+        rows=rows,
+        portfolio=get_portfolio_data(_state.get("days", "30")),
+        wallet_order=_state.get("wallet_order", []),
+        wallet_weights=_state.get("wallet_weights", {}),
+        sort=sort, dir=dir,
+        filters=_state.get("filters", {}),
+        active_filter_count=_active_filter_count(),
+        hide_dormant=_state.get("hide_dormant", False),
+        activity_counts=_activity_counts(),
+        page=page, per_page=per_page, total_pages=total_pages, total_rows=total,
+    )
+    return HTMLResponse(html)
+
+
+@app.get("/portfolio", response_class=HTMLResponse)
+async def portfolio_panel(request: Request, days: str = "30") -> HTMLResponse:
+    if days not in ("7", "30", "90", "all"):
+        days = "30"
+    _state["days"] = days
+    return HTMLResponse(_render_portfolio_html(oob=False))
+
+
+@app.post("/select_wallet", response_class=HTMLResponse)
+async def select_wallet(request: Request, wallet: str = Form(), chk: str = Form(default="")) -> HTMLResponse:
+    wallet = wallet.strip().lower()
+    selected = (chk == "on")
+    _state["selected"][wallet] = selected
+    if selected:
+        if wallet not in _state["wallet_order"]:
+            _state["wallet_order"].append(wallet)
+        _state["wallet_weights"].setdefault(wallet, 1.0)
+    else:
+        _state["wallet_order"] = [w for w in _state["wallet_order"] if w != wallet]
+        _state["wallet_weights"].pop(wallet, None)
+    portfolio_html = _render_portfolio_html(oob=False)
+    _save_state()
+    return HTMLResponse(portfolio_html)
+
+
+@app.post("/select_all", response_class=HTMLResponse)
+async def select_all(request: Request, sort: str | None = Form(None), dir: str | None = Form(None)) -> HTMLResponse:
+    sort, dir = _get_sort(sort or _state.get("sort", "compound_score"), dir or _state.get("dir", "desc"))
+    visible = _get_visible_universe(sort, dir)
+    for w in visible["wallet"] if not visible.empty else []:
+        _state["selected"][w] = True
+        if w not in _state["wallet_order"]:
+            _state["wallet_order"].append(w)
+        _state["wallet_weights"].setdefault(w, 1.0)
+    _save_state()
+    return HTMLResponse(_table_plus_portfolio_oob(sort, dir))
+
+
+@app.post("/clear_all", response_class=HTMLResponse)
+async def clear_all(request: Request, sort: str | None = Form(None), dir: str | None = Form(None)) -> HTMLResponse:
+    sort, dir = _get_sort(sort or _state.get("sort", "compound_score"), dir or _state.get("dir", "desc"))
+    for w in _state["universe"]["wallet"]:
+        _state["selected"][w] = False
+    _state["wallet_order"] = []
+    _state["wallet_weights"] = {}
+    _save_state()
+    return HTMLResponse(_table_plus_portfolio_oob(sort, dir))
+
+
+@app.post("/refresh", response_class=HTMLResponse)
+async def refresh(request: Request, sort: str | None = Form(None), dir: str | None = Form(None)) -> HTMLResponse:
+    load_universe(preserve_selection=True)
+    return HTMLResponse(_table_plus_portfolio_oob(sort or _state.get("sort", "compound_score"), dir or _state.get("dir", "desc")))
+
+
+def _parse_filter(v: str, cast=float):
+    v = (v or "").strip()
+    if not v:
+        return None
+    try:
+        return cast(v)
+    except (ValueError, TypeError):
+        return None
+
+
+@app.post("/filter", response_class=HTMLResponse)
+async def apply_filter(
+    request: Request, sort: str | None = Form(None), dir: str | None = Form(None),
+    min_trades: str = Form(""), max_dd_pct: str = Form(""), max_slip_deg_03: str = Form(""),
+    min_score: str = Form(""), min_pnl: str = Form(""), min_risk_pnl: str = Form(""),
+) -> HTMLResponse:
+    _state["filters"] = {
+        k: v for k, v in {
+            "min_trades": _parse_filter(min_trades), "max_dd_pct": _parse_filter(max_dd_pct),
+            "max_slip_deg_03": _parse_filter(max_slip_deg_03), "min_score": _parse_filter(min_score),
+            "min_pnl": _parse_filter(min_pnl), "min_risk_pnl": _parse_filter(min_risk_pnl),
+        }.items() if v is not None
+    }
+    sort, dir = _get_sort(sort or _state.get("sort", "compound_score"), dir or _state.get("dir", "desc"))
+    _save_state()
+    return HTMLResponse(_table_plus_portfolio_oob(sort, dir))
+
+
+@app.post("/filter_clear", response_class=HTMLResponse)
+async def clear_filter(request: Request) -> HTMLResponse:
+    _state["filters"] = {}
+    _save_state()
+    return HTMLResponse(_table_plus_portfolio_oob(_state.get("sort", "compound_score"), _state.get("dir", "desc")))
+
+
+@app.get("/normalize", response_class=HTMLResponse)
+async def toggle_normalize(request: Request, v: str = "1") -> HTMLResponse:
+    _state["normalize"] = (v == "1")
+    _save_state()
+    return HTMLResponse(_table_plus_portfolio_oob(_state.get("sort", "compound_score"), _state.get("dir", "desc")))
+
+
+@app.get("/risk", response_class=HTMLResponse)
+async def set_risk_get(request: Request, r: str = "100") -> HTMLResponse:
+    try:
+        v = float(r)
+        if v > 0:
+            _state["risk_per_wallet"] = v
+    except (ValueError, TypeError):
+        pass
+    _save_state()
+    return HTMLResponse(_table_plus_portfolio_oob(_state.get("sort", "compound_score"), _state.get("dir", "desc")))
+
+
+@app.get("/mode", response_class=HTMLResponse)
+async def set_mode(request: Request, m: str = "raw") -> HTMLResponse:
+    if m not in _VALID_MODES:
+        m = "raw"
+    _state["mode"] = m
+    _save_state()
+    return HTMLResponse(_table_plus_portfolio_oob(_state.get("sort", "compound_score"), _state.get("dir", "desc")))
+
+
+@app.get("/set_date_range", response_class=HTMLResponse)
+async def set_date_range(request: Request, start: str = "", end: str = "") -> HTMLResponse:
+    _state["start_date"] = start.strip() or None
+    _state["end_date"] = end.strip() or None
+    _save_state()
+    return HTMLResponse(_render_portfolio_html(oob=False))
+
+
+@app.get("/toggle_dormant", response_class=HTMLResponse)
+async def toggle_dormant(request: Request) -> HTMLResponse:
+    _state["hide_dormant"] = not _state.get("hide_dormant", False)
+    _save_state()
+    sort = _state.get("sort", "compound_score")
+    dir = _state.get("dir", "desc")
+    return HTMLResponse(_table_plus_portfolio_oob(sort, dir))
+
+
+@app.get("/unselect_wallet", response_class=HTMLResponse)
+async def unselect_wallet(request: Request, wallet: str = "") -> HTMLResponse:
+    wallet = wallet.strip().lower()
+    _state["selected"][wallet] = False
+    _state["wallet_order"] = [w for w in _state["wallet_order"] if w != wallet]
+    _state["wallet_weights"].pop(wallet, None)
+    _save_state()
+    return HTMLResponse(_table_plus_portfolio_oob(_state.get("sort", "compound_score"), _state.get("dir", "desc")))
+
+
+@app.get("/data-status")
+async def data_status() -> JSONResponse:
+    """Diagnostic endpoint showing data directory, file sizes, row counts, and MTM coverage."""
+    import os, csv, glob, time as _time
+    data_dir = str(BASE_DIR / "data")
+    result = {
+        "ok": True,
+        "dashboard": "PROVING ENGINE",
+        "port": WALLET_FINDER_PORT,
+        "data_directory": data_dir,
+        "data_directory_exists": os.path.isdir(data_dir),
+        "files": {},
+        "summary": {},
+        "timestamp_utc": int(_time.time()),
+    }
+    # Core data files
+    for name, path in [
+        ("summary.csv", SUMMARY_PATH),
+        ("wallet_universe.csv", UNIVERSE_PATH),
+        ("wallet_gate.json", BASE_DIR / "data" / "wallet_gate.json"),
+        ("ui_state.json", STATE_FILE),
+        ("all_trades.csv", BASE_DIR / "data" / "all_trades.csv"),
+        ("all_trades.zip", BASE_DIR / "data" / "all_trades.zip"),
+    ]:
+        info = {"exists": path.exists()}
+        if path.exists():
+            info["size_bytes"] = path.stat().st_size
+            info["size_mb"] = round(path.stat().st_size / 1_048_576, 2)
+            info["modified_utc"] = int(path.stat().st_mtime)
+            # Row counts for CSV files
+            if path.suffix == ".csv":
+                try:
+                    with open(path, "r", encoding="utf-8-sig") as f:
+                        info["rows"] = sum(1 for _ in f) - 1  # exclude header
+                except Exception:
+                    info["rows"] = -1
+        result["files"][name] = info
+    # Equity curves
+    curves_dir = CURVE_PATH
+    curve_files = glob.glob(str(curves_dir / "*.csv")) if curves_dir.exists() else []
+    result["files"]["equity_curves/*.csv"] = {"exists": len(curve_files) > 0, "count": len(curve_files)}
+    # MTM coverage
+    if SUMMARY_PATH.exists():
+        try:
+            with open(SUMMARY_PATH, "r", encoding="utf-8") as f:
+                r = csv.DictReader(f)
+                cols = r.fieldnames or []
+                rows = list(r)
+            mtm_real = sum(1 for row in rows if row.get("mtm_source", "") == "hl_portfolio_api")
+            mtm_stale = sum(1 for row in rows if row.get("mtm_source", "") == "cache_stale")
+            mtm_none = sum(1 for row in rows if not row.get("mtm_source", "").strip() or row.get("mtm_source") == "unavailable")
+            has_mtm_col = "max_drawdown_mtm" in cols
+            result["summary"] = {
+                "total_wallets": len(rows),
+                "total_columns": len(cols),
+                "mtm_column_present": has_mtm_col,
+                "mtm_real": mtm_real,
+                "mtm_stale": mtm_stale,
+                "mtm_unavailable": mtm_none,
+                "mtm_coverage_pct": round(mtm_real / max(len(rows), 1) * 100, 1),
+            }
+        except Exception as e:
+            result["summary"] = {"error": str(e)}
+    # Universe stats
+    if UNIVERSE_PATH.exists() and UNIVERSE_PATH.stat().st_size > 0:
+        try:
+            with open(UNIVERSE_PATH, "r", encoding="utf-8") as f:
+                ur = csv.DictReader(f)
+                urows = list(ur)
+            result["universe"] = {
+                "total_wallets": len(urows),
+                "columns": ur.fieldnames if ur.fieldnames else [],
+            }
+        except Exception as e:
+            result["universe"] = {"error": str(e)}
+    # Loaded state
+    result["loaded_state"] = {
+        "universe_rows_loaded": len(_state.get("universe", pd.DataFrame())),
+        "selected_wallets": len([w for w, v in _state.get("selected", {}).items() if v]),
+        "mode": _state.get("mode", "raw"),
+        "sort": _state.get("sort", "compound_score"),
+        "filters_active": len(_state.get("filters", {})),
+    }
+    return JSONResponse(result)
+
+
+
+@app.get("/data-status-card", response_class=HTMLResponse)
+async def data_status_card() -> HTMLResponse:
+    """HTMX card showing MTM coverage, file counts, last-modified times."""
+    import csv as _csv, os as _os, time as _time
+    summary_path = BASE_DIR / "data" / "summary.csv"
+    universe_path = BASE_DIR / "data" / "wallet_universe.csv"
+    curves_dir = BASE_DIR / "data" / "equity_curves"
+
+    # Gather stats
+    summary_rows = 0
+    mtm_real = 0
+    summary_modified = ""
+    if summary_path.exists():
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                r = _csv.DictReader(f)
+                rows = list(r)
+            summary_rows = len(rows)
+            mtm_real = sum(1 for row in rows if row.get("mtm_source","") == "hl_portfolio_api")
+            summary_modified = _time.strftime("%Y-%m-%d %H:%M UTC", _time.gmtime(summary_path.stat().st_mtime))
+        except Exception:
+            pass
+
+    universe_rows = 0
+    universe_modified = ""
+    if universe_path.exists():
+        universe_rows = sum(1 for _ in open(universe_path, "r", encoding="utf-8-sig")) - 1
+        universe_modified = _time.strftime("%Y-%m-%d %H:%M UTC", _time.gmtime(universe_path.stat().st_mtime))
+
+    curve_count = len([f for f in _os.listdir(str(curves_dir)) if f.endswith(".csv")]) if curves_dir.exists() else 0
+
+    mtm_pct = round(mtm_real / max(summary_rows, 1) * 100, 1)
+    mtm_color = "#3fb950" if mtm_pct >= 30 else ("#d29922" if mtm_pct >= 10 else "#f85149")
+
+    html = f"""<div id="data-health-card" style="background:#161b22; border:1px solid #30363d; border-radius:6px; padding:10px 16px; margin-bottom:12px; font-size:12px; display:flex; gap:24px; flex-wrap:wrap; align-items:center;">
+  <div style="display:flex;align-items:center;gap:6px;">
+    <span style="color:#6e7681;text-transform:uppercase;font-size:10px;">Data Health</span>
+    <span style="color:#3fb950;font-size:10px;">â—</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:4px;">
+    <span style="color:#8b949e;">MTM:</span>
+    <span style="color:{mtm_color};font-weight:600;">{mtm_pct}%</span>
+    <span style="color:#6e7681;">({mtm_real}/{summary_rows})</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:4px;">
+    <span style="color:#8b949e;">Summary:</span>
+    <span style="color:#c9d1d9;">{summary_rows:,} rows</span>
+    <span style="color:#6e7681;font-size:10px;">{summary_modified}</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:4px;">
+    <span style="color:#8b949e;">Universe:</span>
+    <span style="color:#c9d1d9;">{universe_rows:,} wallets</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:4px;">
+    <span style="color:#8b949e;">Curves:</span>
+    <span style="color:#c9d1d9;">{curve_count:,}</span>
+  </div>
+  <div style="margin-left:auto;">
+    <a href="/data-status" style="color:#58a6ff;font-size:10px;text-decoration:none;" target="_blank">JSON â†’</a>
+  </div>
+</div>"""
+    return HTMLResponse(html)
+
+
+@app.get("/set_weight")
+async def set_weight(wallet: str = "", weight: float = 1.0) -> JSONResponse:
+    wallet = wallet.strip().lower()
+    if wallet in _state["wallet_weights"]:
+        _state["wallet_weights"][wallet] = max(0.0, weight)
+    _save_state()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/reorder_portfolio")
+async def reorder_portfolio(request: Request) -> JSONResponse:
+    data = await request.json()
+    new_order = data.get("order", [])
+    valid = set(_state["wallet_weights"].keys())
+    _state["wallet_order"] = [w for w in new_order if w in valid]
+    _save_state()
+    return JSONResponse({"ok": True})
+
+
+# â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+def _render_portfolio_html(oob: bool) -> str:
+    return render("partials/portfolio.html", portfolio=get_portfolio_data(_state.get("days", "30")),
+                  wallet_order=_state.get("wallet_order", []), wallet_weights=_state.get("wallet_weights", {}), oob=oob)
+
+
+def _table_plus_portfolio_oob(sort: str = "compound_score", dir: str = "desc") -> str:
+    sort, dir = _get_sort(sort, dir)
+    table_html = render("partials/table.html", rows=get_table_rows(sort, dir), sort=sort, dir=dir, oob=False)
+    portfolio_html = _render_portfolio_html(oob=True)
+    filter_html = _render_filter_bar(oob=True)
+    return table_html + "\n" + portfolio_html + "\n" + filter_html
+
+
+def _render_filter_bar(oob: bool = False) -> str:
+    filters = _state.get("filters", {})
+    active_filter_count = _active_filter_count()
+    return _jinja.from_string("""
+<div id="filter-bar-container"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
+  <form id="filter-form" class="filter-bar">
+    <span class="filter-label">Filters</span>
+    <label class="filter-field">Min Trades
+      <input type="number" name="min_trades" class="filter-input{% if filters.get('min_trades') is not none %} active-filter{% endif %}"
+             value="{{ filters.get('min_trades', '') }}" placeholder="any" min="0" step="1">
+    </label>
+    <label class="filter-field">Max DD %
+      <input type="number" name="max_dd_pct" class="filter-input{% if filters.get('max_dd_pct') is not none %} active-filter{% endif %}"
+             value="{{ filters.get('max_dd_pct', '') }}" placeholder="e.g. 30" min="0" step="0.1">
+    </label>
+    <label class="filter-field">Max Slip%
+      <input type="number" name="max_slip_deg_03" class="filter-input{% if filters.get('max_slip_deg_03') is not none %} active-filter{% endif %}"
+             value="{{ filters.get('max_slip_deg_03', '') }}" placeholder="any" min="0" step="0.1">
+    </label>
+    <label class="filter-field">Min CScore
+      <input type="number" name="min_score" class="filter-input{% if filters.get('min_score') is not none %} active-filter{% endif %}"
+             value="{{ filters.get('min_score', '') }}" placeholder="any" step="0.1">
+    </label>
+    <label class="filter-field">Min PnL ($)
+      <input type="number" name="min_pnl" class="filter-input{% if filters.get('min_pnl') is not none %} active-filter{% endif %}"
+             value="{{ filters.get('min_pnl', '') }}" placeholder="any">
+    </label>
+    <label class="filter-field">Min Risk
+      <input type="number" name="min_risk_pnl" class="filter-input{% if filters.get('min_risk_pnl') is not none %} active-filter{% endif %}"
+             value="{{ filters.get('min_risk_pnl', '') }}" placeholder="any" step="0.001">
+    </label>
+    <button type="button" class="btn btn-sm btn-primary"
+            hx-post="/filter" hx-include="#filter-form" hx-target="#wallet-table" hx-swap="outerHTML">Apply</button>
+    <button type="button" class="btn btn-sm"
+            hx-post="/filter_clear" hx-target="#wallet-table" hx-swap="outerHTML">Clear</button>
+    {% if active_filter_count %}
+    <span class="filter-active-badge">{{ active_filter_count }} filter{{ "s" if active_filter_count != 1 else "" }} active</span>
+    {% endif %}
+    <button type="button" class="btn btn-sm{% if hide_dormant %} btn-active{% endif %}"
+            hx-get="/toggle_dormant" hx-target="#wallet-table" hx-swap="outerHTML"
+            style="margin-left:8px"
+            title="{% if hide_dormant %}Showing only active wallets (traded <24h ago){% else %}Hide dormant wallets (no trade in 24h+){% endif %}">
+      {% if hide_dormant %}&#9679; Active Only{% else %}&#9675; Hide Dormant{% endif %}
+    </button>
+    {% if activity_counts.dormant or activity_counts.stale %}<span class="filter-active-badge" style="color:rgba(201,209,217,0.9);background:rgba(22,27,34,0.8);border-color:rgba(48,54,61,0.6);font-size:11px"><span style="color:#3fb950">{{ activity_counts.active }} active</span> &middot; <span style="color:#d29922">{{ activity_counts.stale }} stale</span> &middot; <span style="color:#f85149">{{ activity_counts.dormant }} dormant</span></span>{% endif %}
+  </form>
+</div>
+    """).render(filters=filters, active_filter_count=active_filter_count, oob=oob, hide_dormant=_state.get("hide_dormant", False), activity_counts=_activity_counts())

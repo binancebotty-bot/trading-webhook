@@ -1,0 +1,110 @@
+<div id="portfolio-panel"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
+  <div class="portfolio-header">
+    <div class="portfolio-title-group">
+      <div class="portfolio-kicker">Wallet Talent Scout - Portfolio Performance</div>
+      <h2>Portfolio ({{ portfolio.n_selected }} wallet{{ "s" if portfolio.n_selected != 1 else "" }} selected)</h2>
+      <span class="subtitle">Execution mode and range update this panel live.</span>
+    </div>
+    <div style="flex:1"></div>
+    {% for m, label in [("raw", "Raw"), ("slip_05", "0.05%"), ("slip_10", "0.10%"), ("slip_30", "0.30%")] %}
+    <a class="btn btn-sm{% if portfolio.mode == m %} btn-active{% endif %}" hx-get="/mode" hx-vals='{"m": "{{ m }}"}' hx-target="#wallet-table" hx-swap="outerHTML" style="cursor:pointer;text-decoration:none">{{ label }}</a>
+    {% endfor %}
+    <span style="width:8px;display:inline-block"></span>
+    <a class="btn btn-sm{% if portfolio.normalize %} btn-active{% endif %}" hx-get="/normalize" hx-vals='{"v": "{{ 0 if portfolio.normalize else 1 }}"}' hx-target="#wallet-table" hx-swap="outerHTML" style="cursor:pointer;text-decoration:none">Normalize</a>
+    <span style="width:8px;display:inline-block"></span>
+    <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#8b949e;white-space:nowrap">Risk/wallet ($)
+      <input type="number" name="r" min="1" step="1" value="{{ portfolio.risk_per_wallet | int }}" style="width:72px;padding:3px 6px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:12px" hx-get="/risk" hx-trigger="change" hx-target="#wallet-table" hx-swap="outerHTML">
+    </label>
+    <span style="width:8px;display:inline-block"></span>
+    <button class="btn btn-sm" onclick="toggleChartExpand(this)">Expand</button>
+    <span style="width:8px;display:inline-block"></span>
+    {% for d, label in [("7", "7D"), ("30", "30D"), ("90", "90D"), ("all", "ALL")] %}
+    <a class="btn btn-sm{% if portfolio.days == d %} btn-active{% endif %}" hx-get="/portfolio" hx-vals='{"days": "{{ d }}"}' hx-target="#wallet-table" hx-swap="outerHTML" style="cursor:pointer;text-decoration:none">{{ label }}</a>
+    {% endfor %}
+    <span style="width:8px;display:inline-block"></span>
+    <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#8b949e;white-space:nowrap">From
+      <input type="date" id="port-start-date" value="{{ portfolio.start_date }}" style="background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:11px;padding:2px 5px;width:120px">
+    </label>
+    <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#8b949e;white-space:nowrap">To
+      <input type="date" id="port-end-date" value="{{ portfolio.end_date }}" style="background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:11px;padding:2px 5px;width:120px">
+    </label>
+    <a class="btn btn-sm{% if portfolio.start_date or portfolio.end_date %} btn-active{% endif %}" hx-get="/set_date_range" hx-vals='js:{ start_date: document.getElementById("port-start-date").value, end_date: document.getElementById("port-end-date").value }' hx-target="#wallet-table" hx-swap="outerHTML" style="cursor:pointer;text-decoration:none">Apply</a>
+    {% if portfolio.start_date or portfolio.end_date %}
+    <a class="btn btn-sm" hx-get="/set_date_range" hx-vals='{"start_date":"","end_date":""}' hx-target="#wallet-table" hx-swap="outerHTML" style="cursor:pointer;text-decoration:none">Reset</a>
+    {% endif %}
+  </div>
+  <div style="display:flex;gap:14px;margin-bottom:14px;align-items:stretch">
+    <div style="display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px;flex:0 0 auto;min-width:340px">
+      <div class="metric-card"><div class="label">Leader Raw PnL <sup style="font-size:9px;color:#8b949e">unscaled</sup></div><div class="value {% if portfolio.raw_total_pnl_fmt.startswith('-') %}neg{% else %}pos{% endif %}">{{ portfolio.raw_total_pnl_fmt }}</div></div>
+      <div class="metric-card"><div class="label">Follower PnL <sup style="font-size:9px;color:#8b949e">{% if portfolio.normalize %}normalised{% else %}unscaled{% endif %}</sup></div><div class="value {% if portfolio.pnl_positive %}pos{% else %}neg{% endif %}">{{ portfolio.total_pnl_fmt }}</div></div>
+      <div class="metric-card"><div class="label">Raw Real DD (Ref) <sup style="font-size:9px;color:#8b949e">realised-only</sup></div><div class="value neg">{{ portfolio.raw_max_dd_fmt }}</div></div>
+      <div class="metric-card"><div class="label">Follower DD <sup style="font-size:9px;color:#8b949e">{% if portfolio.normalize %}normalised{% else %}unscaled{% endif %}</sup></div><div class="value neg">{{ portfolio.max_dd_fmt }}</div></div>
+      <div class="metric-card"><div class="label">Leader MTM DD <sup style="font-size:9px;color:#8b949e">unscaled</sup></div><div class="value neg">{{ portfolio.leader_mtm_max_dd_fmt }}</div></div>
+      <div class="metric-card"><div class="label">Follower MTM DD <sup style="font-size:9px;color:#8b949e">{% if portfolio.normalize %}normalised floor{% else %}real-risk floor{% endif %}</sup></div><div class="value neg">{{ portfolio.follower_mtm_max_dd_fmt }}</div></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px;flex:1">
+      <div class="metric-card" style="flex:1"><div class="label">Slippage Impact %</div><div class="value {% if portfolio.mode == 'raw' %}{% else %}warn{% endif %}">{{ portfolio.exec_loss_fmt }}</div></div>
+      <div class="metric-card" style="flex:1"><div class="label">Avg CScore</div><div class="value">{{ portfolio.avg_compound_score_fmt }}</div></div>
+      <div class="metric-card" style="flex:1"><div class="label">Trades</div><div class="value">{{ portfolio.trades_fmt }}</div></div>
+    </div>
+  </div>
+  {% if portfolio.has_data %}
+  <div class="chart-wrap"><canvas id="equity-chart"></canvas></div>
+  {% else %}
+  <div class="portfolio-empty">{{ portfolio.empty_message }}</div>
+  {% endif %}
+  <script type="application/json" id="chart-data">{"labels": {{ portfolio.labels_json }}, "values": {{ portfolio.values_json }}, "mtmDd": {{ portfolio.mtm_dd_values_json }}, "mtmMarker": {{ portfolio.mtm_marker_values_json }}, "pnlPoints": {{ portfolio.pnl_points_json }}, "mtmDdPoints": {{ portfolio.mtm_dd_points_json }}, "mtmMarkerPoints": {{ portfolio.mtm_marker_points_json }}}</script>
+  {% if portfolio.selected_wallets %}
+  <div style="margin-top:14px">
+    <div id="portfolio-list-wrap">
+      <div id="portfolio-list-header">
+        <span style="width:16px;flex-shrink:0"></span>
+        <span>Wallet</span>
+        <span class="num-head">PnL</span>
+        <span class="num-head">Real DD</span>
+        <span class="num-head">Contrib</span>
+        <span class="num-head">Score</span>
+        <span class="num-head">CScore</span>
+        <span class="num-head">Slip%</span>
+        <span class="num-head">PnL/Real DD</span>
+        <span class="num-head">MTM DD</span>
+        <span class="num-head">Trades</span>
+        <span class="center-head">Weight</span>
+        <span></span>
+      </div>
+      <div id="portfolio-list">
+        {%- for w in portfolio.selected_wallets -%}
+        <div class="wallet-pill" draggable="true" data-wallet="{{ w.wallet }}">
+            <span class="drag-handle">⠿</span>
+            <span class="wallet-label">{{ w.wallet_label }}</span>
+            <span class="wallet-pnl {{ 'pos' if w.pnl_positive else 'neg' }}">{{ w.pnl_fmt }}</span>
+            <span class="wallet-dd" title="{{ w.max_dd_source_title }}">{{ w.max_dd_fmt }} <sup>{{ w.max_dd_source_label }}</sup></span>
+            <span class="wallet-contrib {{ 'pos' if w.contribution_positive else 'neg' }}">{{ w.contribution_fmt }}</span>
+            <span class="wallet-score">{{ w.score_fmt }}</span>
+            <span class="wallet-compound-score">{{ w.compound_score_fmt }}</span>
+            <span class="wallet-slip-deg {{ w.slip_deg_03_cls }}">{{ w.slip_deg_03_fmt }}</span>
+            <span class="wallet-risk-pnl" title="PnL divided by the Real DD column, which prefers MTM drawdown when available.">{{ w.risk_pnl_fmt }}</span>
+            <span class="wallet-mtm-dd">{{ w.max_dd_mtm_fmt }}</span>
+            <span class="wallet-trades">{{ w.trades_fmt }}</span>
+            <span class="wallet-weight-cell">
+              <span class="wallet-weight-label">×</span>
+              <input type="number" name="weight" min="0" step="0.1" value="{{ wallet_weights.get(w.wallet, 1.0) }}" class="wallet-weight" hx-get="/set_weight?wallet={{ w.wallet }}" hx-include="this" hx-trigger="change" hx-swap="none" />
+            </span>
+            <button class="btn remove-wallet" hx-get="/unselect_wallet?wallet={{ w.wallet }}" hx-target="#wallet-table" hx-swap="outerHTML">✕</button>
+        </div>
+        {%- endfor -%}
+      </div>
+    </div>
+  </div>
+  <script>
+  (function() {
+    const container = document.getElementById("portfolio-list"); if (!container) return; let dragged = null;
+    container.querySelectorAll(".wallet-pill").forEach(el => {
+      el.addEventListener("dragstart", () => { dragged = el; setTimeout(() => el.style.opacity = "0.4", 0); });
+      el.addEventListener("dragend", () => { el.style.opacity = ""; dragged = null; const order = [...container.querySelectorAll(".wallet-pill")].map(el => el.dataset.wallet); fetch("/reorder_portfolio", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({order}) }); });
+      el.addEventListener("dragover", e => { e.preventDefault(); if (!dragged || dragged === el) return; const rect = el.getBoundingClientRect(); if (e.clientY > rect.top + rect.height / 2) el.after(dragged); else el.before(dragged); });
+    });
+  })();
+  </script>
+  {% endif %}
+</div>

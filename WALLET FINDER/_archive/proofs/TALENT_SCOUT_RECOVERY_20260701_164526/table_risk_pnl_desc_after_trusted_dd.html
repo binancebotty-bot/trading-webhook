@@ -1,0 +1,1648 @@
+﻿<div id="wallet-table">
+
+<table id="walletTable">
+  <thead>
+    <tr>
+      <th style="width:36px"></th>
+      
+      
+      <th class="num"><a hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"sort":"rank","dir":"desc"}' style="cursor:pointer;text-decoration:none;color:inherit">#</a></th>
+      
+      <th class="num"><a hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"sort":"wallet","dir":"desc"}' style="cursor:pointer;text-decoration:none;color:inherit">Wallet</a></th>
+      
+      <th class="num"><a hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"sort":"compound_score","dir":"desc"}' style="cursor:pointer;text-decoration:none;color:inherit">CScore</a></th>
+      
+      <th class="num"><a hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"sort":"realised_pnl","dir":"desc"}' style="cursor:pointer;text-decoration:none;color:inherit">PnL</a></th>
+      
+      <th class="num"><a hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"sort":"risk_pnl","dir":"asc"}' style="cursor:pointer;text-decoration:none;color:inherit">PnL/DD▼</a></th>
+      
+      <th class="num"><a hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"sort":"slip_deg_03","dir":"desc"}' style="cursor:pointer;text-decoration:none;color:inherit">Slip%</a></th>
+      
+      <th class="num"><a hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"sort":"max_dd","dir":"desc"}' style="cursor:pointer;text-decoration:none;color:inherit">Max DD</a></th>
+      
+      <th class="num"><a hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"sort":"trades","dir":"desc"}' style="cursor:pointer;text-decoration:none;color:inherit">Trades</a></th>
+      
+      <th class="num"><a hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"sort":"trades_7d","dir":"desc"}' style="cursor:pointer;text-decoration:none;color:inherit">7d</a></th>
+      
+      <th class="num"><a hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"sort":"penalty_flags","dir":"desc"}' style="cursor:pointer;text-decoration:none;color:inherit">Flags</a></th>
+      
+      <th class="num"><a hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"sort":"last_trade_time","dir":"desc"}' style="cursor:pointer;text-decoration:none;color:inherit">Last Trade</a></th>
+      
+      <th style="width:180px">Trend</th>
+    </tr>
+  </thead>
+  <tbody>
+    
+    <tr class="wallet-row selected-row wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0x96d51bfb2eb2c52265e9db1811b3ce65e3351127"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">1</td>
+      <td class="mono">0x96d51bfb…351127</td>
+      <td class="num">39.8</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $247,516.08">$247,516.08</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $247,516.08 / DD $-426.27">580.656</td>
+      <td class="num pos">8.41%</td>
+      <td class="num neg">$-426.27 <span style="color:#8b949e;font-size:11px">(5.8%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">219</td>
+      <td class="num">32</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">21.5h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.99 6.53,28.85 9.8,28.8 13.06,28.77 16.33,27.98 19.59,27.18 22.86,26.42 26.12,25.55 29.39,24.76 32.65,24.76 35.92,24.08 39.18,23.23 42.45,23.23 45.71,23.23 48.98,23.21 52.24,20.99 55.51,20.98 58.78,20.98 62.04,20.57 65.31,20.54 68.57,20.54 71.84,20.54 75.1,20.54 78.37,20.52 81.63,19.24 84.9,18.48 88.16,17.44 91.43,14.37 94.69,11.06 97.96,10.87 101.22,10.1 104.49,9.5 107.76,9.49 111.02,9.49 114.29,9.49 117.55,9.49 120.82,8.46 124.08,7.23 127.35,7.23 130.61,6.23 133.88,5.02 137.14,5.02 140.41,4.65 143.67,4.63 146.94,4.45 150.2,4.21 153.47,4.02 156.73,3.01 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0x73ca19b101b9226671e6487cc9ffcc50bf010b8e"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">2</td>
+      <td class="mono">0x73ca19b1…010b8e</td>
+      <td class="num">45.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $59,245.27">$59,245.27</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $59,245.27 / DD $-1,102.54">53.735</td>
+      <td class="num pos">4.96%</td>
+      <td class="num neg">$-1,102.54 <span style="color:#8b949e;font-size:11px">(4.6%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">768</td>
+      <td class="num">247</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 2.2d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.0 3.27,2.22 6.53,3.44 9.8,4.65 13.06,4.74 16.33,4.82 19.59,4.91 22.86,4.99 26.12,6.33 29.39,6.61 32.65,7.96 35.92,8.24 39.18,8.42 42.45,8.6 45.71,9.25 48.98,9.9 52.24,10.6 55.51,11.81 58.78,12.52 62.04,13.73 65.31,13.87 68.57,14.1 71.84,14.25 75.1,14.48 78.37,15.27 81.63,16.06 84.9,17.42 88.16,17.57 91.43,18.92 94.69,19.97 97.96,21.33 101.22,21.49 104.49,22.83 107.76,23.89 111.02,23.93 114.29,24.71 117.55,24.74 120.82,25.52 124.08,25.7 127.35,25.87 130.61,26.21 133.88,27.36 137.14,27.71 140.41,28.86 143.67,28.86 146.94,28.92 150.2,28.93 153.47,28.94 156.73,28.99 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0xd70d4d38b4f8ebce6dfab6630680b290e1609feb"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">3</td>
+      <td class="mono">0xd70d4d38…609feb</td>
+      <td class="num">50.3</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $40,853.85">$40,853.85</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $40,853.85 / DD $-840.69">48.596</td>
+      <td class="num warn">13.35%</td>
+      <td class="num neg">$-840.69 <span style="color:#8b949e;font-size:11px">(15.2%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,380</td>
+      <td class="num">473</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">23.9h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,26.64 6.53,26.33 9.8,23.43 13.06,23.94 16.33,6.32 19.59,5.51 22.86,5.76 26.12,5.7 29.39,5.58 32.65,5.56 35.92,4.19 39.18,4.64 42.45,4.64 45.71,4.64 48.98,4.65 52.24,4.68 55.51,4.73 58.78,4.73 62.04,4.86 65.31,4.86 68.57,4.61 71.84,4.45 75.1,4.41 78.37,4.29 81.63,4.21 84.9,3.98 88.16,3.96 91.43,3.89 94.69,3.62 97.96,3.61 101.22,3.53 104.49,3.4 107.76,2.68 111.02,2.61 114.29,2.53 117.55,1.87 120.82,1.68 124.08,1.23 127.35,1.15 130.61,1.0 133.88,1.0 137.14,1.01 140.41,1.01 143.67,1.09 146.94,1.13 150.2,1.22 153.47,1.25 156.73,1.3 160.0,1.84"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0xe19195e8b6a641c9e6623ff26acba2d869e000ba"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">4</td>
+      <td class="mono">0xe19195e8…e000ba</td>
+      <td class="num">46.9</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,908.98">$1,908.98</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,908.98 / DD $-88.80">21.498</td>
+      <td class="num warn">24.01%</td>
+      <td class="num neg">$-88.80 <span style="color:#8b949e;font-size:11px">(23.1%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">64</td>
+      <td class="num">17</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 2.2d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,29.0 6.53,28.99 9.8,28.99 13.06,28.96 16.33,28.93 19.59,28.88 22.86,28.85 26.12,28.83 29.39,28.8 32.65,24.49 35.92,20.12 39.18,20.16 42.45,20.11 45.71,19.47 48.98,17.11 52.24,16.97 55.51,16.92 58.78,16.29 62.04,13.92 65.31,12.06 68.57,10.96 71.84,9.23 75.1,7.36 78.37,6.27 81.63,4.54 84.9,4.6 88.16,4.38 91.43,4.37 94.69,4.14 97.96,3.53 101.22,3.28 104.49,3.03 107.76,2.55 111.02,2.55 114.29,2.69 117.55,2.83 120.82,1.98 124.08,1.74 127.35,1.48 130.61,1.0 133.88,1.0 137.14,1.15 140.41,1.28 143.67,1.44 146.94,1.48 150.2,1.48 153.47,1.48 156.73,1.48 160.0,1.61"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0xda6e708e4fa369f4fab08b6fd828ea59759457b8"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">5</td>
+      <td class="mono">0xda6e708e…9457b8</td>
+      <td class="num">41.4</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $6,583.78">$6,583.78</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $6,583.78 / DD $-695.28">9.469</td>
+      <td class="num warn">14.59%</td>
+      <td class="num neg">$-695.28 <span style="color:#8b949e;font-size:11px">(27.3%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,412</td>
+      <td class="num">21</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.9d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.66 6.53,28.33 9.8,27.1 13.06,19.12 16.33,19.1 19.59,18.9 22.86,18.38 26.12,18.33 29.39,15.5 32.65,13.88 35.92,12.21 39.18,12.15 42.45,9.47 45.71,9.42 48.98,9.34 52.24,7.5 55.51,7.7 58.78,7.72 62.04,7.72 65.31,7.85 68.57,7.94 71.84,8.06 75.1,7.82 78.37,6.06 81.63,6.14 84.9,5.52 88.16,4.99 91.43,4.39 94.69,4.39 97.96,4.38 101.22,3.15 104.49,3.21 107.76,3.23 111.02,3.34 114.29,1.0 117.55,1.47 120.82,1.83 124.08,1.84 127.35,2.97 130.61,3.01 133.88,3.05 137.14,4.08 140.41,5.48 143.67,5.57 146.94,5.57 150.2,5.61 153.47,5.85 156.73,6.61 160.0,6.86"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0x5ce7b35092828b45c1399079f00a923230a70eea"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">6</td>
+      <td class="mono">0x5ce7b350…a70eea</td>
+      <td class="num">42.8</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $3,992.26">$3,992.26</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $3,992.26 / DD $-550.90">7.247</td>
+      <td class="num warn">20.43%</td>
+      <td class="num neg">$-550.90 <span style="color:#8b949e;font-size:11px">(13.8%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">444</td>
+      <td class="num">16</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.2d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,28.82 3.27,28.88 6.53,28.9 9.8,28.9 13.06,28.91 16.33,28.98 19.59,29.0 22.86,29.0 26.12,24.88 29.39,23.14 32.65,18.33 35.92,16.59 39.18,9.51 42.45,2.44 45.71,2.42 48.98,2.41 52.24,2.4 55.51,2.38 58.78,2.36 62.04,2.33 65.31,2.3 68.57,2.29 71.84,2.27 75.1,2.17 78.37,2.0 81.63,1.92 84.9,1.84 88.16,1.83 91.43,1.81 94.69,1.8 97.96,1.75 101.22,1.72 104.49,1.7 107.76,1.69 111.02,1.68 114.29,1.66 117.55,1.64 120.82,1.61 124.08,1.58 127.35,1.57 130.61,1.55 133.88,1.45 137.14,1.28 140.41,1.2 143.67,1.12 146.94,1.11 150.2,1.1 153.47,1.08 156.73,1.03 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0x9db82c502472d76742fdd69609dfcc6e01327401"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">7</td>
+      <td class="mono">0x9db82c50…327401</td>
+      <td class="num">43.4</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $49,317.81">$49,317.81</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $49,317.81 / DD $-8,207.75">6.009</td>
+      <td class="num warn">18.82%</td>
+      <td class="num neg">$-8,207.75 <span style="color:#8b949e;font-size:11px">(14.6%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">15,810</td>
+      <td class="num">485</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">22.1h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,13.63 3.27,10.65 6.53,7.59 9.8,4.45 13.06,1.22 16.33,7.67 19.59,14.12 22.86,19.75 26.12,25.38 29.39,24.17 32.65,23.01 35.92,22.79 39.18,21.25 42.45,19.55 45.71,21.67 48.98,20.99 52.24,19.8 55.51,17.75 58.78,15.53 62.04,20.34 65.31,17.93 68.57,18.01 71.84,18.56 75.1,18.92 78.37,21.63 81.63,21.91 84.9,25.01 88.16,27.24 91.43,28.58 94.69,28.64 97.96,28.99 101.22,29.0 104.49,28.97 107.76,28.76 111.02,28.73 114.29,28.49 117.55,28.47 120.82,25.93 124.08,22.52 127.35,19.04 130.61,15.47 133.88,16.2 137.14,12.54 140.41,8.79 143.67,8.61 146.94,7.44 150.2,5.5 153.47,4.94 156.73,3.55 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0x1c6ad8b5b9de20ff6c3193ed96cb6a6540533146"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">8</td>
+      <td class="mono">0x1c6ad8b5…533146</td>
+      <td class="num">34.6</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $720.23">$720.23</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $720.23 / DD $-176.79">4.074</td>
+      <td class="num neg">215.60%</td>
+      <td class="num neg">$-176.79 <span style="color:#8b949e;font-size:11px">(7.7%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,548</td>
+      <td class="num">91</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,11.86 3.27,13.61 6.53,14.06 9.8,15.03 13.06,14.9 16.33,12.98 19.59,12.77 22.86,10.89 26.12,8.73 29.39,8.73 32.65,8.26 35.92,8.15 39.18,7.63 42.45,6.76 45.71,4.18 48.98,4.5 52.24,4.12 55.51,3.76 58.78,3.46 62.04,3.86 65.31,1.72 68.57,13.27 71.84,14.82 75.1,29.0 78.37,23.57 81.63,23.85 84.9,23.85 88.16,23.79 91.43,23.76 94.69,24.05 97.96,23.98 101.22,22.89 104.49,22.11 107.76,22.48 111.02,22.19 114.29,21.59 117.55,20.14 120.82,20.33 124.08,19.87 127.35,17.34 130.61,17.16 133.88,18.24 137.14,17.21 140.41,14.8 143.67,13.79 146.94,7.54 150.2,6.68 153.47,5.67 156.73,3.5 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0x311d1833cfd0f70cdc25a9ccd75e6d6baf9c7eb5"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">9</td>
+      <td class="mono">0x311d1833…9c7eb5</td>
+      <td class="num">19.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $2,929.06">$2,929.06</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $2,929.06 / DD $-1,315.63">2.226</td>
+      <td class="num warn">15.77%</td>
+      <td class="num neg">$-1,315.63 <span style="color:#8b949e;font-size:11px">(3.9%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">617</td>
+      <td class="num">59</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.9d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 17.78,24.52 35.56,19.11 53.33,18.77 71.11,18.44 88.89,12.98 106.67,4.79 124.44,4.78 142.22,3.3 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0x82d7ebbd8106b08e91f8ac9f4ca97fbd98125c29"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">10</td>
+      <td class="mono">0x82d7ebbd…125c29</td>
+      <td class="num">9.8</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $32,382.42">$32,382.42</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $32,382.42 / DD $-15,564.46">2.081</td>
+      <td class="num warn">15.11%</td>
+      <td class="num neg">$-15,564.46 <span style="color:#8b949e;font-size:11px">(15.3%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">3,707</td>
+      <td class="num">190</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,2.98 3.27,2.71 6.53,2.01 9.8,1.98 13.06,1.7 16.33,1.01 19.59,1.0 22.86,1.0 26.12,14.26 29.39,15.0 32.65,28.26 35.92,29.0 39.18,28.86 42.45,28.79 45.71,28.65 48.98,28.58 52.24,28.44 55.51,28.29 58.78,28.15 62.04,28.01 65.31,26.95 68.57,26.86 71.84,25.47 75.1,25.36 78.37,25.24 81.63,25.18 84.9,24.12 88.16,23.55 91.43,23.51 94.69,23.41 97.96,23.35 101.22,22.95 104.49,22.93 107.76,21.59 111.02,20.53 114.29,20.44 117.55,19.05 120.82,18.94 124.08,18.82 127.35,18.76 130.61,17.7 133.88,17.13 137.14,17.09 140.41,16.99 143.67,16.93 146.94,16.53 150.2,16.51 153.47,15.16 156.73,15.16 160.0,15.16"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0x47807d3f6ae34ff6aa1fc8fe4e7b742197c1e125"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">11</td>
+      <td class="mono">0x47807d3f…c1e125</td>
+      <td class="num">6.5</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $47,669.29">$47,669.29</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $47,669.29 / DD $-35,584.89">1.340</td>
+      <td class="num warn">22.81%</td>
+      <td class="num neg">$-35,584.89 <span style="color:#8b949e;font-size:11px">(26.8%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">18,706</td>
+      <td class="num">938</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">21.5h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,15.42 6.53,2.29 9.8,1.84 13.06,1.59 16.33,1.42 19.59,1.11 22.86,1.13 26.12,1.14 29.39,1.16 32.65,1.18 35.92,1.19 39.18,1.19 42.45,1.0 45.71,1.01 48.98,1.05 52.24,1.05 55.51,1.43 58.78,1.44 62.04,1.45 65.31,1.6 68.57,1.65 71.84,1.75 75.1,1.96 78.37,2.12 81.63,2.26 84.9,2.3 88.16,2.24 91.43,2.09 94.69,2.01 97.96,1.79 101.22,1.79 104.49,1.76 107.76,1.76 111.02,1.74 114.29,1.74 117.55,1.51 120.82,1.49 124.08,1.49 127.35,1.48 130.61,1.48 133.88,1.32 137.14,1.15 140.41,1.06 143.67,1.0 146.94,1.0 150.2,7.62 153.47,14.48 156.73,15.51 160.0,21.33"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0x6a3ea4ac7626423a70ef602a91aab51f8a38398d"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">12</td>
+      <td class="mono">0x6a3ea4ac…38398d</td>
+      <td class="num">0.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $6,392.21">$6,392.21</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $6,392.21 / DD $-7,527.03">0.849</td>
+      <td class="num neg">81.10%</td>
+      <td class="num neg">$-7,527.03 <span style="color:#8b949e;font-size:11px">(29.4%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">3,923</td>
+      <td class="num">121</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">23.2h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.0 3.27,1.21 6.53,1.51 9.8,1.81 13.06,2.49 16.33,2.65 19.59,2.86 22.86,3.0 26.12,3.27 29.39,3.48 32.65,3.65 35.92,3.76 39.18,3.87 42.45,4.01 45.71,4.1 48.98,4.23 52.24,4.32 55.51,4.41 58.78,4.55 62.04,7.17 65.31,8.55 68.57,17.74 71.84,17.9 75.1,19.25 78.37,19.5 81.63,19.81 84.9,21.3 88.16,29.0 91.43,27.96 94.69,15.21 97.96,14.84 101.22,10.95 104.49,8.9 107.76,9.1 111.02,9.87 114.29,10.06 117.55,10.25 120.82,10.48 124.08,11.62 127.35,16.03 130.61,16.32 133.88,16.47 137.14,16.61 140.41,16.76 143.67,16.9 146.94,17.04 150.2,17.19 153.47,17.33 156.73,17.48 160.0,17.62"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0x5a750001557da504e3ad0fa7244c0eb0e9b28258"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">13</td>
+      <td class="mono">0x5a750001…b28258</td>
+      <td class="num">40.4</td>
+      <td class="num pos" title="Source-consistent historical PnL for A. Current execution/range PnL: $106,245.47">$106,245.47</td>
+      <td class="num" title="Source-consistent PnL/DD: A PnL $106,245.47 / DD $-149,350.38">0.711</td>
+      <td class="num warn">11.75%</td>
+      <td class="num neg">$-149,350.38 <span style="color:#8b949e;font-size:11px">(78.9%)</span><sup title="All-time MTM - includes unrealised PnL from accountValueHistory">A</sup></td>
+      <td class="num">6,617</td>
+      <td class="num">367</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">21.8h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,27.98 6.53,27.8 9.8,27.61 13.06,27.45 16.33,27.37 19.59,27.3 22.86,27.12 26.12,26.94 29.39,26.32 32.65,25.72 35.92,25.44 39.18,25.51 42.45,25.51 45.71,25.58 48.98,25.59 52.24,25.59 55.51,25.59 58.78,25.59 62.04,25.43 65.31,25.25 68.57,25.49 71.84,26.29 75.1,24.33 78.37,22.94 81.63,21.7 84.9,21.2 88.16,16.15 91.43,15.62 94.69,14.78 97.96,14.25 101.22,13.07 104.49,9.07 107.76,8.26 111.02,1.28 114.29,1.16 117.55,1.0 120.82,1.63 124.08,2.68 127.35,3.47 130.61,4.3 133.88,5.98 137.14,6.57 140.41,3.71 143.67,3.63 146.94,3.34 150.2,3.45 153.47,7.06 156.73,8.72 160.0,8.88"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row selected-row wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" checked hx-post="/select_wallet" hx-vals='{"wallet": "0xa844e81dacc2b24ed2016bc530d2731cbd5d9f48"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">14</td>
+      <td class="mono">0xa844e81d…5d9f48</td>
+      <td class="num">71.9</td>
+      <td class="num pos" title="Source-consistent historical PnL for ?. Current execution/range PnL: $12,281.89">$12,281.89</td>
+      <td class="num" title="PnL/DD unavailable: no trusted MTM/scanner drawdown for this wallet">—</td>
+      <td class="num pos">2.64%</td>
+      <td class="num neg">$-9.43 <span style="color:#8b949e;font-size:11px">(—)</span><sup title="Untrusted fallback - DD percentage is unknown">?</sup></td>
+      <td class="num">34</td>
+      <td class="num">25</td>
+      <td style="text-align:center;font-size:10px"><span class="" title="Penalty flags">—</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.4d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 4.85,28.98 9.7,28.96 14.55,28.96 19.39,28.95 24.24,28.93 29.09,28.93 33.94,28.96 38.79,28.95 43.64,28.95 48.48,28.92 53.33,28.92 58.18,28.92 63.03,28.92 67.88,28.92 72.73,28.91 77.58,28.91 82.42,28.9 87.27,27.8 92.12,26.38 96.97,25.73 101.82,22.28 106.67,21.63 111.52,20.65 116.36,17.19 121.21,15.94 126.06,13.97 130.91,12.99 135.76,9.53 140.61,6.98 145.45,5.09 150.3,4.38 155.15,2.97 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x0f0d9105b88e938df7816b23e7ad4d1660568a0e"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">15</td>
+      <td class="mono">0x0f0d9105…568a0e</td>
+      <td class="num">51.4</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $72,897.68">$72,897.68</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $72,897.68 / DD $-236.66">308.027</td>
+      <td class="num pos">2.02%</td>
+      <td class="num neg">$-236.66 <span style="color:#8b949e;font-size:11px">(22.3%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,228</td>
+      <td class="num">1,203</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 6.9d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.8 6.53,27.57 9.8,26.92 13.06,25.68 16.33,25.04 19.59,24.84 22.86,24.65 26.12,23.67 29.39,22.69 32.65,22.21 35.92,21.73 39.18,21.71 42.45,21.42 45.71,20.93 48.98,20.45 52.24,20.43 55.51,20.14 58.78,20.04 62.04,19.52 65.31,18.84 68.57,15.55 71.84,14.45 75.1,14.42 78.37,13.71 81.63,13.36 84.9,13.25 88.16,12.74 91.43,12.05 94.69,8.77 97.96,7.67 101.22,7.63 104.49,6.92 107.76,6.57 111.02,6.57 114.29,6.57 117.55,5.29 120.82,4.02 124.08,3.66 127.35,2.51 130.61,2.15 133.88,1.0 137.14,1.01 140.41,1.01 143.67,1.03 146.94,1.04 150.2,1.05 153.47,1.06 156.73,1.06 160.0,1.07"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xad227f63d34e7251c1d0ab65e64eeea07aee4e44"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">16</td>
+      <td class="mono">0xad227f63…ee4e44</td>
+      <td class="num">45.5</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,405,990.20">$1,405,990.20</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,405,990.20 / DD $-13,484.72">104.265</td>
+      <td class="num neg">41.09%</td>
+      <td class="num neg">$-13,484.72 <span style="color:#8b949e;font-size:11px">(9.7%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">7,235</td>
+      <td class="num">1,011</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">23.4h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,15.76 3.27,15.79 6.53,16.56 9.8,18.39 13.06,18.43 16.33,19.79 19.59,21.31 22.86,21.82 26.12,23.64 29.39,23.68 32.65,25.04 35.92,25.99 39.18,27.08 42.45,29.0 45.71,27.35 48.98,27.34 52.24,25.69 55.51,24.92 58.78,24.89 62.04,24.89 65.31,24.47 68.57,24.47 71.84,22.4 75.1,22.3 78.37,21.88 81.63,20.5 84.9,19.52 88.16,17.3 91.43,16.19 94.69,16.17 97.96,16.17 101.22,16.16 104.49,16.16 107.76,16.06 111.02,14.56 114.29,13.1 117.55,12.71 120.82,11.08 124.08,10.65 127.35,7.33 130.61,7.23 133.88,5.99 137.14,8.85 140.41,8.89 143.67,8.91 146.94,8.91 150.2,8.92 153.47,8.93 156.73,14.66 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x18a1a5fea64711d527622f0eac3e3c120f06627e"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">17</td>
+      <td class="mono">0x18a1a5fe…06627e</td>
+      <td class="num">46.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $31,187.72">$31,187.72</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $31,187.72 / DD $-638.98">48.809</td>
+      <td class="num neg">30.04%</td>
+      <td class="num neg">$-638.98 <span style="color:#8b949e;font-size:11px">(4.7%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,804</td>
+      <td class="num">266</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.94 6.53,28.87 9.8,28.85 13.06,28.79 16.33,28.7 19.59,28.6 22.86,28.49 26.12,28.38 29.39,28.25 32.65,28.11 35.92,27.93 39.18,27.8 42.45,27.57 45.71,27.53 48.98,27.53 52.24,27.17 55.51,25.88 58.78,25.35 62.04,25.25 65.31,23.87 68.57,23.78 71.84,23.68 75.1,23.58 78.37,23.48 81.63,23.36 84.9,23.24 88.16,23.11 91.43,22.98 94.69,22.84 97.96,22.69 101.22,22.54 104.49,22.38 107.76,22.21 111.02,22.04 114.29,21.86 117.55,21.67 120.82,21.6 124.08,21.56 127.35,21.5 130.61,21.48 133.88,21.28 137.14,21.07 140.41,20.85 143.67,20.63 146.94,20.41 150.2,20.17 153.47,19.93 156.73,19.68 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xb1ec7febea4f841d525785955b7fe0e812d6e86a"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">18</td>
+      <td class="mono">0xb1ec7feb…d6e86a</td>
+      <td class="num">52.5</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $466,411.27">$466,411.27</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $466,411.27 / DD $-10,590.20">44.042</td>
+      <td class="num neg">262.77%</td>
+      <td class="num neg">$-10,590.20 <span style="color:#8b949e;font-size:11px">(54.5%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">2,316</td>
+      <td class="num">1,303</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">21.5h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.87 6.53,28.66 9.8,28.08 13.06,26.14 16.33,25.84 19.59,22.3 22.86,20.13 26.12,18.78 29.39,18.59 32.65,18.4 35.92,12.82 39.18,12.44 42.45,12.02 45.71,11.17 48.98,10.43 52.24,10.16 55.51,9.34 58.78,8.64 62.04,8.46 65.31,5.78 68.57,5.58 71.84,5.57 75.1,1.1 78.37,1.12 81.63,1.1 84.9,1.0 88.16,1.05 91.43,12.47 94.69,12.08 97.96,11.97 101.22,11.62 104.49,11.56 107.76,11.5 111.02,11.08 114.29,10.92 117.55,10.61 120.82,10.19 124.08,10.11 127.35,10.04 130.61,9.85 133.88,9.36 137.14,9.31 140.41,9.2 143.67,9.06 146.94,8.78 150.2,8.7 153.47,8.56 156.73,8.54 160.0,8.52"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x6b3008d6e60617f44b1135ffc669fc87caec75b2"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">19</td>
+      <td class="mono">0x6b3008d6…ec75b2</td>
+      <td class="num">48.4</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $54,627.93">$54,627.93</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $54,627.93 / DD $-1,313.57">41.587</td>
+      <td class="num neg">58.60%</td>
+      <td class="num neg">$-1,313.57 <span style="color:#8b949e;font-size:11px">(32.2%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">3,570</td>
+      <td class="num">920</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.4d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.15 3.27,1.11 6.53,1.0 9.8,1.01 13.06,1.02 16.33,1.05 19.59,1.09 22.86,1.15 26.12,1.11 29.39,1.22 32.65,1.32 35.92,1.57 39.18,2.02 42.45,2.38 45.71,2.93 48.98,3.47 52.24,4.01 55.51,4.02 58.78,4.03 62.04,4.05 65.31,4.42 68.57,4.43 71.84,4.89 75.1,5.54 78.37,6.28 81.63,7.21 84.9,8.91 88.16,9.24 91.43,9.42 94.69,12.08 97.96,12.56 101.22,14.84 104.49,15.32 107.76,17.03 111.02,17.06 114.29,22.81 117.55,24.41 120.82,25.12 124.08,26.09 127.35,27.11 130.61,28.78 133.88,28.88 137.14,29.0 140.41,28.95 143.67,28.12 146.94,27.94 150.2,27.62 153.47,27.2 156.73,27.06 160.0,26.86"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x4f6f5df248a5d6ecd97a89df2aff450f100ecb9b"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">20</td>
+      <td class="mono">0x4f6f5df2…0ecb9b</td>
+      <td class="num">42.3</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $3,099.06">$3,099.06</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $3,099.06 / DD $-93.00">33.323</td>
+      <td class="num neg">111.15%</td>
+      <td class="num neg">$-93.00 <span style="color:#8b949e;font-size:11px">(36.2%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">320</td>
+      <td class="num">7</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.14 6.53,26.49 9.8,24.74 13.06,25.69 16.33,25.7 19.59,25.72 22.86,26.28 26.12,26.84 29.39,27.39 32.65,27.4 35.92,27.41 39.18,27.97 42.45,28.54 45.71,27.69 48.98,26.84 52.24,25.18 55.51,22.71 58.78,19.85 62.04,16.58 65.31,16.09 68.57,15.61 71.84,16.35 75.1,14.09 78.37,14.02 81.63,11.75 84.9,11.75 88.16,11.71 91.43,11.71 94.69,11.7 97.96,11.35 101.22,11.35 104.49,11.3 107.76,11.3 111.02,11.3 114.29,10.94 117.55,10.19 120.82,8.93 124.08,9.23 127.35,8.64 130.61,8.53 133.88,7.94 137.14,8.32 140.41,6.59 143.67,4.73 146.94,2.75 150.2,2.86 153.47,2.86 156.73,1.2 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xbdcf2ce10fca60e5a565e8a9c998f4a8e3dfbb93"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">21</td>
+      <td class="mono">0xbdcf2ce1…dfbb93</td>
+      <td class="num">53.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $509.22">$509.22</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $509.22 / DD $-15.51">32.832</td>
+      <td class="num pos">0.30%</td>
+      <td class="num neg">$-15.51 <span style="color:#8b949e;font-size:11px">(20.5%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">83</td>
+      <td class="num">83</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 8.8d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 16.0,25.7 32.0,22.34 48.0,18.95 64.0,14.71 80.0,9.76 96.0,9.22 112.0,7.63 128.0,4.03 144.0,3.74 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x5b7e9a3f8b0bbc802552da0fb12e9e4a4cbbdd33"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">22</td>
+      <td class="mono">0x5b7e9a3f…bbdd33</td>
+      <td class="num">43.3</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $24,927.42">$24,927.42</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $24,927.42 / DD $-1,023.07">24.365</td>
+      <td class="num pos">5.83%</td>
+      <td class="num neg">$-1,023.07 <span style="color:#8b949e;font-size:11px">(27.1%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">557</td>
+      <td class="num">47</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 30.5d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,19.48 3.27,18.12 6.53,18.09 9.8,17.07 13.06,16.32 16.33,14.97 19.59,14.25 22.86,13.46 26.12,12.45 29.39,9.66 32.65,8.61 35.92,6.21 39.18,5.2 42.45,4.92 45.71,1.36 48.98,1.88 52.24,5.12 55.51,6.42 58.78,9.35 62.04,9.97 65.31,11.09 68.57,11.6 71.84,12.86 75.1,20.64 78.37,29.0 81.63,28.85 84.9,28.7 88.16,28.52 91.43,26.01 94.69,25.99 97.96,23.5 101.22,23.38 104.49,20.9 107.76,20.62 111.02,19.89 114.29,19.12 117.55,17.76 120.82,17.73 124.08,16.71 127.35,15.96 130.61,14.61 133.88,13.89 137.14,13.1 140.41,12.09 143.67,9.3 146.94,8.25 150.2,5.85 153.47,4.84 156.73,4.56 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x29bb9fb9f13434aad57e5e4855d2ff10bb6913d1"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">23</td>
+      <td class="mono">0x29bb9fb9…6913d1</td>
+      <td class="num">51.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $4,615.90">$4,615.90</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $4,615.90 / DD $-207.70">22.224</td>
+      <td class="num neg">67.16%</td>
+      <td class="num neg">$-207.70 <span style="color:#8b949e;font-size:11px">(19.4%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">447</td>
+      <td class="num">158</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.8d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,25.41 3.27,25.53 6.53,25.54 9.8,25.55 13.06,25.58 16.33,25.7 19.59,25.73 22.86,25.55 26.12,25.89 29.39,26.01 32.65,26.09 35.92,26.13 39.18,26.18 42.45,26.29 45.71,26.38 48.98,26.42 52.24,26.86 55.51,26.85 58.78,27.66 62.04,27.67 65.31,27.68 68.57,27.71 71.84,28.33 75.1,28.68 78.37,28.74 81.63,28.8 84.9,29.0 88.16,8.29 91.43,8.29 94.69,8.28 97.96,8.29 101.22,8.38 104.49,8.38 107.76,8.44 111.02,8.43 114.29,8.42 117.55,8.41 120.82,8.37 124.08,4.89 127.35,4.63 130.61,4.73 133.88,4.59 137.14,4.56 140.41,4.63 143.67,4.53 146.94,4.45 150.2,3.97 153.47,3.71 156.73,3.15 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x33cbc23fa0d11085b6c7123a6f1167da595a1328"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">24</td>
+      <td class="mono">0x33cbc23f…5a1328</td>
+      <td class="num">47.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $855.95">$855.95</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $855.95 / DD $-39.13">21.875</td>
+      <td class="num neg">59.40%</td>
+      <td class="num neg">$-39.13 <span style="color:#8b949e;font-size:11px">(17.9%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">119</td>
+      <td class="num">30</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.2d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,22.3 3.27,22.15 6.53,21.97 9.8,22.21 13.06,22.24 16.33,22.34 19.59,22.44 22.86,22.08 26.12,21.5 29.39,21.63 32.65,21.69 35.92,24.39 39.18,26.82 42.45,26.09 45.71,25.36 48.98,27.18 52.24,29.0 55.51,22.94 58.78,21.98 62.04,15.74 65.31,14.79 68.57,13.84 71.84,7.9 75.1,6.94 78.37,1.0 81.63,1.38 84.9,1.32 88.16,1.65 91.43,1.66 94.69,2.21 97.96,2.25 101.22,2.27 104.49,2.45 107.76,2.49 111.02,2.5 114.29,2.51 117.55,3.08 120.82,3.27 124.08,3.34 127.35,3.41 130.61,3.43 133.88,3.45 137.14,3.57 140.41,3.64 143.67,3.7 146.94,3.59 150.2,3.52 153.47,2.83 156.73,2.58 160.0,2.54"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xf8e6f23f18a04bfd481ce71ac894488568285f1b"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">25</td>
+      <td class="mono">0xf8e6f23f…285f1b</td>
+      <td class="num">43.4</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $80,223.35">$80,223.35</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $80,223.35 / DD $-3,854.06">20.815</td>
+      <td class="num pos">6.00%</td>
+      <td class="num neg">$-3,854.06 <span style="color:#8b949e;font-size:11px">(34.9%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,173</td>
+      <td class="num">300</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.6d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.96 6.53,28.96 9.8,28.94 13.06,28.93 16.33,28.92 19.59,28.92 22.86,28.92 26.12,28.9 29.39,28.88 32.65,28.87 35.92,28.84 39.18,28.83 42.45,28.81 45.71,28.8 48.98,28.78 52.24,28.76 55.51,28.75 58.78,28.74 62.04,28.73 65.31,28.72 68.57,28.66 71.84,28.57 75.1,28.56 78.37,28.46 81.63,28.46 84.9,28.42 88.16,28.32 91.43,28.24 94.69,28.24 97.96,28.24 101.22,28.24 104.49,28.2 107.76,28.19 111.02,28.18 114.29,28.17 117.55,6.11 120.82,6.29 124.08,6.28 127.35,6.26 130.61,6.22 133.88,4.52 137.14,4.25 140.41,4.22 143.67,2.54 146.94,2.5 150.2,1.65 153.47,1.38 156.73,1.01 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x7c930969fcf3e5a5c78bcf2e1cefda3f53e3c8fd"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">26</td>
+      <td class="mono">0x7c930969…e3c8fd</td>
+      <td class="num">53.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $885,792.20">$885,792.20</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $885,792.20 / DD $-49,341.39">17.952</td>
+      <td class="num neg">388.55%</td>
+      <td class="num neg">$-49,341.39 <span style="color:#8b949e;font-size:11px">(24.9%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">14,195</td>
+      <td class="num">14,195</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">21.2h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.89 6.53,25.28 9.8,22.44 13.06,21.75 16.33,21.39 19.59,20.39 22.86,20.11 26.12,11.89 29.39,11.81 32.65,11.45 35.92,11.41 39.18,11.09 42.45,11.68 45.71,11.35 48.98,11.3 52.24,10.25 55.51,9.92 58.78,9.42 62.04,8.37 65.31,8.11 68.57,7.63 71.84,7.26 75.1,1.73 78.37,1.72 81.63,1.72 84.9,1.64 88.16,1.64 91.43,1.49 94.69,1.49 97.96,1.48 101.22,1.47 104.49,1.3 107.76,1.17 111.02,1.07 114.29,1.03 117.55,1.02 120.82,1.0 124.08,1.0 127.35,1.01 130.61,1.31 133.88,1.31 137.14,1.76 140.41,1.9 143.67,2.29 146.94,2.3 150.2,2.3 153.47,3.29 156.73,3.59 160.0,5.22"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xbe3ba643bdbcc8b8a5ea341306681692448d5618"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">27</td>
+      <td class="mono">0xbe3ba643…8d5618</td>
+      <td class="num">43.4</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,918.16">$1,918.16</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,918.16 / DD $-121.70">15.761</td>
+      <td class="num neg">34.00%</td>
+      <td class="num neg">$-121.70 <span style="color:#8b949e;font-size:11px">(15.8%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">117</td>
+      <td class="num">18</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,28.94 3.27,28.94 6.53,28.94 9.8,29.0 13.06,28.98 16.33,28.67 19.59,28.57 22.86,28.35 26.12,27.25 29.39,27.24 32.65,27.27 35.92,27.18 39.18,27.08 42.45,26.99 45.71,26.92 48.98,26.29 52.24,26.39 55.51,26.42 58.78,26.45 62.04,26.64 65.31,26.71 68.57,27.0 71.84,27.17 75.1,27.65 78.37,26.12 81.63,25.29 84.9,24.54 88.16,24.57 91.43,24.53 94.69,24.41 97.96,23.2 101.22,22.73 104.49,22.68 107.76,8.17 111.02,7.99 114.29,7.93 117.55,7.79 120.82,7.64 124.08,7.38 127.35,7.02 130.61,6.66 133.88,6.42 137.14,6.42 140.41,4.63 143.67,3.69 146.94,2.54 150.2,1.13 153.47,1.12 156.73,1.05 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xe45facf1c452119420028af52e37faf511bb333e"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">28</td>
+      <td class="mono">0xe45facf1…bb333e</td>
+      <td class="num">52.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,722.04">$1,722.04</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,722.04 / DD $-119.89">14.364</td>
+      <td class="num neg">76.64%</td>
+      <td class="num neg">$-119.89 <span style="color:#8b949e;font-size:11px">(11.3%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">183</td>
+      <td class="num">111</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 28.7d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,25.42 4.32,24.58 8.65,24.22 12.97,23.7 17.3,23.82 21.62,23.61 25.95,26.31 30.27,29.0 34.59,28.26 38.92,27.36 43.24,26.07 47.57,24.78 51.89,24.13 56.22,23.48 60.54,21.7 64.86,19.93 69.19,18.69 73.51,17.3 77.84,15.01 82.16,12.72 86.49,10.95 90.81,8.87 95.14,8.83 99.46,8.79 103.78,7.08 108.11,5.38 112.43,6.87 116.76,6.66 121.08,6.59 125.41,6.57 129.73,5.87 134.05,5.83 138.38,5.75 142.7,5.73 147.03,5.03 151.35,4.99 155.68,2.99 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x6645b4c474fb2f68f7803d37c9a79eaaf50763e5"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">29</td>
+      <td class="mono">0x6645b4c4…0763e5</td>
+      <td class="num">0.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $8,125.71">$8,125.71</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $8,125.71 / DD $-565.86">14.360</td>
+      <td class="num warn">23.93%</td>
+      <td class="num neg">$-565.86 <span style="color:#8b949e;font-size:11px">(42.5%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">398</td>
+      <td class="num">99</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M 1B</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 2.2d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.66 6.53,28.23 9.8,27.43 13.06,26.97 16.33,26.95 19.59,25.35 22.86,24.41 26.12,23.49 29.39,22.64 32.65,22.47 35.92,21.33 39.18,16.86 42.45,11.87 45.71,11.51 48.98,11.46 52.24,10.99 55.51,10.67 58.78,9.06 62.04,9.05 65.31,8.99 68.57,8.8 71.84,8.46 75.1,8.03 78.37,7.23 81.63,6.77 84.9,6.75 88.16,5.16 91.43,4.22 94.69,3.29 97.96,2.44 101.22,2.27 104.49,1.13 107.76,1.09 111.02,1.0 114.29,1.64 117.55,2.82 120.82,4.89 124.08,5.12 127.35,5.12 130.61,5.22 133.88,5.69 137.14,8.86 140.41,10.2 143.67,10.37 146.94,10.46 150.2,10.48 153.47,10.81 156.73,10.97 160.0,11.18"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x9ffd4e6286b9dd3c8f55ce349e3398cde416b829"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">30</td>
+      <td class="mono">0x9ffd4e62…16b829</td>
+      <td class="num">44.9</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $250.57">$250.57</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $250.57 / DD $-21.53">11.638</td>
+      <td class="num neg">220.72%</td>
+      <td class="num neg">$-21.53 <span style="color:#8b949e;font-size:11px">(3.6%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,040</td>
+      <td class="num">86</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">23.2h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,14.7 3.27,14.24 6.53,13.76 9.8,12.96 13.06,12.13 16.33,11.96 19.59,11.76 22.86,11.57 26.12,11.39 29.39,10.93 32.65,10.43 35.92,9.92 39.18,9.92 42.45,9.34 45.71,9.33 48.98,9.41 52.24,9.43 55.51,9.41 58.78,9.26 62.04,8.52 65.31,7.77 68.57,4.54 71.84,1.0 75.1,1.08 78.37,1.12 81.63,15.04 84.9,28.97 88.16,29.0 91.43,29.0 94.69,27.98 97.96,26.67 101.22,26.45 104.49,26.19 107.76,26.08 111.02,26.07 114.29,25.96 117.55,25.95 120.82,25.85 124.08,25.78 127.35,25.77 130.61,25.57 133.88,25.56 137.14,25.54 140.41,24.25 143.67,24.74 146.94,24.62 150.2,24.69 153.47,24.81 156.73,25.38 160.0,25.54"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x041836d6c0617c694b70b57680f45905811076db"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">31</td>
+      <td class="mono">0x041836d6…1076db</td>
+      <td class="num">39.6</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $485,071.42">$485,071.42</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $485,071.42 / DD $-44,549.40">10.888</td>
+      <td class="num neg">114.80%</td>
+      <td class="num neg">$-44,549.40 <span style="color:#8b949e;font-size:11px">(21.7%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">6,507</td>
+      <td class="num">683</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">21.1h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.0 3.27,1.0 6.53,1.77 9.8,1.82 13.06,5.22 16.33,5.22 19.59,5.23 22.86,5.24 26.12,7.17 29.39,7.21 32.65,7.26 35.92,8.33 39.18,8.42 42.45,9.82 45.71,10.94 48.98,11.62 52.24,12.63 55.51,12.79 58.78,13.63 62.04,14.88 65.31,14.88 68.57,14.97 71.84,15.64 75.1,16.2 78.37,16.97 81.63,16.98 84.9,17.98 88.16,17.99 91.43,18.26 94.69,18.68 97.96,19.35 101.22,20.61 104.49,21.16 107.76,22.17 111.02,22.2 114.29,22.2 117.55,22.2 120.82,24.25 124.08,24.75 127.35,24.75 130.61,25.1 133.88,25.59 137.14,25.68 140.41,26.24 143.67,26.29 146.94,27.38 150.2,27.39 153.47,28.38 156.73,28.41 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x2a3d9be40d86c12b1d14532f176b6e7c202b22f0"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">32</td>
+      <td class="mono">0x2a3d9be4…2b22f0</td>
+      <td class="num">0.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,358.20">$1,358.20</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,358.20 / DD $-133.86">10.146</td>
+      <td class="num neg">101.30%</td>
+      <td class="num neg">$-133.86 <span style="color:#8b949e;font-size:11px">(84.9%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">815</td>
+      <td class="num">91</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M 1B EC</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">23.0h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.5 3.27,1.0 6.53,4.25 9.8,7.62 13.06,11.34 16.33,14.54 19.59,18.25 22.86,18.0 26.12,17.68 29.39,20.55 32.65,21.35 35.92,25.02 39.18,25.1 42.45,29.0 45.71,18.91 48.98,14.18 52.24,10.19 55.51,12.81 58.78,13.34 62.04,14.51 65.31,15.8 68.57,16.05 71.84,15.68 75.1,15.26 78.37,15.01 81.63,14.71 84.9,14.37 88.16,13.99 91.43,13.55 94.69,13.05 97.96,13.05 101.22,12.57 104.49,12.47 107.76,12.42 111.02,12.32 114.29,11.75 117.55,11.57 120.82,11.57 124.08,11.37 127.35,11.35 130.61,11.15 133.88,10.87 137.14,10.54 140.41,9.94 143.67,9.23 146.94,8.32 150.2,7.97 153.47,7.94 156.73,1.73 160.0,1.34"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xc6c1f4434b5548972f4813845dc84de1ab19a051"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">33</td>
+      <td class="mono">0xc6c1f443…19a051</td>
+      <td class="num">51.9</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $2,496.29">$2,496.29</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $2,496.29 / DD $-261.20">9.557</td>
+      <td class="num neg">35.96%</td>
+      <td class="num neg">$-261.20 <span style="color:#8b949e;font-size:11px">(31.8%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">83</td>
+      <td class="num">55</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 2.5d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.45 3.27,1.37 6.53,1.17 9.8,1.14 13.06,1.13 16.33,1.06 19.59,1.0 22.86,1.35 26.12,1.58 29.39,1.95 32.65,2.04 35.92,5.81 39.18,6.14 42.45,15.47 45.71,18.53 48.98,19.79 52.24,20.52 55.51,20.65 58.78,20.65 62.04,20.66 65.31,20.66 68.57,20.67 71.84,20.67 75.1,20.67 78.37,20.68 81.63,20.68 84.9,20.69 88.16,20.8 91.43,20.84 94.69,20.84 97.96,20.85 101.22,20.93 104.49,20.99 107.76,20.57 111.02,18.76 114.29,18.83 117.55,18.84 120.82,18.84 124.08,18.85 127.35,18.87 130.61,18.89 133.88,18.89 137.14,20.49 140.41,21.02 143.67,23.52 146.94,24.34 150.2,24.76 153.47,25.44 156.73,28.95 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xcd4ece3b233c3e4b2d86a3a59508aeb3f1cd793f"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">34</td>
+      <td class="mono">0xcd4ece3b…cd793f</td>
+      <td class="num">43.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $10,011.71">$10,011.71</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $10,011.71 / DD $-1,106.98">9.044</td>
+      <td class="num neg">35.54%</td>
+      <td class="num neg">$-1,106.98 <span style="color:#8b949e;font-size:11px">(17.2%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,223</td>
+      <td class="num">121</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.46 6.53,28.44 9.8,26.88 13.06,26.81 16.33,24.6 19.59,21.19 22.86,17.98 26.12,17.98 29.39,17.07 32.65,17.03 35.92,17.03 39.18,17.02 42.45,16.97 45.71,16.97 48.98,16.65 52.24,16.4 55.51,16.25 58.78,16.25 62.04,16.24 65.31,16.09 68.57,15.94 71.84,15.34 75.1,15.2 78.37,14.72 81.63,14.55 84.9,14.36 88.16,13.98 91.43,14.16 94.69,13.68 97.96,13.67 101.22,13.58 104.49,13.57 107.76,13.56 111.02,13.45 114.29,12.56 117.55,12.1 120.82,12.1 124.08,11.29 127.35,10.29 130.61,7.51 133.88,6.13 137.14,4.63 140.41,3.86 143.67,3.11 146.94,1.0 150.2,1.78 153.47,1.74 156.73,1.72 160.0,1.31"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xdd17b90bd9ef91b785ed28399eead2f28366f9c4"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">35</td>
+      <td class="mono">0xdd17b90b…66f9c4</td>
+      <td class="num">44.9</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $58,473.99">$58,473.99</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $58,473.99 / DD $-6,649.86">8.793</td>
+      <td class="num pos">6.97%</td>
+      <td class="num neg">$-6,649.86 <span style="color:#8b949e;font-size:11px">(19.1%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,730</td>
+      <td class="num">212</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">21.1h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.29 6.53,26.6 9.8,22.43 13.06,22.4 16.33,22.31 19.59,22.22 22.86,21.89 26.12,14.92 29.39,15.21 32.65,14.68 35.92,14.6 39.18,14.52 42.45,10.59 45.71,10.06 48.98,9.97 52.24,5.74 55.51,4.68 58.78,4.6 62.04,2.49 65.31,1.08 68.57,1.08 71.84,1.08 75.1,1.08 78.37,1.08 81.63,1.08 84.9,1.06 88.16,1.03 91.43,1.03 94.69,1.03 97.96,1.02 101.22,1.02 104.49,1.02 107.76,1.02 111.02,1.02 114.29,1.02 117.55,1.02 120.82,1.02 124.08,1.02 127.35,1.01 130.61,1.01 133.88,1.01 137.14,1.01 140.41,1.01 143.67,1.01 146.94,1.01 150.2,1.01 153.47,1.01 156.73,1.0 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xdff64ed301b24c07bda5489d5bc20a36eabf7caa"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">36</td>
+      <td class="mono">0xdff64ed3…bf7caa</td>
+      <td class="num">42.5</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $2,543.51">$2,543.51</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $2,543.51 / DD $-292.17">8.706</td>
+      <td class="num warn">22.09%</td>
+      <td class="num neg">$-292.17 <span style="color:#8b949e;font-size:11px">(22.8%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">404</td>
+      <td class="num">16</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 12.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,28.24 3.27,28.3 6.53,28.33 9.8,28.35 13.06,28.36 16.33,28.36 19.59,28.62 22.86,28.71 26.12,28.65 29.39,28.51 32.65,28.38 35.92,28.43 39.18,28.57 42.45,28.71 45.71,28.74 48.98,28.79 52.24,28.86 55.51,28.91 58.78,28.95 62.04,28.96 65.31,28.97 68.57,29.0 71.84,28.99 75.1,28.7 78.37,21.06 81.63,20.64 84.9,20.61 88.16,20.59 91.43,20.24 94.69,16.97 97.96,14.72 101.22,6.98 104.49,5.14 107.76,5.13 111.02,4.99 114.29,4.92 117.55,4.68 120.82,4.41 124.08,4.09 127.35,3.98 130.61,3.74 133.88,3.36 137.14,3.16 140.41,2.94 143.67,2.48 146.94,2.41 150.2,2.11 153.47,1.8 156.73,1.41 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x36d504a0195582a283fd3daf3ba364ca3e3df070"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">37</td>
+      <td class="mono">0x36d504a0…3df070</td>
+      <td class="num">41.9</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,922.52">$1,922.52</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,922.52 / DD $-240.32">8.000</td>
+      <td class="num pos">1.78%</td>
+      <td class="num neg">$-240.32 <span style="color:#8b949e;font-size:11px">(46.2%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">324</td>
+      <td class="num">7</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 27.7d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 53.33,21.69 106.67,11.34 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xdf49ceaf63c2c767263249e0c0b070a6d9300af4"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">38</td>
+      <td class="mono">0xdf49ceaf…300af4</td>
+      <td class="num">46.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $2,984.63">$2,984.63</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $2,984.63 / DD $-375.53">7.948</td>
+      <td class="num neg">59.42%</td>
+      <td class="num neg">$-375.53 <span style="color:#8b949e;font-size:11px">(26.8%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">193</td>
+      <td class="num">32</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,28.83 3.27,29.0 6.53,28.88 9.8,28.88 13.06,28.87 16.33,28.48 19.59,28.08 22.86,24.95 26.12,23.45 29.39,22.4 32.65,19.15 35.92,17.66 39.18,16.61 42.45,15.27 45.71,13.92 48.98,13.41 52.24,12.9 55.51,12.07 58.78,11.24 62.04,11.23 65.31,11.22 68.57,8.25 71.84,5.03 75.1,4.9 78.37,4.52 81.63,4.39 84.9,4.25 88.16,3.87 91.43,3.74 94.69,4.65 97.96,4.7 101.22,5.17 104.49,5.21 107.76,5.77 111.02,6.21 114.29,5.51 117.55,4.49 120.82,4.12 124.08,4.07 127.35,3.62 130.61,3.57 133.88,3.39 137.14,3.32 140.41,2.79 143.67,2.68 146.94,1.0 150.2,1.0 153.47,1.04 156.73,1.04 160.0,1.03"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xe2cd1590edcf1d80ed7b3b23209be47572999f9d"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">39</td>
+      <td class="mono">0xe2cd1590…999f9d</td>
+      <td class="num">48.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $137.45">$137.45</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $137.45 / DD $-18.28">7.519</td>
+      <td class="num neg">278.12%</td>
+      <td class="num neg">$-18.28 <span style="color:#8b949e;font-size:11px">(5.3%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">99</td>
+      <td class="num">28</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 13.3d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.9,22.55 7.8,16.68 11.71,15.83 15.61,9.96 19.51,9.1 23.41,11.97 27.32,12.62 31.22,12.85 35.12,12.97 39.02,13.62 42.93,13.85 46.83,13.89 50.73,13.91 54.63,13.95 58.54,13.96 62.44,14.8 66.34,15.08 70.24,17.82 74.15,19.18 78.05,19.43 81.95,18.87 85.85,18.85 89.76,18.29 93.66,19.4 97.56,19.95 101.46,23.06 105.37,23.13 109.27,23.29 113.17,23.45 117.07,23.49 120.98,23.79 124.88,24.13 128.78,24.21 132.68,24.36 136.59,24.53 140.49,24.57 144.39,24.87 148.29,9.89 152.2,17.9 156.1,1.0 160.0,9.01"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xdbe38e0fc37955287265f4ecf2f4aa5b6a43da47"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">40</td>
+      <td class="mono">0xdbe38e0f…43da47</td>
+      <td class="num">54.5</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $6,289.60">$6,289.60</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $6,289.60 / DD $-838.24">7.503</td>
+      <td class="num neg">187.95%</td>
+      <td class="num neg">$-838.24 <span style="color:#8b949e;font-size:11px">(25.8%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,050</td>
+      <td class="num">658</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">22.3h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,26.35 3.27,27.86 6.53,27.93 9.8,28.09 13.06,28.18 16.33,28.2 19.59,28.21 22.86,28.29 26.12,28.39 29.39,28.48 32.65,28.69 35.92,28.71 39.18,28.92 42.45,29.0 45.71,29.0 48.98,16.14 52.24,16.14 55.51,15.82 58.78,15.5 62.04,15.44 65.31,14.26 68.57,13.84 71.84,13.53 75.1,13.48 78.37,12.75 81.63,12.72 84.9,12.72 88.16,12.96 91.43,13.32 94.69,13.86 97.96,13.98 101.22,14.65 104.49,11.62 107.76,11.62 111.02,11.6 114.29,11.58 117.55,11.58 120.82,11.48 124.08,11.46 127.35,11.45 130.61,11.94 133.88,11.57 137.14,11.17 140.41,7.8 143.67,7.79 146.94,7.42 150.2,7.42 153.47,5.54 156.73,3.98 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xf97c5df40558dbd9105e40d35ea2ac0fa314982b"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">41</td>
+      <td class="mono">0xf97c5df4…14982b</td>
+      <td class="num">53.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $9,099.04">$9,099.04</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $9,099.04 / DD $-1,296.40">7.019</td>
+      <td class="num warn">15.73%</td>
+      <td class="num neg">$-1,296.40 <span style="color:#8b949e;font-size:11px">(21.6%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">664</td>
+      <td class="num">382</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 13.9d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 4.85,28.77 9.7,28.74 14.55,28.65 19.39,19.43 24.24,19.2 29.09,18.11 33.94,18.02 38.79,17.96 43.64,17.92 48.48,15.01 53.33,14.99 58.18,14.76 63.03,14.73 67.88,14.64 72.73,5.42 77.58,5.19 82.42,4.1 87.27,4.01 92.12,3.95 96.97,3.91 101.82,1.0 106.67,1.57 111.52,1.62 116.36,2.16 121.21,2.53 126.06,2.91 130.91,2.95 135.76,3.21 140.61,3.26 145.45,3.8 150.3,4.17 155.15,4.55 160.0,4.59"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x0fe0251e8382afc65758a3bb4d39fc1ff628be8e"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">42</td>
+      <td class="mono">0x0fe0251e…28be8e</td>
+      <td class="num">43.5</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,610.30">$1,610.30</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,610.30 / DD $-255.71">6.297</td>
+      <td class="num neg">324.80%</td>
+      <td class="num neg">$-255.71 <span style="color:#8b949e;font-size:11px">(8.4%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,480</td>
+      <td class="num">88</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,2.06 3.27,2.01 6.53,1.99 9.8,1.98 13.06,1.92 16.33,1.91 19.59,1.91 22.86,1.86 26.12,1.84 29.39,1.82 32.65,1.76 35.92,1.6 39.18,1.6 42.45,1.42 45.71,1.42 48.98,1.22 52.24,1.0 55.51,2.72 58.78,4.3 62.04,6.4 65.31,7.92 68.57,9.24 71.84,10.7 75.1,10.9 78.37,10.95 81.63,13.18 84.9,14.0 88.16,15.59 91.43,17.68 94.69,19.2 97.96,20.52 101.22,21.99 104.49,22.18 107.76,22.23 111.02,24.47 114.29,27.12 117.55,28.62 120.82,28.96 124.08,28.98 127.35,29.0 130.61,28.99 133.88,28.94 137.14,28.9 140.41,28.74 143.67,28.67 146.94,28.57 150.2,26.4 153.47,23.86 156.73,24.13 160.0,24.22"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x1d1102094dcb265a7a05ad033fb2200fe70f9655"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">43</td>
+      <td class="mono">0x1d110209…0f9655</td>
+      <td class="num">38.5</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $970.40">$970.40</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $970.40 / DD $-156.22">6.212</td>
+      <td class="num neg">58.67%</td>
+      <td class="num neg">$-156.22 <span style="color:#8b949e;font-size:11px">(26.5%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,947</td>
+      <td class="num">51</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 16.3d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,12.25 3.27,11.52 6.53,10.79 9.8,10.06 13.06,6.38 16.33,1.0 19.59,1.34 22.86,2.04 26.12,3.99 29.39,6.34 32.65,6.86 35.92,9.46 39.18,13.23 42.45,13.42 45.71,14.38 48.98,15.18 52.24,15.63 55.51,17.94 58.78,17.95 62.04,17.95 65.31,17.96 68.57,18.02 71.84,19.67 75.1,20.04 78.37,21.13 81.63,22.08 84.9,22.18 88.16,22.18 91.43,22.43 94.69,22.47 97.96,23.48 101.22,24.41 104.49,24.5 107.76,29.0 111.02,6.73 114.29,7.39 117.55,7.83 120.82,8.03 124.08,8.1 127.35,8.04 130.61,7.75 133.88,7.85 137.14,7.85 140.41,7.48 143.67,6.74 146.94,6.25 150.2,5.81 153.47,5.78 156.73,5.36 160.0,4.18"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xa317b49b2a4b4d455f1e3d425aa195ee1ae70e57"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">44</td>
+      <td class="mono">0xa317b49b…e70e57</td>
+      <td class="num">45.3</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $280.10">$280.10</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $280.10 / DD $-45.70">6.129</td>
+      <td class="num neg">33.53%</td>
+      <td class="num neg">$-45.70 <span style="color:#8b949e;font-size:11px">(9.4%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">139</td>
+      <td class="num">27</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 29.4d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,27.87 7.62,27.93 15.24,28.62 22.86,28.63 30.48,28.92 38.1,29.0 45.71,27.83 53.33,27.45 60.95,27.07 68.57,26.3 76.19,26.4 83.81,26.65 91.43,25.72 99.05,15.74 106.67,11.08 114.29,3.48 121.9,3.62 129.52,3.58 137.14,3.57 144.76,3.02 152.38,2.8 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x8825e6ed11c7f9c0874579c9f4bba192b9e81c8f"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">45</td>
+      <td class="mono">0x8825e6ed…e81c8f</td>
+      <td class="num">45.5</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $3,709.23">$3,709.23</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $3,709.23 / DD $-619.58">5.987</td>
+      <td class="num neg">136.03%</td>
+      <td class="num neg">$-619.58 <span style="color:#8b949e;font-size:11px">(39.4%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">318</td>
+      <td class="num">60</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,18.22 3.27,18.23 6.53,19.21 9.8,19.56 13.06,19.57 16.33,19.61 19.59,19.61 22.86,25.01 26.12,25.42 29.39,25.85 32.65,27.11 35.92,27.16 39.18,28.63 42.45,28.64 45.71,28.7 48.98,28.99 52.24,29.0 55.51,21.54 58.78,21.54 62.04,21.53 65.31,21.51 68.57,21.51 71.84,21.5 75.1,21.42 78.37,18.57 81.63,18.55 84.9,17.83 88.16,15.44 91.43,15.43 94.69,15.42 97.96,14.08 101.22,14.2 104.49,14.51 107.76,14.57 111.02,14.18 114.29,13.63 117.55,13.1 120.82,12.79 124.08,12.48 127.35,11.87 130.61,11.74 133.88,11.51 137.14,10.94 140.41,10.27 143.67,9.53 146.94,8.1 150.2,6.58 153.47,6.39 156.73,5.76 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x2c03879c43d86b6844bf58b16dff503b594e65eb"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">46</td>
+      <td class="mono">0x2c03879c…4e65eb</td>
+      <td class="num">45.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,186.52">$1,186.52</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,186.52 / DD $-201.00">5.903</td>
+      <td class="num neg">100.13%</td>
+      <td class="num neg">$-201.00 <span style="color:#8b949e;font-size:11px">(24.1%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">805</td>
+      <td class="num">68</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,18.83 3.27,19.13 6.53,17.34 9.8,16.87 13.06,21.86 16.33,21.12 19.59,17.83 22.86,16.28 26.12,16.26 29.39,15.95 32.65,15.74 35.92,16.27 39.18,15.86 42.45,15.84 45.71,20.49 48.98,19.12 52.24,15.06 55.51,14.87 58.78,8.13 62.04,7.19 65.31,6.33 68.57,6.07 71.84,1.98 75.1,1.87 78.37,1.0 81.63,3.17 84.9,5.14 88.16,9.34 91.43,13.55 94.69,17.1 97.96,17.09 101.22,17.0 104.49,16.03 107.76,14.27 111.02,14.5 114.29,14.58 117.55,14.71 120.82,17.22 124.08,18.78 127.35,20.84 130.61,22.47 133.88,25.2 137.14,27.87 140.41,29.0 143.67,26.33 146.94,23.95 150.2,20.36 153.47,20.08 156.73,18.45 160.0,17.32"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x1bd2cb0fa5516a5ba60dc8e6d8109a303737beef"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">47</td>
+      <td class="mono">0x1bd2cb0f…37beef</td>
+      <td class="num">49.9</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $3,541.18">$3,541.18</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $3,541.18 / DD $-622.48">5.689</td>
+      <td class="num neg">69.16%</td>
+      <td class="num neg">$-622.48 <span style="color:#8b949e;font-size:11px">(30.3%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">293</td>
+      <td class="num">107</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.87 6.53,28.11 9.8,27.44 13.06,27.16 16.33,26.78 19.59,26.07 22.86,25.27 26.12,23.92 29.39,24.16 32.65,24.0 35.92,23.38 39.18,23.24 42.45,22.74 45.71,22.38 48.98,21.74 52.24,20.63 55.51,19.17 58.78,16.74 62.04,14.98 65.31,13.79 68.57,10.95 71.84,9.47 75.1,8.33 78.37,8.22 81.63,8.12 84.9,6.22 88.16,5.3 91.43,2.89 94.69,2.92 97.96,2.89 101.22,2.77 104.49,2.77 107.76,2.44 111.02,2.4 114.29,2.39 117.55,2.1 120.82,1.0 124.08,2.11 127.35,2.14 130.61,5.95 133.88,6.0 137.14,6.37 140.41,6.66 143.67,6.67 146.94,6.91 150.2,6.98 153.47,7.06 156.73,7.44 160.0,6.28"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x599d75c7e9dc0d8e9006d60a54c3ddcb12e62d09"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">48</td>
+      <td class="mono">0x599d75c7…e62d09</td>
+      <td class="num">50.7</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $8,274.92">$8,274.92</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $8,274.92 / DD $-1,540.49">5.372</td>
+      <td class="num neg">244.57%</td>
+      <td class="num neg">$-1,540.49 <span style="color:#8b949e;font-size:11px">(56.5%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">384</td>
+      <td class="num">165</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">24.0h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.0 3.27,1.07 6.53,1.11 9.8,1.18 13.06,1.21 16.33,1.27 19.59,2.64 22.86,2.67 26.12,2.99 29.39,3.41 32.65,3.6 35.92,3.7 39.18,3.77 42.45,4.46 45.71,4.49 48.98,5.07 52.24,8.86 55.51,12.71 58.78,12.73 62.04,12.75 65.31,12.76 68.57,12.76 71.84,12.76 75.1,12.76 78.37,12.76 81.63,13.18 84.9,13.03 88.16,14.33 91.43,14.41 94.69,14.48 97.96,14.64 101.22,14.79 104.49,14.87 107.76,14.87 111.02,14.94 114.29,14.94 117.55,15.0 120.82,15.04 124.08,15.08 127.35,15.08 130.61,15.3 133.88,22.29 137.14,23.41 140.41,24.42 143.67,25.41 146.94,26.61 150.2,26.99 153.47,28.86 156.73,29.0 160.0,28.47"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x08fb43ac9ad142aed5712fcd70112e4af780aeb1"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">49</td>
+      <td class="mono">0x08fb43ac…80aeb1</td>
+      <td class="num">46.5</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,710.24">$1,710.24</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,710.24 / DD $-321.50">5.320</td>
+      <td class="num warn">29.99%</td>
+      <td class="num neg">$-321.50 <span style="color:#8b949e;font-size:11px">(30.3%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">116</td>
+      <td class="num">24</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 9.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.04 6.53,27.98 9.8,28.17 13.06,27.57 16.33,26.79 19.59,26.07 22.86,25.38 26.12,26.11 29.39,26.56 32.65,26.77 35.92,26.81 39.18,27.01 42.45,26.47 45.71,26.16 48.98,24.59 52.24,24.55 55.51,24.32 58.78,24.15 62.04,23.93 65.31,23.62 68.57,23.46 71.84,22.85 75.1,23.09 78.37,23.11 81.63,23.55 84.9,23.51 88.16,23.44 91.43,23.41 94.69,10.67 97.96,1.88 101.22,3.01 104.49,3.48 107.76,1.0 111.02,1.74 114.29,4.06 117.55,3.9 120.82,3.75 124.08,3.62 127.35,3.49 130.61,3.25 133.88,3.13 137.14,2.8 140.41,3.3 143.67,3.78 146.94,6.75 150.2,7.36 153.47,17.56 156.73,17.7 160.0,17.51"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x36973297e3f55004080aff7cf8f3c611ebd64cdb"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">50</td>
+      <td class="mono">0x36973297…d64cdb</td>
+      <td class="num">42.3</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $22,015.17">$22,015.17</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $22,015.17 / DD $-4,182.36">5.264</td>
+      <td class="num pos">6.82%</td>
+      <td class="num neg">$-4,182.36 <span style="color:#8b949e;font-size:11px">(26.7%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">809</td>
+      <td class="num">27</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 2.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.54 6.53,22.6 9.8,16.67 13.06,16.46 16.33,16.25 19.59,16.04 22.86,15.83 26.12,15.62 29.39,15.42 32.65,14.8 35.92,14.18 39.18,13.09 42.45,12.0 45.71,11.91 48.98,10.92 52.24,10.82 55.51,9.83 58.78,9.65 62.04,9.39 65.31,8.98 68.57,8.57 71.84,8.55 75.1,7.73 78.37,7.72 81.63,6.89 84.9,6.87 88.16,5.76 91.43,5.74 94.69,4.62 97.96,3.95 101.22,3.25 104.49,3.24 107.76,3.2 111.02,2.91 114.29,2.8 117.55,2.8 120.82,2.76 124.08,2.46 127.35,2.36 130.61,2.4 133.88,2.15 137.14,2.14 140.41,1.89 143.67,1.92 146.94,1.92 150.2,1.93 153.47,1.94 156.73,1.59 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xac11f0e7b4e21b4871a6d34e0532da67e84a52b7"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">51</td>
+      <td class="mono">0xac11f0e7…4a52b7</td>
+      <td class="num">38.7</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $11,117.31">$11,117.31</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $11,117.31 / DD $-2,115.36">5.256</td>
+      <td class="num neg">64.42%</td>
+      <td class="num neg">$-2,115.36 <span style="color:#8b949e;font-size:11px">(60.5%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">843</td>
+      <td class="num">21</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.8d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.96 6.53,28.96 9.8,28.95 13.06,28.93 16.33,28.93 19.59,28.92 22.86,28.89 26.12,28.86 29.39,28.91 32.65,28.9 35.92,28.9 39.18,28.9 42.45,28.88 45.71,28.87 48.98,28.86 52.24,28.86 55.51,28.86 58.78,28.85 62.04,28.85 65.31,28.85 68.57,28.85 71.84,28.85 75.1,28.85 78.37,28.85 81.63,28.85 84.9,28.85 88.16,28.85 91.43,28.85 94.69,28.85 97.96,28.85 101.22,28.46 104.49,27.85 107.76,1.74 111.02,1.73 114.29,1.72 117.55,1.67 120.82,1.64 124.08,1.6 127.35,1.6 130.61,1.6 133.88,1.73 137.14,1.8 140.41,1.85 143.67,1.94 146.94,2.04 150.2,2.04 153.47,2.06 156.73,1.16 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x965725d126ae16ebfbc05a574ad031eea85490e2"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">52</td>
+      <td class="mono">0x965725d1…5490e2</td>
+      <td class="num">42.5</td>
+      <td class="num pos" title="Source-consistent historical PnL for A. Current execution/range PnL: $8,618.17">$8,618.17</td>
+      <td class="num" title="Source-consistent PnL/DD: A PnL $8,618.17 / DD $-1,660.97">5.189</td>
+      <td class="num neg">114.42%</td>
+      <td class="num neg">$-1,660.97 <span style="color:#8b949e;font-size:11px">(17.8%)</span><sup title="All-time MTM - includes unrealised PnL from accountValueHistory">A</sup></td>
+      <td class="num">1,074</td>
+      <td class="num">77</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.2d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,17.53 3.27,17.1 6.53,17.05 9.8,16.9 13.06,16.78 16.33,16.35 19.59,14.63 22.86,14.58 26.12,14.55 29.39,12.83 32.65,12.79 35.92,12.75 39.18,10.19 42.45,6.63 45.71,7.36 48.98,7.27 52.24,6.95 55.51,6.67 58.78,6.58 62.04,6.26 65.31,4.45 68.57,3.93 71.84,1.52 75.1,1.0 78.37,3.11 81.63,4.77 84.9,4.75 88.16,4.72 91.43,6.06 94.69,6.22 97.96,6.42 101.22,6.58 104.49,16.55 107.76,25.94 111.02,26.46 114.29,26.46 117.55,26.46 120.82,26.47 124.08,26.57 127.35,26.57 130.61,26.57 133.88,26.58 137.14,28.37 140.41,29.0 143.67,28.66 146.94,28.06 150.2,27.95 153.47,27.54 156.73,27.3 160.0,25.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x435ea5582e97b68468fd1e8472b230037cf38003"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">53</td>
+      <td class="mono">0x435ea558…f38003</td>
+      <td class="num">45.3</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $67,714.29">$67,714.29</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $67,714.29 / DD $-13,196.11">5.131</td>
+      <td class="num warn">10.69%</td>
+      <td class="num neg">$-13,196.11 <span style="color:#8b949e;font-size:11px">(42.9%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,386</td>
+      <td class="num">195</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 8.4d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,25.75 3.27,25.83 6.53,26.02 9.8,26.3 13.06,26.32 16.33,26.91 19.59,26.99 22.86,27.07 26.12,27.71 29.39,27.71 32.65,27.76 35.92,28.42 39.18,29.0 42.45,28.65 45.71,25.86 48.98,16.3 52.24,16.12 55.51,16.04 58.78,16.0 62.04,12.14 65.31,12.05 68.57,12.01 71.84,11.91 75.1,11.82 78.37,11.67 81.63,11.58 84.9,11.39 88.16,8.94 91.43,8.78 94.69,8.66 97.96,7.43 101.22,7.39 104.49,7.09 107.76,6.49 111.02,6.45 114.29,5.76 117.55,4.63 120.82,4.61 124.08,4.27 127.35,4.12 130.61,3.71 133.88,3.69 137.14,3.68 140.41,3.67 143.67,3.26 146.94,3.09 150.2,2.69 153.47,2.52 156.73,1.45 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xae2445cdc416b6a70bbf84a8678a13ea6003e7f8"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">54</td>
+      <td class="mono">0xae2445cd…03e7f8</td>
+      <td class="num">51.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $9,557.68">$9,557.68</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $9,557.68 / DD $-1,918.85">4.981</td>
+      <td class="num neg">38.33%</td>
+      <td class="num neg">$-1,918.85 <span style="color:#8b949e;font-size:11px">(26.9%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">470</td>
+      <td class="num">210</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 2.2d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,29.0 6.53,29.0 9.8,28.99 13.06,28.99 16.33,28.99 19.59,28.98 22.86,28.61 26.12,25.45 29.39,24.83 32.65,15.0 35.92,14.99 39.18,14.62 42.45,11.45 45.71,10.83 48.98,1.0 52.24,1.32 55.51,1.46 58.78,1.6 62.04,1.62 65.31,1.76 68.57,1.79 71.84,1.84 75.1,1.98 78.37,2.12 81.63,2.26 84.9,2.28 88.16,2.42 91.43,2.44 94.69,2.5 97.96,2.64 101.22,2.64 104.49,2.64 107.76,2.64 111.02,2.64 114.29,2.65 117.55,2.66 120.82,2.66 124.08,2.68 127.35,2.7 130.61,2.85 133.88,2.84 137.14,2.8 140.41,2.79 143.67,2.79 146.94,2.78 150.2,2.71 153.47,2.7 156.73,2.7 160.0,2.63"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xa81596bd0e2922528e0d5308ea68825d21ed6c82"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">55</td>
+      <td class="mono">0xa81596bd…ed6c82</td>
+      <td class="num">39.9</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $305.50">$305.50</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $305.50 / DD $-67.93">4.497</td>
+      <td class="num neg">368.12%</td>
+      <td class="num neg">$-67.93 <span style="color:#8b949e;font-size:11px">(39.5%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">280</td>
+      <td class="num">22</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.0 3.27,3.26 6.53,5.51 9.8,8.16 13.06,10.39 16.33,12.31 19.59,13.63 22.86,15.32 26.12,16.63 29.39,19.4 32.65,19.51 35.92,21.63 39.18,21.74 42.45,23.15 45.71,24.41 48.98,23.79 52.24,22.97 55.51,21.55 58.78,20.12 62.04,21.84 65.31,23.55 68.57,23.83 71.84,24.07 75.1,22.5 78.37,20.77 81.63,20.68 84.9,19.55 88.16,19.46 91.43,18.33 94.69,17.03 97.96,15.73 101.22,18.88 104.49,21.25 107.76,23.66 111.02,26.07 114.29,25.61 117.55,24.56 120.82,26.47 124.08,28.19 127.35,28.17 130.61,29.0 133.88,27.9 137.14,27.69 140.41,27.05 143.67,22.05 146.94,21.9 150.2,22.39 153.47,19.34 156.73,18.54 160.0,17.65"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xa88e234fff4c5e10df86cb71d573c41013e26770"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">56</td>
+      <td class="mono">0xa88e234f…e26770</td>
+      <td class="num">38.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $12,257.47">$12,257.47</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $12,257.47 / DD $-2,891.53">4.239</td>
+      <td class="num neg">159.01%</td>
+      <td class="num neg">$-2,891.53 <span style="color:#8b949e;font-size:11px">(58.5%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,413</td>
+      <td class="num">197</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">21.8h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,23.14 3.27,23.14 6.53,23.66 9.8,24.16 13.06,24.99 16.33,25.16 19.59,25.99 22.86,26.16 26.12,27.57 29.39,27.58 32.65,28.99 35.92,29.0 39.18,28.87 42.45,28.73 45.71,28.65 48.98,28.57 52.24,28.23 55.51,27.9 58.78,27.07 62.04,26.23 65.31,22.91 68.57,19.59 71.84,19.34 75.1,19.08 78.37,18.66 81.63,18.23 84.9,18.2 88.16,18.16 91.43,17.86 94.69,17.55 97.96,17.36 101.22,17.16 104.49,17.41 107.76,17.65 111.02,18.39 114.29,19.12 117.55,19.32 120.82,19.53 124.08,18.97 127.35,18.42 130.61,10.0 133.88,1.53 137.14,1.27 140.41,1.25 143.67,1.0 146.94,1.08 150.2,1.1 153.47,1.51 156.73,2.39 160.0,2.39"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x781da72af1060132c4bce55ce91b1a8553271b6e"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">57</td>
+      <td class="mono">0x781da72a…271b6e</td>
+      <td class="num">33.6</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $73,297.66">$73,297.66</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $73,297.66 / DD $-17,881.32">4.099</td>
+      <td class="num neg">212.25%</td>
+      <td class="num neg">$-17,881.32 <span style="color:#8b949e;font-size:11px">(10.3%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,969</td>
+      <td class="num">311</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">21.4h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.98 6.53,28.95 9.8,28.07 13.06,28.0 16.33,27.17 19.59,26.09 22.86,25.79 26.12,24.81 29.39,24.8 32.65,23.94 35.92,23.07 39.18,22.28 42.45,22.25 45.71,22.21 48.98,22.2 52.24,22.12 55.51,22.09 58.78,21.28 62.04,20.07 65.31,20.04 68.57,20.01 71.84,18.82 75.1,17.8 78.37,17.75 81.63,17.57 84.9,17.55 88.16,16.37 91.43,16.2 94.69,16.15 97.96,13.38 101.22,13.19 104.49,13.02 107.76,12.79 111.02,10.05 114.29,9.15 117.55,8.17 120.82,7.02 124.08,6.94 127.35,5.79 130.61,5.27 133.88,4.87 137.14,4.37 140.41,4.26 143.67,4.23 146.94,3.68 150.2,3.63 153.47,3.55 156.73,2.5 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x169487ddd34d040436f904bec89c5eedac887fa0"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">58</td>
+      <td class="mono">0x169487dd…887fa0</td>
+      <td class="num">0.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $328.70">$328.70</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $328.70 / DD $-80.79">4.069</td>
+      <td class="num neg">426.29%</td>
+      <td class="num neg">$-80.79 <span style="color:#8b949e;font-size:11px">(72.2%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">169</td>
+      <td class="num">10</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M 1B</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.0 3.27,3.12 6.53,4.01 9.8,8.18 13.06,8.2 16.33,8.22 19.59,8.24 22.86,8.3 26.12,8.32 29.39,8.72 32.65,8.74 35.92,8.86 39.18,8.88 42.45,9.24 45.71,9.26 48.98,9.5 52.24,9.52 55.51,20.3 58.78,20.32 62.04,26.92 65.31,29.0 68.57,29.0 71.84,28.99 75.1,28.7 78.37,22.87 81.63,21.7 84.9,14.08 88.16,14.06 91.43,11.79 94.69,8.21 97.96,9.69 101.22,9.63 104.49,9.63 107.76,9.24 111.02,9.24 114.29,9.24 117.55,9.23 120.82,9.22 124.08,9.21 127.35,9.21 130.61,9.2 133.88,9.13 137.14,7.65 140.41,6.93 143.67,4.98 146.94,3.8 150.2,3.07 153.47,2.54 156.73,2.24 160.0,2.15"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x08bd0f74f8f1233d9307454a6612f25d6bd4c7a1"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">59</td>
+      <td class="mono">0x08bd0f74…d4c7a1</td>
+      <td class="num">34.6</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,547.70">$1,547.70</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,547.70 / DD $-396.04">3.908</td>
+      <td class="num neg">71.13%</td>
+      <td class="num neg">$-396.04 <span style="color:#8b949e;font-size:11px">(24.3%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">224</td>
+      <td class="num">38</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,29.0 6.53,28.88 9.8,23.35 13.06,23.35 16.33,21.69 19.59,23.88 22.86,16.7 26.12,14.91 29.39,14.93 32.65,15.2 35.92,15.25 39.18,16.51 42.45,16.55 45.71,12.55 48.98,8.01 52.24,6.97 55.51,7.88 58.78,7.99 62.04,8.05 65.31,9.09 68.57,9.22 71.84,9.21 75.1,9.2 78.37,9.19 81.63,9.17 84.9,9.16 88.16,9.15 91.43,9.14 94.69,9.13 97.96,9.12 101.22,9.11 104.49,9.02 107.76,7.07 111.02,6.81 114.29,6.47 117.55,6.51 120.82,6.29 124.08,6.16 127.35,5.65 130.61,5.59 133.88,5.47 137.14,5.13 140.41,5.08 143.67,4.13 146.94,4.03 150.2,4.03 153.47,1.0 156.73,1.04 160.0,1.15"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x5661a070eb13c7c55ac3210b2447d4bea426cbf5"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">60</td>
+      <td class="mono">0x5661a070…26cbf5</td>
+      <td class="num">30.9</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $222,323.38">$222,323.38</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $222,323.38 / DD $-57,727.16">3.851</td>
+      <td class="num warn">12.92%</td>
+      <td class="num neg">$-57,727.16 <span style="color:#8b949e;font-size:11px">(40.1%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,868</td>
+      <td class="num">138</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.6d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.98 6.53,27.88 9.8,27.56 13.06,26.67 16.33,25.57 19.59,25.26 22.86,24.37 26.12,24.35 29.39,24.33 32.65,24.31 35.92,24.28 39.18,24.28 42.45,24.27 45.71,24.27 48.98,24.27 52.24,24.27 55.51,24.25 58.78,24.25 62.04,24.23 65.31,24.09 68.57,23.23 71.84,21.91 75.1,20.45 78.37,19.49 81.63,18.49 84.9,17.22 88.16,17.22 91.43,17.21 94.69,16.02 97.96,15.61 101.22,15.56 104.49,15.43 107.76,14.57 111.02,13.25 114.29,11.78 117.55,10.83 120.82,9.82 124.08,8.56 127.35,8.55 130.61,8.55 133.88,7.36 137.14,6.94 140.41,6.89 143.67,6.89 146.94,4.96 150.2,3.95 153.47,3.94 156.73,2.01 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x8be2bc17fde740d524355478a1bc97e217405a83"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">61</td>
+      <td class="mono">0x8be2bc17…405a83</td>
+      <td class="num">0.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $77,081.40">$77,081.40</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $77,081.40 / DD $-21,566.56">3.574</td>
+      <td class="num pos">6.16%</td>
+      <td class="num neg">$-21,566.56 <span style="color:#8b949e;font-size:11px">(82.4%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">12,941</td>
+      <td class="num">21</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M EC</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.2d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.5 6.53,28.44 9.8,27.2 13.06,26.69 16.33,26.4 19.59,26.21 22.86,26.04 26.12,25.54 29.39,24.63 32.65,24.34 35.92,23.75 39.18,23.58 42.45,22.5 45.71,22.24 48.98,21.53 52.24,20.82 55.51,20.1 58.78,19.38 62.04,18.65 65.31,18.62 68.57,17.92 71.84,17.89 75.1,17.19 78.37,16.48 81.63,15.76 84.9,15.03 88.16,14.3 91.43,13.57 94.69,12.84 97.96,12.25 101.22,12.11 104.49,11.52 107.76,11.38 111.02,10.64 114.29,9.9 117.55,9.16 120.82,8.43 124.08,7.72 127.35,7.01 130.61,6.86 133.88,6.29 137.14,6.14 140.41,5.58 143.67,4.85 146.94,4.12 150.2,3.38 153.47,2.64 156.73,1.82 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x25d6a12339f0d2366cfbd6281329f29bff677c93"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">62</td>
+      <td class="mono">0x25d6a123…677c93</td>
+      <td class="num">0.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $949.59">$949.59</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $949.59 / DD $-267.73">3.547</td>
+      <td class="num neg">660.80%</td>
+      <td class="num neg">$-267.73 <span style="color:#8b949e;font-size:11px">(22.5%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">88</td>
+      <td class="num">87</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M 1B</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.0 3.27,1.09 6.53,1.19 9.8,1.42 13.06,2.92 16.33,2.96 19.59,4.46 22.86,4.54 26.12,4.56 29.39,4.56 32.65,4.58 35.92,5.19 39.18,5.63 42.45,7.94 45.71,10.11 48.98,10.57 52.24,11.02 55.51,11.09 58.78,11.15 62.04,11.58 65.31,12.04 68.57,12.49 71.84,12.7 75.1,13.09 78.37,13.13 81.63,13.57 84.9,14.02 88.16,14.47 91.43,14.68 94.69,15.07 97.96,15.11 101.22,15.11 104.49,15.27 107.76,16.51 111.02,16.51 114.29,16.67 117.55,17.9 120.82,18.94 124.08,20.46 127.35,21.2 130.61,22.21 133.88,23.73 137.14,24.47 140.41,24.92 143.67,25.3 146.94,25.32 150.2,25.65 153.47,25.67 156.73,26.0 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xc6aa63157b1c7c8d4e8a3e803ce013055b52bd24"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">63</td>
+      <td class="mono">0xc6aa6315…52bd24</td>
+      <td class="num">4.7</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $3,030.34">$3,030.34</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $3,030.34 / DD $-862.16">3.515</td>
+      <td class="num neg">109.57%</td>
+      <td class="num neg">$-862.16 <span style="color:#8b949e;font-size:11px">(83.3%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,396</td>
+      <td class="num">466</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M EC</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">21.8h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,8.2 3.27,8.71 6.53,9.56 9.8,11.87 13.06,12.04 16.33,12.19 19.59,15.37 22.86,18.58 26.12,16.95 29.39,14.35 32.65,9.79 35.92,9.48 39.18,9.2 42.45,9.68 45.71,14.77 48.98,16.01 52.24,14.61 55.51,12.34 58.78,10.62 62.04,8.05 65.31,6.99 68.57,6.4 71.84,1.0 75.1,4.24 78.37,9.06 81.63,9.24 84.9,9.26 88.16,9.31 91.43,15.72 94.69,22.4 97.96,24.13 101.22,25.89 104.49,23.36 107.76,22.84 111.02,19.22 114.29,14.87 117.55,15.22 120.82,15.28 124.08,14.69 127.35,15.21 130.61,16.99 133.88,18.13 137.14,20.22 140.41,21.27 143.67,21.84 146.94,24.43 150.2,24.38 153.47,24.28 156.73,24.16 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x37c7a6ee4df2b11346c392e93347f96d62771ec4"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">64</td>
+      <td class="mono">0x37c7a6ee…771ec4</td>
+      <td class="num">24.9</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $6,463.67">$6,463.67</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $6,463.67 / DD $-1,939.59">3.332</td>
+      <td class="num neg">102.95%</td>
+      <td class="num neg">$-1,939.59 <span style="color:#8b949e;font-size:11px">(53.7%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,894</td>
+      <td class="num">17</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.63 6.53,28.04 9.8,27.64 13.06,23.49 16.33,13.75 19.59,13.39 22.86,12.8 26.12,12.4 29.39,8.25 32.65,8.25 35.92,8.25 39.18,9.27 42.45,9.03 45.71,9.02 48.98,8.9 52.24,8.67 55.51,8.44 58.78,8.43 62.04,8.31 65.31,8.31 68.57,8.31 71.84,10.6 75.1,10.59 78.37,10.31 81.63,10.0 84.9,9.99 88.16,9.71 91.43,9.94 94.69,9.94 97.96,9.8 101.22,9.52 104.49,8.83 107.76,8.69 111.02,8.41 114.29,7.73 117.55,7.73 120.82,7.73 124.08,4.36 127.35,1.0 130.61,1.0 133.88,1.0 137.14,1.55 140.41,1.22 143.67,2.09 146.94,1.67 150.2,1.67 153.47,1.74 156.73,1.9 160.0,1.9"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x42f0afcd8b35e3c7ec2cf924a2bc359260952de0"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">65</td>
+      <td class="mono">0x42f0afcd…952de0</td>
+      <td class="num">27.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $56.69">$56.69</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $56.69 / DD $-17.48">3.243</td>
+      <td class="num neg">238.99%</td>
+      <td class="num neg">$-17.48 <span style="color:#8b949e;font-size:11px">(19.2%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">128</td>
+      <td class="num">23</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 2.3d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,19.25 4.71,19.41 9.41,20.42 14.12,19.47 18.82,18.87 23.53,18.33 28.24,17.54 32.94,20.48 37.65,23.23 42.35,26.25 47.06,29.0 51.76,18.97 56.47,14.71 61.18,17.11 65.88,17.03 70.59,17.03 75.29,17.03 80.0,14.48 84.71,18.66 89.41,20.81 94.12,19.63 98.82,17.79 103.53,17.94 108.24,17.79 112.94,17.5 117.65,17.28 122.35,6.19 127.06,2.49 131.76,1.0 136.47,5.72 141.18,5.62 145.88,4.42 150.59,11.18 155.29,9.68 160.0,8.13"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x36c097864a03c7f0215c0d43165a734152a12e0b"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">66</td>
+      <td class="mono">0x36c09786…a12e0b</td>
+      <td class="num">20.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $97,887.69">$97,887.69</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $97,887.69 / DD $-32,924.85">2.973</td>
+      <td class="num neg">177.45%</td>
+      <td class="num neg">$-32,924.85 <span style="color:#8b949e;font-size:11px">(26.8%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">4,927</td>
+      <td class="num">430</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.96 6.53,23.98 9.8,23.98 13.06,23.98 16.33,23.93 19.59,23.91 22.86,22.17 26.12,20.42 29.39,12.58 32.65,7.45 35.92,1.0 39.18,1.06 42.45,4.6 45.71,4.67 48.98,4.68 52.24,5.09 55.51,5.13 58.78,10.45 62.04,14.62 65.31,13.52 68.57,14.81 71.84,15.34 75.1,15.25 78.37,15.03 81.63,14.96 84.9,14.52 88.16,14.49 91.43,14.48 94.69,14.47 97.96,14.24 101.22,13.66 104.49,13.02 107.76,13.0 111.02,12.95 114.29,12.73 117.55,12.68 120.82,12.67 124.08,12.56 127.35,12.52 130.61,12.33 133.88,12.12 137.14,11.91 140.41,11.68 143.67,11.43 146.94,11.17 150.2,9.28 153.47,7.68 156.73,7.22 160.0,4.98"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x1b5c2bbfd5f78f0201c7303c8301ba039c5ab2f4"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">67</td>
+      <td class="mono">0x1b5c2bbf…5ab2f4</td>
+      <td class="num">42.2</td>
+      <td class="num pos" title="Source-consistent historical PnL for A. Current execution/range PnL: $15,049.66">$15,049.66</td>
+      <td class="num" title="Source-consistent PnL/DD: A PnL $15,049.66 / DD $-5,117.12">2.941</td>
+      <td class="num pos">4.83%</td>
+      <td class="num neg">$-5,117.12 <span style="color:#8b949e;font-size:11px">(27.2%)</span><sup title="All-time MTM - includes unrealised PnL from accountValueHistory">A</sup></td>
+      <td class="num">1,154</td>
+      <td class="num">44</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.2d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.73 6.53,28.46 9.8,28.18 13.06,27.89 16.33,27.6 19.59,27.29 22.86,26.98 26.12,26.71 29.39,26.45 32.65,26.16 35.92,25.87 39.18,25.57 42.45,25.26 45.71,24.93 48.98,24.61 52.24,24.26 55.51,23.92 58.78,23.61 62.04,23.31 65.31,23.0 68.57,22.7 71.84,22.38 75.1,22.06 78.37,21.73 81.63,21.39 84.9,21.37 88.16,21.36 91.43,21.09 94.69,20.83 97.96,20.54 101.22,20.25 104.49,19.93 107.76,19.62 111.02,18.78 114.29,15.49 117.55,10.36 120.82,9.52 124.08,6.22 127.35,1.09 130.61,1.09 133.88,1.09 137.14,1.23 140.41,1.22 143.67,1.2 146.94,1.18 150.2,1.15 153.47,1.11 156.73,1.06 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xc08fa23baa3a5282b27c8b1358b7e941f77fb20e"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">68</td>
+      <td class="mono">0xc08fa23b…7fb20e</td>
+      <td class="num">26.3</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $14,063.07">$14,063.07</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $14,063.07 / DD $-5,010.51">2.807</td>
+      <td class="num neg">808.63%</td>
+      <td class="num neg">$-5,010.51 <span style="color:#8b949e;font-size:11px">(21.7%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">2,670</td>
+      <td class="num">583</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">23.5h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.69 6.53,28.05 9.8,27.05 13.06,25.77 16.33,25.33 19.59,24.72 22.86,24.25 26.12,23.36 29.39,21.98 32.65,20.47 35.92,20.47 39.18,20.31 42.45,20.3 45.71,18.94 48.98,18.94 52.24,18.94 55.51,18.37 58.78,15.84 62.04,12.74 65.31,12.15 68.57,9.06 71.84,7.34 75.1,6.78 78.37,6.87 81.63,6.87 84.9,6.75 88.16,6.75 91.43,6.75 94.69,6.74 97.96,5.47 101.22,5.24 104.49,3.97 107.76,3.33 111.02,3.32 114.29,3.28 117.55,2.45 120.82,2.37 124.08,2.09 127.35,1.96 130.61,1.96 133.88,1.96 137.14,1.87 140.41,1.83 143.67,1.69 146.94,1.56 150.2,1.47 153.47,1.28 156.73,1.0 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xf23dfec82972297679a70b17407f465e3ef3df1f"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">69</td>
+      <td class="mono">0xf23dfec8…f3df1f</td>
+      <td class="num">0.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $8,154.09">$8,154.09</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $8,154.09 / DD $-2,909.28">2.803</td>
+      <td class="num neg">37.05%</td>
+      <td class="num neg">$-2,909.28 <span style="color:#8b949e;font-size:11px">(81.2%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,128</td>
+      <td class="num">211</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M EC</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.2d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,27.15 6.53,25.98 9.8,23.61 13.06,23.17 16.33,22.65 19.59,22.48 22.86,21.29 26.12,21.29 29.39,20.98 32.65,20.33 35.92,20.11 39.18,19.83 42.45,19.48 45.71,18.61 48.98,17.47 52.24,17.95 55.51,17.57 58.78,15.96 62.04,15.89 65.31,15.66 68.57,14.19 71.84,14.19 75.1,11.86 78.37,9.93 81.63,9.93 84.9,8.43 88.16,8.43 91.43,7.96 94.69,7.9 97.96,8.15 101.22,8.04 104.49,8.04 107.76,7.91 111.02,7.76 114.29,7.55 117.55,7.55 120.82,7.38 124.08,6.23 127.35,4.68 130.61,4.82 133.88,4.65 137.14,4.51 140.41,4.41 143.67,4.31 146.94,4.16 150.2,2.63 153.47,2.33 156.73,1.88 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xe402da59cb09dcc124ff72e0fa5e390d31b2db09"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">70</td>
+      <td class="mono">0xe402da59…b2db09</td>
+      <td class="num">17.6</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $179.53">$179.53</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $179.53 / DD $-64.93">2.765</td>
+      <td class="num neg">94.68%</td>
+      <td class="num neg">$-64.93 <span style="color:#8b949e;font-size:11px">(26.2%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">171</td>
+      <td class="num">16</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.5d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,16.61 3.27,11.3 6.53,10.28 9.8,7.29 13.06,3.04 16.33,1.0 19.59,4.73 22.86,9.67 26.12,8.84 29.39,8.99 32.65,9.18 35.92,9.72 39.18,15.72 42.45,16.52 45.71,18.49 48.98,15.79 52.24,15.53 55.51,14.8 58.78,12.91 62.04,15.23 65.31,12.18 68.57,12.23 71.84,12.32 75.1,16.63 78.37,16.68 81.63,21.13 84.9,13.2 88.16,13.02 91.43,13.41 94.69,16.86 97.96,20.29 101.22,19.97 104.49,21.21 107.76,21.85 111.02,21.85 114.29,29.0 117.55,25.35 120.82,16.42 124.08,16.2 127.35,14.48 130.61,14.31 133.88,16.88 137.14,17.08 140.41,20.05 143.67,21.51 146.94,22.65 150.2,23.03 153.47,23.26 156.73,15.61 160.0,17.51"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x70822cb3d038b637dd6c6338f3f1f83f805b2e2d"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">71</td>
+      <td class="mono">0x70822cb3…5b2e2d</td>
+      <td class="num">42.9</td>
+      <td class="num pos" title="Source-consistent historical PnL for M. Current execution/range PnL: $30,144.99">$30,144.99</td>
+      <td class="num" title="Source-consistent PnL/DD: M PnL $30,144.99 / DD $-11,033.85">2.732</td>
+      <td class="num neg">110.23%</td>
+      <td class="num neg">$-11,033.85 <span style="color:#8b949e;font-size:11px">(23.6%)</span><sup title="Monthly MTM - includes unrealised PnL from accountValueHistory">M</sup></td>
+      <td class="num">242</td>
+      <td class="num">96</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">22.8h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.0 3.27,1.12 6.53,1.2 9.8,1.27 13.06,1.27 16.33,2.01 19.59,2.67 22.86,8.87 26.12,9.67 29.39,9.92 32.65,10.6 35.92,12.66 39.18,12.66 42.45,13.9 45.71,14.43 48.98,14.97 52.24,15.23 55.51,15.24 58.78,15.25 62.04,15.76 65.31,15.89 68.57,16.52 71.84,16.64 75.1,16.87 78.37,17.1 81.63,17.22 84.9,18.05 88.16,18.91 91.43,19.56 94.69,20.41 97.96,21.26 101.22,21.92 104.49,22.62 107.76,22.89 111.02,23.67 114.29,24.47 117.55,25.15 120.82,25.96 124.08,26.02 127.35,27.85 130.61,28.62 133.88,29.0 137.14,28.99 140.41,28.36 143.67,28.29 146.94,28.29 150.2,28.29 153.47,28.28 156.73,28.25 160.0,28.25"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x663f2673c6cef165d4e027585ed300a6b74245da"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">72</td>
+      <td class="mono">0x663f2673…4245da</td>
+      <td class="num">25.4</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $103,626.47">$103,626.47</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $103,626.47 / DD $-39,246.09">2.640</td>
+      <td class="num neg">87.56%</td>
+      <td class="num neg">$-39,246.09 <span style="color:#8b949e;font-size:11px">(53.4%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">4,879</td>
+      <td class="num">1,414</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">23.7h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.0 3.27,1.0 6.53,1.0 9.8,1.0 13.06,1.97 16.33,2.07 19.59,2.13 22.86,2.19 26.12,2.2 29.39,2.27 32.65,2.44 35.92,2.5 39.18,2.51 42.45,7.13 45.71,7.14 48.98,8.13 52.24,8.78 55.51,8.86 58.78,8.87 62.04,13.01 65.31,14.07 68.57,14.33 71.84,14.6 75.1,20.18 78.37,20.45 81.63,20.92 84.9,21.71 88.16,21.86 91.43,22.06 94.69,22.99 97.96,23.19 101.22,23.39 104.49,23.48 107.76,23.48 111.02,23.69 114.29,23.87 117.55,24.05 120.82,24.08 124.08,24.29 127.35,24.49 130.61,24.7 133.88,24.79 137.14,25.0 140.41,25.56 143.67,25.77 146.94,26.09 150.2,26.32 153.47,26.45 156.73,28.26 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x2ff2944a3bbf6e79848facaeddb2d986773dfaed"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">73</td>
+      <td class="mono">0x2ff2944a…3dfaed</td>
+      <td class="num">21.4</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $80,078.91">$80,078.91</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $80,078.91 / DD $-31,004.17">2.583</td>
+      <td class="num pos">8.72%</td>
+      <td class="num neg">$-31,004.17 <span style="color:#8b949e;font-size:11px">(38.8%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">15,578</td>
+      <td class="num">2,803</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,17.25 3.27,16.44 6.53,16.0 9.8,15.25 13.06,14.74 16.33,14.0 19.59,13.48 22.86,12.58 26.12,12.25 29.39,10.77 32.65,6.67 35.92,5.28 39.18,5.43 42.45,5.57 45.71,5.58 48.98,5.65 52.24,5.75 55.51,5.78 58.78,4.79 62.04,4.44 65.31,4.68 68.57,3.94 71.84,3.45 75.1,2.51 78.37,2.19 81.63,1.98 84.9,1.25 88.16,1.0 91.43,1.68 94.69,3.02 97.96,5.05 101.22,5.77 104.49,7.31 107.76,9.61 111.02,11.8 114.29,13.98 117.55,16.17 120.82,17.09 124.08,18.18 127.35,18.35 130.61,20.53 133.88,22.17 137.14,22.18 140.41,23.86 143.67,25.47 146.94,27.04 150.2,27.08 153.47,28.49 156.73,28.7 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xfa6f92ef332040f995443458aaa87d8a4db2b3ee"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">74</td>
+      <td class="mono">0xfa6f92ef…b2b3ee</td>
+      <td class="num">16.1</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $611.30">$611.30</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $611.30 / DD $-243.51">2.510</td>
+      <td class="num pos">1.45%</td>
+      <td class="num neg">$-243.51 <span style="color:#8b949e;font-size:11px">(45.4%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">489</td>
+      <td class="num">27</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 9.2d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.8 6.53,28.43 9.8,28.06 13.06,27.84 16.33,27.61 19.59,27.47 22.86,27.41 26.12,27.26 29.39,27.2 32.65,26.96 35.92,26.72 39.18,26.53 42.45,26.34 45.71,26.14 48.98,25.93 52.24,25.73 55.51,25.52 58.78,25.35 62.04,25.17 65.31,24.95 68.57,24.73 71.84,17.52 75.1,10.31 78.37,8.93 81.63,8.51 84.9,8.08 88.16,7.76 91.43,7.34 94.69,6.72 97.96,6.3 101.22,6.26 104.49,4.89 107.76,4.46 111.02,4.04 114.29,3.72 117.55,3.3 120.82,2.68 124.08,2.25 127.35,2.22 130.61,1.61 133.88,1.0 137.14,1.71 140.41,2.42 143.67,2.4 146.94,2.39 150.2,2.38 153.47,2.38 156.73,2.37 160.0,2.37"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x8050706eb79e2e1128a3a96b50ece6e74e1428de"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">75</td>
+      <td class="mono">0x8050706e…1428de</td>
+      <td class="num">17.5</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $19,979.06">$19,979.06</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $19,979.06 / DD $-8,020.92">2.491</td>
+      <td class="num neg">199.57%</td>
+      <td class="num neg">$-8,020.92 <span style="color:#8b949e;font-size:11px">(33.8%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">13,984</td>
+      <td class="num">1,969</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">22.3h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,18.52 3.27,17.67 6.53,14.28 9.8,13.57 13.06,13.31 16.33,12.62 19.59,10.7 22.86,10.26 26.12,8.98 29.39,6.77 32.65,6.35 35.92,3.72 39.18,3.11 42.45,1.0 45.71,1.0 48.98,1.53 52.24,1.51 55.51,1.47 58.78,2.18 62.04,1.08 65.31,2.07 68.57,3.51 71.84,4.9 75.1,5.59 78.37,7.17 81.63,7.31 84.9,10.4 88.16,10.48 91.43,10.52 94.69,9.57 97.96,15.72 101.22,16.27 104.49,16.22 107.76,16.2 111.02,16.14 114.29,15.26 117.55,14.63 120.82,13.31 124.08,12.68 127.35,9.59 130.61,9.4 133.88,9.31 137.14,8.26 140.41,10.28 143.67,14.04 146.94,14.07 150.2,14.08 153.47,15.68 156.73,15.71 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xca83349eaee309b8143ab34ce2b33df0a0295bcd"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">76</td>
+      <td class="mono">0xca83349e…295bcd</td>
+      <td class="num">18.7</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $4,213.67">$4,213.67</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $4,213.67 / DD $-1,693.30">2.488</td>
+      <td class="num neg">53.46%</td>
+      <td class="num neg">$-1,693.30 <span style="color:#8b949e;font-size:11px">(38.0%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,675</td>
+      <td class="num">26</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,28.67 3.27,28.53 6.53,28.52 9.8,28.23 13.06,28.15 16.33,28.09 19.59,28.01 22.86,29.0 26.12,28.94 29.39,28.55 32.65,28.15 35.92,27.75 39.18,27.35 42.45,24.05 45.71,22.01 48.98,21.48 52.24,21.22 55.51,20.65 58.78,20.67 62.04,20.63 65.31,20.05 68.57,17.17 71.84,13.0 75.1,11.9 78.37,11.43 81.63,11.24 84.9,10.85 88.16,9.99 91.43,9.86 94.69,9.81 97.96,9.26 101.22,9.36 104.49,9.02 107.76,8.94 111.02,8.75 114.29,8.6 117.55,8.44 120.82,7.93 124.08,7.09 127.35,3.75 130.61,3.8 133.88,2.74 137.14,2.68 140.41,2.92 143.67,2.48 146.94,2.21 150.2,2.45 153.47,1.55 156.73,1.54 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xfad9727aae60b92a35bc51f6c691d51f8fe0cb43"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">77</td>
+      <td class="mono">0xfad9727a…e0cb43</td>
+      <td class="num">17.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $216.86">$216.86</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $216.86 / DD $-88.90">2.439</td>
+      <td class="num warn">20.75%</td>
+      <td class="num neg">$-88.90 <span style="color:#8b949e;font-size:11px">(4.9%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">494</td>
+      <td class="num">42</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 7.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 10.0,28.81 20.0,24.69 30.0,19.82 40.0,14.73 50.0,14.16 60.0,9.31 70.0,6.84 80.0,5.8 90.0,9.38 100.0,6.27 110.0,5.33 120.0,5.14 130.0,3.79 140.0,2.45 150.0,1.21 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x357ec820532ff744e61bc761d66fcec8b834ce49"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">78</td>
+      <td class="mono">0x357ec820…34ce49</td>
+      <td class="num">22.6</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,381.12">$1,381.12</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,381.12 / DD $-567.88">2.432</td>
+      <td class="num neg">96.78%</td>
+      <td class="num neg">$-567.88 <span style="color:#8b949e;font-size:11px">(35.1%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">218</td>
+      <td class="num">63</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 5.3d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,15.17 3.27,15.18 6.53,15.2 9.8,15.22 13.06,15.23 16.33,15.23 19.59,15.27 22.86,15.29 26.12,14.41 29.39,10.49 32.65,10.45 35.92,10.46 39.18,5.97 42.45,5.71 45.71,5.52 48.98,3.96 52.24,3.53 55.51,2.66 58.78,2.44 62.04,1.0 65.31,1.17 68.57,1.33 71.84,1.48 75.1,3.38 78.37,3.74 81.63,3.82 84.9,4.07 88.16,5.53 91.43,5.65 94.69,5.68 97.96,6.52 101.22,7.26 104.49,7.44 107.76,9.18 111.02,9.68 114.29,10.18 117.55,10.36 120.82,11.23 124.08,11.4 127.35,13.17 130.61,13.25 133.88,13.26 137.14,13.26 140.41,16.05 143.67,20.68 146.94,26.43 150.2,26.45 153.47,26.48 156.73,28.68 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xd725d81304d26cbceb8b1ff2628d7df423101b55"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">79</td>
+      <td class="mono">0xd725d813…101b55</td>
+      <td class="num">16.8</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $6,446.02">$6,446.02</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $6,446.02 / DD $-2,708.99">2.379</td>
+      <td class="num neg">57.89%</td>
+      <td class="num neg">$-2,708.99 <span style="color:#8b949e;font-size:11px">(35.0%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">13,312</td>
+      <td class="num">598</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.7d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,15.19 3.27,14.77 6.53,12.52 9.8,10.71 13.06,9.84 16.33,9.26 19.59,8.73 22.86,8.2 26.12,7.01 29.39,6.89 32.65,6.71 35.92,6.8 39.18,7.05 42.45,9.59 45.71,12.19 48.98,17.05 52.24,15.93 55.51,15.69 58.78,19.32 62.04,19.33 65.31,19.62 68.57,20.04 71.84,20.93 75.1,21.8 78.37,21.89 81.63,22.22 84.9,19.36 88.16,19.84 91.43,21.94 94.69,25.92 97.96,26.59 101.22,27.58 104.49,29.0 107.76,28.62 111.02,18.21 114.29,17.9 117.55,16.09 120.82,14.14 124.08,13.41 127.35,12.61 130.61,12.3 133.88,10.97 137.14,10.77 140.41,9.95 143.67,10.01 146.94,11.64 150.2,11.57 153.47,10.28 156.73,4.23 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x44a709e254ac9f54bbd37a1d6388da5ddcb57c7a"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">80</td>
+      <td class="mono">0x44a709e2…b57c7a</td>
+      <td class="num">18.3</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $21,135.11">$21,135.11</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $21,135.11 / DD $-9,129.85">2.315</td>
+      <td class="num neg">90.67%</td>
+      <td class="num neg">$-9,129.85 <span style="color:#8b949e;font-size:11px">(53.6%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">5,600</td>
+      <td class="num">846</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">22.7h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,7.43 3.27,7.13 6.53,5.79 9.8,4.44 13.06,3.07 16.33,1.7 19.59,1.35 22.86,1.0 26.12,1.52 29.39,2.99 32.65,3.21 35.92,3.42 39.18,4.19 42.45,4.5 45.71,4.75 48.98,5.24 52.24,5.52 55.51,7.07 58.78,8.64 62.04,9.36 65.31,9.72 68.57,10.42 71.84,10.83 75.1,11.45 78.37,11.51 81.63,11.67 84.9,12.46 88.16,12.52 91.43,12.58 94.69,13.75 97.96,13.96 101.22,14.96 104.49,15.02 107.76,16.29 111.02,16.39 114.29,16.45 117.55,16.99 120.82,18.57 124.08,19.43 127.35,19.45 130.61,22.47 133.88,26.09 137.14,29.0 140.41,26.79 143.67,12.17 146.94,9.19 150.2,8.71 153.47,6.59 156.73,4.6 160.0,3.31"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x545b4f7a5448b6af1b2075bdf22e88d23fd356eb"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">81</td>
+      <td class="mono">0x545b4f7a…d356eb</td>
+      <td class="num">16.8</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $10,297.99">$10,297.99</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $10,297.99 / DD $-4,463.31">2.307</td>
+      <td class="num neg">114.41%</td>
+      <td class="num neg">$-4,463.31 <span style="color:#8b949e;font-size:11px">(36.9%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,629</td>
+      <td class="num">163</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 5.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.99 6.53,27.89 9.8,26.11 13.06,25.94 16.33,25.89 19.59,24.86 22.86,23.75 26.12,17.76 29.39,17.72 32.65,17.34 35.92,15.74 39.18,13.65 42.45,13.6 45.71,11.56 48.98,8.62 52.24,3.97 55.51,4.41 58.78,4.34 62.04,4.3 65.31,3.8 68.57,3.72 71.84,3.06 75.1,2.62 78.37,2.12 81.63,2.07 84.9,2.03 88.16,1.99 91.43,1.94 94.69,1.92 97.96,1.87 101.22,1.79 104.49,1.77 107.76,1.74 111.02,1.0 114.29,1.55 117.55,1.58 120.82,1.58 124.08,1.58 127.35,1.64 130.61,1.65 133.88,1.73 137.14,1.83 140.41,1.88 143.67,1.88 146.94,1.93 150.2,2.04 153.47,2.05 156.73,2.05 160.0,2.07"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x5dca68cb6acd425549a7eceebb0baf33e7c9a055"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">82</td>
+      <td class="mono">0x5dca68cb…c9a055</td>
+      <td class="num">13.8</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,581.10">$1,581.10</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,581.10 / DD $-711.87">2.221</td>
+      <td class="num neg">204.58%</td>
+      <td class="num neg">$-711.87 <span style="color:#8b949e;font-size:11px">(3.7%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,438</td>
+      <td class="num">119</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 6.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.88 6.53,28.84 9.8,28.8 13.06,28.8 16.33,28.8 19.59,28.78 22.86,28.77 26.12,28.76 29.39,28.76 32.65,28.74 35.92,28.72 39.18,28.66 42.45,28.6 45.71,28.15 48.98,27.7 52.24,27.74 55.51,27.74 58.78,27.76 62.04,27.74 65.31,27.78 68.57,27.78 71.84,27.81 75.1,27.81 78.37,27.81 81.63,27.8 84.9,27.77 88.16,27.7 91.43,27.55 94.69,27.35 97.96,25.64 101.22,23.37 104.49,23.52 107.76,22.95 111.02,14.5 114.29,4.66 117.55,4.98 120.82,4.98 124.08,4.88 127.35,4.79 130.61,4.78 133.88,4.78 137.14,4.73 140.41,4.69 143.67,4.65 146.94,4.61 150.2,4.58 153.47,4.55 156.73,2.77 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xc71f5a493b937e4b1798b86510630336a6dfd804"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">83</td>
+      <td class="mono">0xc71f5a49…dfd804</td>
+      <td class="num">16.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $2,154.13">$2,154.13</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $2,154.13 / DD $-993.88">2.167</td>
+      <td class="num warn">24.37%</td>
+      <td class="num neg">$-993.88 <span style="color:#8b949e;font-size:11px">(23.7%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,425</td>
+      <td class="num">76</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,25.99 3.27,29.0 6.53,28.93 9.8,20.96 13.06,21.64 16.33,22.34 19.59,23.4 22.86,23.57 26.12,23.11 29.39,22.43 32.65,20.02 35.92,19.63 39.18,19.65 42.45,19.63 45.71,16.77 48.98,16.72 52.24,15.23 55.51,13.62 58.78,12.05 62.04,11.7 65.31,11.46 68.57,11.2 71.84,11.05 75.1,10.48 78.37,9.96 81.63,8.65 84.9,8.63 88.16,6.59 91.43,4.8 94.69,4.68 97.96,4.64 101.22,4.65 104.49,4.62 107.76,4.08 111.02,3.17 114.29,3.13 117.55,2.96 120.82,2.8 124.08,2.59 127.35,1.83 130.61,1.05 133.88,1.0 137.14,2.0 140.41,1.54 143.67,1.69 146.94,1.8 150.2,2.03 153.47,2.33 156.73,2.05 160.0,1.49"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x42982dafd5577db35255bb1dab0b288464844de1"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">84</td>
+      <td class="mono">0x42982daf…844de1</td>
+      <td class="num">25.7</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $2,277.23">$2,277.23</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $2,277.23 / DD $-1,079.24">2.110</td>
+      <td class="num neg">562.94%</td>
+      <td class="num neg">$-1,079.24 <span style="color:#8b949e;font-size:11px">(12.1%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,163</td>
+      <td class="num">815</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.0 3.27,1.03 6.53,1.45 9.8,4.34 13.06,4.57 16.33,4.66 19.59,4.95 22.86,7.37 26.12,7.52 29.39,9.66 32.65,10.51 35.92,11.98 39.18,13.17 42.45,13.41 45.71,13.47 48.98,15.36 52.24,16.27 55.51,16.61 58.78,17.59 62.04,17.98 65.31,18.15 68.57,18.29 71.84,18.44 75.1,18.58 78.37,18.63 81.63,23.09 84.9,23.57 88.16,23.6 91.43,24.28 94.69,24.41 97.96,25.26 101.22,25.94 104.49,26.14 107.76,26.41 111.02,26.69 114.29,26.55 117.55,26.5 120.82,26.48 124.08,26.34 127.35,26.24 130.61,26.03 133.88,26.43 137.14,26.43 140.41,27.22 143.67,28.4 146.94,28.41 150.2,28.54 153.47,28.59 156.73,28.59 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x5461808abcf71724dc1114b9ded5f89d53cc0568"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">85</td>
+      <td class="mono">0x5461808a…cc0568</td>
+      <td class="num">34.2</td>
+      <td class="num pos" title="Source-consistent historical PnL for A. Current execution/range PnL: $9,777.11">$9,777.11</td>
+      <td class="num" title="Source-consistent PnL/DD: A PnL $9,777.11 / DD $-4,642.01">2.106</td>
+      <td class="num neg">104.24%</td>
+      <td class="num neg">$-4,642.01 <span style="color:#8b949e;font-size:11px">(22.5%)</span><sup title="All-time MTM - includes unrealised PnL from accountValueHistory">A</sup></td>
+      <td class="num">8,303</td>
+      <td class="num">794</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">22.7h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,28.08 3.27,28.14 6.53,28.17 9.8,28.36 13.06,28.39 16.33,28.57 19.59,28.79 22.86,29.0 26.12,28.62 29.39,28.59 32.65,28.21 35.92,28.18 39.18,28.41 42.45,28.64 45.71,28.25 48.98,27.87 52.24,27.47 55.51,27.08 58.78,27.13 62.04,27.15 65.31,27.21 68.57,27.3 71.84,27.35 75.1,27.38 78.37,27.43 81.63,27.52 84.9,27.75 88.16,27.97 91.43,27.56 94.69,27.16 97.96,27.28 101.22,27.41 104.49,23.3 107.76,19.19 111.02,19.72 114.29,20.24 117.55,18.34 120.82,15.79 124.08,14.7 127.35,13.6 130.61,12.51 133.88,11.42 137.14,11.14 140.41,10.68 143.67,10.4 146.94,9.93 150.2,7.34 153.47,4.75 156.73,5.11 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xf31a0bcac9bb98fa8af4a591593ebd6c808dfcd5"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">86</td>
+      <td class="mono">0xf31a0bca…8dfcd5</td>
+      <td class="num">0.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $293.81">$293.81</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $293.81 / DD $-141.25">2.080</td>
+      <td class="num warn">15.98%</td>
+      <td class="num neg">$-141.25 <span style="color:#8b949e;font-size:11px">(45.9%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">188</td>
+      <td class="num">12</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M 1B</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.6d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,27.81 4.85,28.26 9.7,28.34 14.55,29.0 19.39,27.69 24.24,9.22 29.09,7.41 33.94,6.67 38.79,5.28 43.64,4.21 48.48,1.76 53.33,1.0 58.18,2.86 63.03,2.67 67.88,4.48 72.73,5.87 77.58,8.54 82.42,9.12 87.27,9.86 92.12,10.57 96.97,11.69 101.82,11.94 106.67,12.09 111.52,12.18 116.36,13.67 121.21,15.66 126.06,16.04 130.91,17.5 135.76,17.16 140.61,14.08 145.45,15.79 150.3,17.09 155.15,11.22 160.0,9.99"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x478ed6c83003ec70137d0076da4b5c1c40507ba7"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">87</td>
+      <td class="mono">0x478ed6c8…507ba7</td>
+      <td class="num">37.7</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $15,082.69">$15,082.69</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $15,082.69 / DD $-7,301.45">2.066</td>
+      <td class="num neg">150.87%</td>
+      <td class="num neg">$-7,301.45 <span style="color:#8b949e;font-size:11px">(54.9%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,164</td>
+      <td class="num">270</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.93 6.53,28.87 9.8,28.46 13.06,26.26 16.33,25.57 19.59,25.16 22.86,22.67 26.12,19.62 29.39,19.62 32.65,18.32 35.92,17.24 39.18,17.21 42.45,15.81 45.71,14.97 48.98,14.81 52.24,14.62 55.51,14.44 58.78,12.4 62.04,11.14 65.31,10.77 68.57,10.35 71.84,10.17 75.1,9.54 78.37,9.12 81.63,8.94 84.9,8.31 88.16,7.87 91.43,7.06 94.69,6.96 97.96,6.52 101.22,5.7 104.49,5.61 107.76,5.03 111.02,4.73 114.29,4.44 117.55,3.86 120.82,3.57 124.08,3.54 127.35,3.25 130.61,2.81 133.88,2.74 137.14,2.71 140.41,1.76 143.67,1.73 146.94,1.3 150.2,1.26 153.47,1.08 156.73,1.08 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xe98450910c2601ac6528c16eb4693b72bb3248c9"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">88</td>
+      <td class="mono">0xe9845091…3248c9</td>
+      <td class="num">0.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for M. Current execution/range PnL: $22,683.60">$22,683.60</td>
+      <td class="num" title="Source-consistent PnL/DD: M PnL $22,683.60 / DD $-11,021.24">2.058</td>
+      <td class="num warn">11.94%</td>
+      <td class="num neg">$-11,021.24 <span style="color:#8b949e;font-size:11px">(33.4%)</span><sup title="Monthly MTM - includes unrealised PnL from accountValueHistory">M</sup></td>
+      <td class="num">745</td>
+      <td class="num">5</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M 1B</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.5d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,14.2 3.27,14.2 6.53,12.67 9.8,11.58 13.06,9.05 16.33,5.52 19.59,5.63 22.86,5.79 26.12,6.22 29.39,18.89 32.65,18.95 35.92,19.15 39.18,19.2 42.45,18.87 45.71,16.73 48.98,15.63 52.24,15.36 55.51,15.01 58.78,14.43 62.04,13.9 65.31,13.68 68.57,13.43 71.84,13.23 75.1,12.95 78.37,12.24 81.63,11.93 84.9,11.41 88.16,10.92 91.43,10.54 94.69,7.84 97.96,3.24 101.22,1.62 104.49,1.0 107.76,3.32 111.02,3.9 114.29,5.31 117.55,9.37 120.82,9.37 124.08,12.56 127.35,13.18 130.61,14.02 133.88,15.16 137.14,16.37 140.41,16.79 143.67,19.61 146.94,20.36 150.2,21.27 153.47,22.29 156.73,26.3 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xe415c2d0fcfa3417ad876456e9c529eac2f91de6"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">89</td>
+      <td class="mono">0xe415c2d0…f91de6</td>
+      <td class="num">22.8</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $7,212.42">$7,212.42</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $7,212.42 / DD $-3,542.13">2.036</td>
+      <td class="num neg">68.63%</td>
+      <td class="num neg">$-3,542.13 <span style="color:#8b949e;font-size:11px">(36.2%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">806</td>
+      <td class="num">381</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">21.2h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,27.3 6.53,26.79 9.8,26.13 13.06,25.15 16.33,22.85 19.59,18.61 22.86,18.33 26.12,17.96 29.39,17.94 32.65,16.98 35.92,16.81 39.18,16.66 42.45,12.46 45.71,8.95 48.98,11.15 52.24,11.15 55.51,11.15 58.78,11.15 62.04,11.15 65.31,11.15 68.57,11.15 71.84,11.15 75.1,11.16 78.37,11.16 81.63,11.16 84.9,11.16 88.16,11.16 91.43,11.16 94.69,11.16 97.96,11.21 101.22,11.31 104.49,11.45 107.76,11.52 111.02,11.53 114.29,11.53 117.55,11.53 120.82,11.53 124.08,11.54 127.35,11.65 130.61,5.74 133.88,6.5 137.14,6.37 140.41,3.81 143.67,3.81 146.94,3.18 150.2,2.51 153.47,2.48 156.73,2.45 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x8688e76b89a2db6f277561a4e332574d12e1cb68"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">90</td>
+      <td class="mono">0x8688e76b…e1cb68</td>
+      <td class="num">16.8</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $380.19">$380.19</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $380.19 / DD $-188.06">2.022</td>
+      <td class="num warn">16.77%</td>
+      <td class="num neg">$-188.06 <span style="color:#8b949e;font-size:11px">(13.5%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">118</td>
+      <td class="num">31</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 7.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 17.78,1.0 35.56,3.25 53.33,4.71 71.11,4.94 88.89,5.46 106.67,5.74 124.44,4.86 142.22,3.95 160.0,3.11"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xc6dc5e7eeedf2981434c0806e6db4f79e63f1fe9"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">91</td>
+      <td class="mono">0xc6dc5e7e…3f1fe9</td>
+      <td class="num">17.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,695.32">$1,695.32</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,695.32 / DD $-842.98">2.011</td>
+      <td class="num neg">129.00%</td>
+      <td class="num neg">$-842.98 <span style="color:#8b949e;font-size:11px">(15.3%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">1,895</td>
+      <td class="num">350</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 5.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,27.85 6.53,27.63 9.8,27.44 13.06,26.86 16.33,26.29 19.59,25.87 22.86,25.44 26.12,24.89 29.39,24.05 32.65,23.67 35.92,23.19 39.18,22.76 42.45,22.44 45.71,21.94 48.98,21.45 52.24,21.02 55.51,20.71 58.78,20.26 62.04,18.97 65.31,18.53 68.57,17.23 71.84,16.68 75.1,16.12 78.37,15.7 81.63,15.27 84.9,14.52 88.16,13.76 91.43,13.39 94.69,12.02 97.96,11.65 101.22,10.28 104.49,9.79 107.76,9.28 111.02,8.54 114.29,8.05 117.55,7.54 120.82,6.8 124.08,6.32 127.35,5.87 130.61,5.39 133.88,4.95 137.14,4.14 140.41,3.33 143.67,3.25 146.94,3.17 150.2,2.16 153.47,2.08 156.73,2.0 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x98e073b579fd483eac8f10d5bd0b32c8c3bbd7e0"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">92</td>
+      <td class="mono">0x98e073b5…bbd7e0</td>
+      <td class="num">0.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $96,470.70">$96,470.70</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $96,470.70 / DD $-48,186.30">2.002</td>
+      <td class="num neg">67.45%</td>
+      <td class="num neg">$-48,186.30 <span style="color:#8b949e;font-size:11px">(73.1%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">17,729</td>
+      <td class="num">592</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M EC</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.0 3.27,1.37 6.53,1.66 9.8,1.9 13.06,2.35 16.33,2.72 19.59,3.01 22.86,3.14 26.12,3.43 29.39,3.43 32.65,3.72 35.92,4.48 39.18,4.75 42.45,5.27 45.71,5.79 48.98,6.16 52.24,6.45 55.51,6.78 58.78,7.14 62.04,7.89 65.31,13.49 68.57,13.86 71.84,13.9 75.1,14.19 78.37,14.81 81.63,15.1 84.9,15.35 88.16,15.73 91.43,16.03 94.69,16.18 97.96,17.45 101.22,17.74 104.49,17.89 107.76,18.27 111.02,20.82 114.29,21.25 117.55,21.63 120.82,21.93 124.08,24.51 127.35,28.74 130.61,28.75 133.88,28.81 137.14,28.81 140.41,28.82 143.67,28.82 146.94,28.83 150.2,28.83 153.47,28.88 156.73,28.9 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-stale">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xd8f5d3fcd0ce9469386c002d8311501c18bd7429"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">93</td>
+      <td class="mono">0xd8f5d3fc…bd7429</td>
+      <td class="num">11.8</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $258.84">$258.84</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $258.84 / DD $-134.16">1.929</td>
+      <td class="num neg">199.74%</td>
+      <td class="num neg">$-134.16 <span style="color:#8b949e;font-size:11px">(42.1%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">262</td>
+      <td class="num">49</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#d29922" title="Stale: last trade 1h-24h ago">23.5h ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,28.71 3.27,28.71 6.53,28.72 9.8,28.72 13.06,28.73 16.33,28.77 19.59,28.77 22.86,29.0 26.12,12.17 29.39,10.28 32.65,10.67 35.92,10.35 39.18,8.38 42.45,8.63 45.71,8.68 48.98,11.68 52.24,11.62 55.51,14.78 58.78,10.97 62.04,9.83 65.31,9.82 68.57,9.32 71.84,5.98 75.1,5.7 78.37,5.44 81.63,5.4 84.9,5.42 88.16,5.5 91.43,9.04 94.69,8.97 97.96,13.84 101.22,14.15 104.49,14.13 107.76,14.12 111.02,14.02 114.29,14.01 117.55,10.78 120.82,9.39 124.08,8.24 127.35,6.7 130.61,7.02 133.88,5.14 137.14,5.31 140.41,5.21 143.67,5.18 146.94,5.08 150.2,5.04 153.47,4.88 156.73,1.27 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xf9de4e7c610b325781388dcbc39107b09c05dcbd"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">94</td>
+      <td class="mono">0xf9de4e7c…05dcbd</td>
+      <td class="num">10.7</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $12,523.07">$12,523.07</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $12,523.07 / DD $-6,642.19">1.885</td>
+      <td class="num neg">274.28%</td>
+      <td class="num neg">$-6,642.19 <span style="color:#8b949e;font-size:11px">(15.6%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">15,944</td>
+      <td class="num">113</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,1.0 3.27,1.23 6.53,1.28 9.8,1.52 13.06,2.02 16.33,2.1 19.59,2.09 22.86,4.72 26.12,4.94 29.39,4.97 32.65,5.0 35.92,6.37 39.18,6.4 42.45,6.43 45.71,7.08 48.98,7.82 52.24,9.47 55.51,9.47 58.78,9.75 62.04,9.97 65.31,10.07 68.57,10.16 71.84,11.02 75.1,11.26 78.37,13.67 81.63,14.73 84.9,15.83 88.16,16.12 91.43,16.07 94.69,16.07 97.96,16.04 101.22,17.35 104.49,17.35 107.76,17.44 111.02,17.52 114.29,18.98 117.55,20.1 120.82,21.24 124.08,21.58 127.35,22.4 130.61,22.74 133.88,23.13 137.14,23.45 140.41,24.5 143.67,25.29 146.94,26.09 150.2,26.68 153.47,27.74 156.73,28.57 160.0,29.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0xd246c4a039508379cd70ce624cdb7c8b1c991f37"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">95</td>
+      <td class="mono">0xd246c4a0…991f37</td>
+      <td class="num">8.4</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $12,672.65">$12,672.65</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $12,672.65 / DD $-6,814.02">1.860</td>
+      <td class="num neg">62.18%</td>
+      <td class="num neg">$-6,814.02 <span style="color:#8b949e;font-size:11px">(20.6%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">6,349</td>
+      <td class="num">312</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 2.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.59 6.53,28.38 9.8,27.34 13.06,24.13 16.33,23.0 19.59,19.46 22.86,19.05 26.12,18.21 29.39,17.46 32.65,14.48 35.92,15.75 39.18,17.95 42.45,17.94 45.71,17.39 48.98,14.86 52.24,14.85 55.51,14.15 58.78,5.23 62.04,5.21 65.31,5.19 68.57,5.18 71.84,5.16 75.1,5.05 78.37,4.8 81.63,4.68 84.9,2.9 88.16,2.71 91.43,2.57 94.69,2.42 97.96,2.35 101.22,2.25 104.49,2.19 107.76,2.15 111.02,1.83 114.29,1.75 117.55,1.46 120.82,1.42 124.08,1.28 127.35,1.23 130.61,1.16 133.88,1.11 137.14,1.1 140.41,1.08 143.67,1.04 146.94,1.02 150.2,1.0 153.47,1.0 156.73,6.25 160.0,7.52"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x200b3ad711b3f1b29b8c9e59e901d36f9d86dc82"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">96</td>
+      <td class="mono">0x200b3ad7…86dc82</td>
+      <td class="num">12.6</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $1,981.59">$1,981.59</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $1,981.59 / DD $-1,076.00">1.842</td>
+      <td class="num pos">4.06%</td>
+      <td class="num neg">$-1,076.00 <span style="color:#8b949e;font-size:11px">(47.1%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">581</td>
+      <td class="num">16</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.4d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 16.0,28.81 32.0,8.82 48.0,1.0 64.0,10.13 80.0,10.25 96.0,10.22 112.0,9.45 128.0,9.3 144.0,9.11 160.0,8.98"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x2f0d360d090e6cbdb0116b26a492399c226741cd"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">97</td>
+      <td class="mono">0x2f0d360d…6741cd</td>
+      <td class="num">0.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $38,099.90">$38,099.90</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $38,099.90 / DD $-20,855.41">1.827</td>
+      <td class="num neg">54.69%</td>
+      <td class="num neg">$-20,855.41 <span style="color:#8b949e;font-size:11px">(74.1%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">2,932</td>
+      <td class="num">194</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M 1B EC</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.0d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,8.92 3.27,8.97 6.53,8.94 9.8,8.91 13.06,8.79 16.33,7.18 19.59,7.15 22.86,7.12 26.12,5.52 29.39,5.48 32.65,5.03 35.92,4.82 39.18,4.69 42.45,4.54 45.71,4.4 48.98,2.81 52.24,1.6 55.51,1.46 58.78,1.09 62.04,1.0 65.31,6.41 68.57,13.77 71.84,29.0 75.1,22.38 78.37,22.25 81.63,22.11 84.9,22.06 88.16,21.92 91.43,21.79 94.69,21.65 97.96,21.5 101.22,21.45 104.49,21.22 107.76,21.03 111.02,20.56 114.29,20.38 117.55,20.22 120.82,20.07 124.08,19.91 127.35,19.75 130.61,19.72 133.88,19.63 137.14,19.62 140.41,19.42 143.67,19.38 146.94,19.33 150.2,19.24 153.47,19.11 156.73,19.1 160.0,17.88"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x8cf120f68a0c32c320c01819e30e600109eaa1e7"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">98</td>
+      <td class="mono">0x8cf120f6…eaa1e7</td>
+      <td class="num">21.3</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $3,772.92">$3,772.92</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $3,772.92 / DD $-2,078.19">1.815</td>
+      <td class="num neg">331.96%</td>
+      <td class="num neg">$-2,078.19 <span style="color:#8b949e;font-size:11px">(37.8%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">10,749</td>
+      <td class="num">7,559</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 16.2d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,28.31 6.53,27.61 9.8,26.91 13.06,26.21 16.33,25.51 19.59,24.8 22.86,24.09 26.12,23.73 29.39,23.71 32.65,23.71 35.92,23.67 39.18,23.38 42.45,22.66 45.71,22.64 48.98,21.94 52.24,21.71 55.51,21.22 58.78,20.5 62.04,19.77 65.31,19.55 68.57,19.12 71.84,19.04 75.1,18.48 78.37,18.31 81.63,17.57 84.9,17.54 88.16,17.53 91.43,16.84 94.69,16.77 97.96,16.1 101.22,15.35 104.49,14.61 107.76,13.86 111.02,13.11 114.29,12.35 117.55,11.6 120.82,10.84 124.08,10.07 127.35,9.31 130.61,8.54 133.88,7.77 137.14,6.99 140.41,6.22 143.67,5.44 146.94,4.66 150.2,3.87 153.47,3.08 156.73,2.12 160.0,1.0"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x110d72aecd47181cacf3ed9cd5e78393fa3f13ba"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">99</td>
+      <td class="mono">0x110d72ae…3f13ba</td>
+      <td class="num">0.0</td>
+      <td class="num pos" title="Source-consistent historical PnL for A. Current execution/range PnL: $1,104.50">$1,104.50</td>
+      <td class="num" title="Source-consistent PnL/DD: A PnL $1,104.50 / DD $-619.37">1.783</td>
+      <td class="num neg">95.46%</td>
+      <td class="num neg">$-619.37 <span style="color:#8b949e;font-size:11px">(57.8%)</span><sup title="All-time MTM - includes unrealised PnL from accountValueHistory">A</sup></td>
+      <td class="num">286</td>
+      <td class="num">145</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M EC</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,16.27 3.27,16.36 6.53,16.48 9.8,16.58 13.06,16.69 16.33,17.15 19.59,17.61 22.86,18.78 26.12,19.95 29.39,21.12 32.65,22.29 35.92,23.02 39.18,23.76 42.45,24.11 45.71,24.47 48.98,20.37 52.24,20.37 55.51,19.97 58.78,19.54 62.04,23.94 65.31,23.94 68.57,29.0 71.84,29.0 75.1,28.91 78.37,28.54 81.63,25.24 84.9,23.96 88.16,18.42 91.43,18.75 94.69,17.54 97.96,17.2 101.22,17.2 104.49,14.61 107.76,9.84 111.02,7.78 114.29,5.45 117.55,5.04 120.82,5.5 124.08,5.5 127.35,5.51 130.61,5.96 133.88,4.08 137.14,4.08 140.41,3.01 143.67,3.01 146.94,2.82 150.2,1.0 153.47,1.0 156.73,26.54 160.0,26.54"/></svg></td>
+    </tr>
+    
+    <tr class="wallet-row  wallet-dormant">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on"  hx-post="/select_wallet" hx-vals='{"wallet": "0x5e0c78f6360514ac1d4ea4ab9a2a232284458e69"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">100</td>
+      <td class="mono">0x5e0c78f6…458e69</td>
+      <td class="num">8.9</td>
+      <td class="num pos" title="Source-consistent historical PnL for S. Current execution/range PnL: $345,090.53">$345,090.53</td>
+      <td class="num" title="Source-consistent PnL/DD: S PnL $345,090.53 / DD $-195,048.84">1.769</td>
+      <td class="num warn">28.37%</td>
+      <td class="num neg">$-195,048.84 <span style="color:#8b949e;font-size:11px">(70.7%)</span><sup title="Scanner - full-history realised trade replay">S</sup></td>
+      <td class="num">7,318</td>
+      <td class="num">778</td>
+      <td style="text-align:center;font-size:10px"><span class="pill badge-red" title="Penalty flags">M</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap"><span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; 1.1d ago</span></td>
+      <td class="spark-cell"><svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="#3fb950" stroke-width="2.5" points="0.0,29.0 3.27,29.0 6.53,28.99 9.8,28.99 13.06,28.98 16.33,28.97 19.59,28.96 22.86,28.94 26.12,28.92 29.39,28.88 32.65,28.84 35.92,28.79 39.18,28.74 42.45,28.69 45.71,28.59 48.98,28.44 52.24,28.27 55.51,28.09 58.78,27.84 62.04,27.57 65.31,27.17 68.57,26.75 71.84,26.26 75.1,24.96 78.37,27.69 81.63,27.49 84.9,26.96 88.16,26.96 91.43,26.95 94.69,16.65 97.96,16.55 101.22,16.1 104.49,15.48 107.76,14.22 111.02,13.32 114.29,10.79 117.55,9.35 120.82,7.94 124.08,7.02 127.35,6.34 130.61,5.77 133.88,4.79 137.14,4.62 140.41,4.4 143.67,2.6 146.94,2.17 150.2,1.39 153.47,1.08 156.73,1.0 160.0,5.21"/></svg></td>
+    </tr>
+    
+  </tbody>
+</table>
+
+
+<div style="display:flex;justify-content:center;align-items:center;gap:8px;padding:12px 0;font-size:12px;color:#8b949e">
+  
+  <span>Page 1 of 4 (375 wallets)</span>
+  
+  <a class="btn btn-sm" hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"page":"2","per_page":"100","sort":"risk_pnl","dir":"desc"}'>Next →</a>
+  
+</div>
+
+</div>

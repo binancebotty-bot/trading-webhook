@@ -1,0 +1,48 @@
+<div id="wallet-table"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
+{% if rows %}
+<table id="walletTable">
+  <thead>
+    <tr>
+      <th style="width:36px"></th>
+      {% set cols = [("rank", "#"), ("wallet", "Wallet"), ("compound_score", "CScore"), ("realised_pnl", "PnL"), ("risk_pnl", "PnL/Real DD"), ("slip_deg_03", "Slip%"), ("max_dd", "Real DD"), ("trades", "Trades"), ("trades_7d", "7d"), ("penalty_flags", "Flags"), ("last_trade_time", "Last Trade"),] %}
+      {% for key,label in cols %}
+      <th class="num"><a hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"sort":"{{ key }}","dir":"{{ "asc" if sort==key and dir=="desc" else "desc" }}"}' style="cursor:pointer;text-decoration:none;color:inherit">{{ label }}{% if sort == key %}{{ "▲" if dir=="asc" else "▼" }}{% endif %}</a></th>
+      {% endfor %}
+      <th style="width:180px">Trend</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr class="wallet-row {{ 'selected-row' if row.selected else '' }}{{ ' wallet-dormant' if row.get('is_dormant') else '' }}{{ ' wallet-stale' if row.get('is_stale') and not row.get('is_dormant') else '' }}">
+      <td style="width:36px;text-align:center;vertical-align:middle"><input type="checkbox" name="chk" value="on" {% if row.selected %}checked{% endif %} hx-post="/select_wallet" hx-vals='{"wallet": "{{ row.wallet }}"}' hx-include="this" hx-trigger="change" hx-target="#portfolio-panel" hx-swap="outerHTML"></td>
+      <td class="num">{{ row.rank }}</td>
+      <td class="mono">{{ row.wallet_label }}</td>
+      <td class="num">{{ row.compound_score_fmt }}</td>
+      <td class="num {{ 'pos' if row.pnl_positive else 'neg' }}" title="{{ row.pnl_title }}">{{ row.pnl_fmt }}</td>
+      <td class="num" title="{{ row.risk_pnl_title }}">{{ row.risk_pnl_fmt }}</td>
+      <td class="num {{ row.slip_deg_03_cls }}">{{ row.slip_deg_03_fmt }}</td>
+      <td class="num neg">{{ row.max_dd_fmt }} <span style="color:#8b949e;font-size:11px">({{ row.max_dd_pct_fmt }})</span><sup title="{{ row.max_dd_source_title }}">{{ row.max_dd_source_label }}</sup></td>
+      <td class="num">{{ row.trades_fmt }}</td>
+      <td class="num">{{ row.trades_7d_fmt }}</td>
+      <td style="text-align:center;font-size:10px"><span class="{% if row.penalty_flags %}pill badge-red{% endif %}" title="{{ row.penalty_flags_title }}">{{ row.penalty_flags or '—' }}</span></td>
+      <td class="num" style="font-size:11px;white-space:nowrap">{% set lta = row.get("last_trade_age_fmt") or "\u2014" %}{% if lta == "\u2014" %}<span style="color:#6e7681">{{ lta }}</span>{% elif row.get("is_dormant") %}<span style="color:#f85149;font-weight:600" title="Dormant: no trade in 24h+">&#9888; {{ lta }}</span>{% elif row.get("is_stale") %}<span style="color:#d29922" title="Stale: last trade 1h-24h ago">{{ lta }}</span>{% else %}<span style="color:#3fb950">{{ lta }}</span>{% endif %}</td>
+      <td class="spark-cell">{% if row.sparkline %}<svg width="140" height="28" viewBox="0 0 160 30"><polyline fill="none" stroke="{{ '#3fb950' if row.pnl_positive else '#f85149' }}" stroke-width="2.5" points="{{ row.sparkline }}"/></svg>{% else %}<span style="color:#6e7681">—</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p style="color:#6e7681;padding:20px 0">No wallets loaded. Run the scanner pipeline then refresh.</p>
+{% endif %}
+{% if page is defined and total_pages is defined and total_pages > 1 %}
+<div style="display:flex;justify-content:center;align-items:center;gap:8px;padding:12px 0;font-size:12px;color:#8b949e">
+  {% if page > 1 %}
+  <a class="btn btn-sm" hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"page":"{{ page - 1 }}","per_page":"{{ per_page }}","sort":"{{ sort }}","dir":"{{ dir }}"}'>← Prev</a>
+  {% endif %}
+  <span>Page {{ page }} of {{ total_pages }} ({{ total_rows }} wallets)</span>
+  {% if page < total_pages %}
+  <a class="btn btn-sm" hx-get="/table" hx-target="#wallet-table" hx-swap="outerHTML" hx-vals='{"page":"{{ page + 1 }}","per_page":"{{ per_page }}","sort":"{{ sort }}","dir":"{{ dir }}"}'>Next →</a>
+  {% endif %}
+</div>
+{% endif %}
+</div>

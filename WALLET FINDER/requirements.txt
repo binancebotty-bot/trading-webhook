@@ -1,0 +1,19 @@
+# WALLET FINDER — Pre-Live Proving Dashboard & Scanner Pipeline
+# Install: pip install -r requirements.txt
+
+# Dashboard
+fastapi>=0.100.0
+uvicorn>=0.22.0
+jinja2>=3.0.0
+markupsafe>=2.0.0
+
+# Data processing
+pandas>=1.5.0
+
+# Async HTTP (scanner pipeline)
+aiohttp>=3.8.0
+websockets>=10.0
+websocket-client>=1.5.0
+
+# Optional: leaderboard extraction
+# playwright>=1.40.0  # only needed for extract_hl_leaderboard_wallets.py secondary route

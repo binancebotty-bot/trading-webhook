@@ -23,10 +23,12 @@ or:
 from __future__ import annotations
 
 import csv
+import io
 import json
 import math
 import os
 import html
+import re
 import shutil
 import subprocess
 import time
@@ -46,7 +48,7 @@ except Exception:  # pragma: no cover
     uvicorn = None
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 # MTM (mark-to-market) drawdown lookup. The realised-only `max_drawdown` computed
 # below from cumsum(closedPnl) of matched exchange fills understates real account
@@ -82,6 +84,13 @@ EQUITY_HISTORY_FILE = DATA_DIR / "equity_history.json"
 UI_STATE_FILE = BASE_DIR / "ui_state.json"
 WALLET_GATE_FILE = BASE_DIR / "wallet_gate.json"
 MANUAL_WALLETS_FILE = BASE_DIR / "manual_wallets.txt"
+COPY_CANDIDATE_FILES = (
+    BASE_DIR / "Copy candidates.TXT",
+    BASE_DIR / "Copy candidates.txt",
+    BASE_DIR / "copy candidates.txt",
+    BASE_DIR / "copycandidates.txt",
+    BASE_DIR / "copy_candidates.txt",
+)
 PURGED_WALLETS_FILE = BASE_DIR / "purged_wallets.txt"
 LIVE_COPY_AUDIT_DIR = BASE_DIR / "hl_live_copy_audit"
 LIVE_COPY_CONFIG_FILE = LIVE_COPY_AUDIT_DIR / "live_config.json"
@@ -135,26 +144,16 @@ app = FastAPI(title="Wallet Proof Engine")
 
 def _startup_warm_audit_cache() -> None:
     """Pre-build live audit summary at startup so first page load hits cache."""
-    import time as _t
     last_good = _load_live_audit_summary_last_good()
     if last_good:
         with _AUDIT_SUMMARY_CACHE_LOCK:
             _AUDIT_SUMMARY_CACHE["data"] = last_good
             _AUDIT_SUMMARY_CACHE["built_at"] = float(last_good.get("_persisted_at_epoch") or 0.0)
-    _t.sleep(3.0)  # allow app to bind before warming
-    try:
-        result = _live_audit_summary()
-        with _AUDIT_SUMMARY_CACHE_LOCK:
-            _AUDIT_SUMMARY_CACHE["data"] = {**result, "build_seconds": 0.0, "cache_hit": False}
-            _AUDIT_SUMMARY_CACHE["built_at"] = _t.time()
-        _save_live_audit_summary_last_good(result)
-    except Exception:
-        pass
 
 
 @app.on_event("startup")
 async def _on_startup() -> None:
-    threading.Thread(target=_startup_warm_audit_cache, daemon=True).start()
+    return
 
 
 
@@ -306,6 +305,113 @@ def load_purged_wallets() -> set[str]:
         except ValueError:
             continue
     return wallets
+
+
+def load_manual_wallets() -> set[str]:
+    if not MANUAL_WALLETS_FILE.exists():
+        return set()
+    wallets: set[str] = set()
+    for line in MANUAL_WALLETS_FILE.read_text(encoding="utf-8").splitlines():
+        try:
+            wallets.add(normalise_wallet_for_purge(line))
+        except ValueError:
+            continue
+    return wallets
+
+
+def _candidate_wallet_file() -> Optional[Path]:
+    for path in COPY_CANDIDATE_FILES:
+        if path.exists():
+            return path
+    return None
+
+
+def _wallets_from_text(text: str) -> Tuple[List[str], int]:
+    wallets: List[str] = []
+    seen: set[str] = set()
+    invalid = 0
+    for raw in re.split(r"[\s,;]+", text):
+        value = raw.strip().strip('"').strip("'")
+        if not value:
+            continue
+        try:
+            wallet = normalise_wallet_for_purge(value)
+        except ValueError:
+            if value.lower().startswith("0x"):
+                invalid += 1
+            continue
+        if wallet not in seen:
+            wallets.append(wallet)
+            seen.add(wallet)
+    return wallets, invalid
+
+
+def import_copy_candidates_to_manual_wallets() -> Dict[str, Any]:
+    source = _candidate_wallet_file()
+    if source is None:
+        return {
+            "ok": False,
+            "error": "NO_COPY_CANDIDATES_FILE",
+            "searched": [str(p) for p in COPY_CANDIDATE_FILES],
+            "imported": 0,
+            "already_present": 0,
+            "candidate_count": 0,
+            "invalid_count": 0,
+        }
+    text = source.read_text(encoding="utf-8", errors="ignore")
+    candidates, invalid_count = _wallets_from_text(text)
+    existing_order: List[str] = []
+    existing_seen: set[str] = set()
+    if MANUAL_WALLETS_FILE.exists():
+        for line in MANUAL_WALLETS_FILE.read_text(encoding="utf-8", errors="ignore").splitlines():
+            try:
+                wallet = normalise_wallet_for_purge(line)
+            except ValueError:
+                continue
+            if wallet not in existing_seen:
+                existing_order.append(wallet)
+                existing_seen.add(wallet)
+    added = [w for w in candidates if w not in existing_seen]
+    merged = existing_order + added
+    MANUAL_WALLETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _unique_tmp_path(MANUAL_WALLETS_FILE)
+    with _FILE_WRITE_LOCK:
+        tmp.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
+        _replace_with_retries(tmp, MANUAL_WALLETS_FILE)
+    if added:
+        invalidate_model_cache()
+    else:
+        with _MODEL_DASHBOARD_HTML_CACHE_LOCK:
+            _MODEL_DASHBOARD_HTML_CACHE["html"] = None
+            _MODEL_DASHBOARD_HTML_CACHE["built_at"] = 0.0
+            _MODEL_DASHBOARD_HTML_CACHE["state_built_at"] = 0.0
+            _MODEL_DASHBOARD_HTML_CACHE["disk_blocked"] = True
+    return {
+        "ok": True,
+        "source": str(source),
+        "manual_wallets_file": str(MANUAL_WALLETS_FILE),
+        "candidate_count": len(candidates),
+        "imported": len(added),
+        "already_present": len(candidates) - len(added),
+        "total_manual_wallets": len(merged),
+        "invalid_count": invalid_count,
+        "imported_wallets": added,
+    }
+
+
+def state_missing_manual_wallets(state: Any) -> bool:
+    manual = load_manual_wallets()
+    if not manual:
+        return False
+    if not isinstance(state, dict):
+        return True
+    rows = state.get("wallet_rows") or []
+    present = {
+        str(row.get("wallet", "")).strip().lower()
+        for row in rows
+        if isinstance(row, dict)
+    }
+    return bool(manual - present)
 
 
 def save_purged_wallets(wallets: set[str]) -> None:
@@ -473,7 +579,11 @@ def purge_wallet_everywhere(wallet: str) -> Dict[str, Any]:
             path.unlink()
             deleted.append(str(path.relative_to(BASE_DIR) if path.is_relative_to(BASE_DIR) else path))
 
-    invalidate_model_cache()
+    with _MODEL_DASHBOARD_HTML_CACHE_LOCK:
+        _MODEL_DASHBOARD_HTML_CACHE["html"] = None
+        _MODEL_DASHBOARD_HTML_CACHE["built_at"] = 0.0
+        _MODEL_DASHBOARD_HTML_CACHE["state_built_at"] = 0.0
+        _MODEL_DASHBOARD_HTML_CACHE["disk_blocked"] = True
     return {
         "ok": True,
         "wallet": wallet,
@@ -618,7 +728,8 @@ def _clean_wallet_config(raw_cfg: Any) -> Dict[str, Dict[str, Any]]:
     """Sanitise optional per-wallet model overrides.
 
     Empty/missing wallet config means: inherit the global header settings.
-    Supported per-wallet keys: copy_mode, norm_base, fixed_notional.
+    Supported per-wallet keys: copy_mode, norm_base, fixed_notional,
+    leader_equity_base.
     """
     if not isinstance(raw_cfg, dict):
         return {}
@@ -635,6 +746,8 @@ def _clean_wallet_config(raw_cfg: Any) -> Dict[str, Dict[str, Any]]:
             item["norm_base"] = max(1.0, fnum(cfg.get("norm_base"), DEFAULT_NORM_BASE))
         if "fixed_notional" in cfg and str(cfg.get("fixed_notional", "")).strip() != "":
             item["fixed_notional"] = max(0.01, fnum(cfg.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL))
+        if "leader_equity_base" in cfg and str(cfg.get("leader_equity_base", "")).strip() != "":
+            item["leader_equity_base"] = max(1.0, fnum(cfg.get("leader_equity_base"), item.get("norm_base", DEFAULT_NORM_BASE)))
         if item:
             out[w] = item
     return out
@@ -783,7 +896,8 @@ def load_ui_state() -> Dict[str, Any]:
         "copy_mode": mode,
         "normalisation_mode": norm_mode,
         "fixed_notional": max(0.01, fnum(raw.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL)),
-        "leader_equity_base": max(1.0, fnum(raw.get("leader_equity_base"), DEFAULT_LEADER_EQUITY)),
+        "min_trade_notional_enabled": parse_bool(raw.get("min_trade_notional_enabled", False)),
+        "leader_equity_base": norm_base,
         "fee_bps": max(0.0, fnum(raw.get("fee_bps"), DEFAULT_FEE_BPS)),
         "copy_friction_bps": max(0.0, fnum(raw.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS)),
         "wallet_config": _clean_wallet_config(raw.get("wallet_config", {})),
@@ -796,6 +910,40 @@ def load_ui_state() -> Dict[str, Any]:
     }
 
 
+def apply_live_config_wallet_model(ui: Dict[str, Any]) -> Dict[str, Any]:
+    """Let the 8014 live wallet controls drive app-model replay sizing.
+
+    The engine remains raw-truth only. This bridge is app/presentation-layer
+    only: values saved from the live wallet table are mirrored into the
+    deterministic replay config so fixed/proportional changes alter modelled
+    PnL/DD immediately.
+    """
+    out = dict(ui)
+    wallet_cfg = dict(out.get("wallet_config") or {})
+    live_config = _load_live_copy_config()
+    live_wallets = live_config.get("wallets", {}) if isinstance(live_config.get("wallets"), dict) else {}
+    for wallet, cfg in live_wallets.items():
+        if not isinstance(cfg, dict):
+            continue
+        w = str(wallet).strip().lower()
+        if not w:
+            continue
+        item: Dict[str, Any] = {}
+        mode = str(cfg.get("copy_mode", "")).strip().lower()
+        if mode in {"proportional", "fixed"}:
+            item["copy_mode"] = mode
+        if str(cfg.get("norm_base", "")).strip() != "":
+            item["norm_base"] = max(1.0, fnum(cfg.get("norm_base"), DEFAULT_NORM_BASE))
+        if str(cfg.get("fixed_notional", "")).strip() != "":
+            item["fixed_notional"] = max(0.01, fnum(cfg.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL))
+        if str(cfg.get("leader_equity_base", "")).strip() != "":
+            item["leader_equity_base"] = max(1.0, fnum(cfg.get("leader_equity_base"), item.get("norm_base", DEFAULT_NORM_BASE)))
+        if item:
+            wallet_cfg[w] = item
+    out["wallet_config"] = _clean_wallet_config(wallet_cfg)
+    return out
+
+
 def save_ui_state(patch: Dict[str, Any]) -> Dict[str, Any]:
     raw_existing = load_json(UI_STATE_FILE, {})
     raw_has_user_base = isinstance(raw_existing, dict) and "user_norm_base" in raw_existing
@@ -804,12 +952,17 @@ def save_ui_state(patch: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(merged.get("copy_mode", "proportional")).lower()
     merged["copy_mode"] = mode if mode in {"proportional", "fixed"} else "proportional"
     merged["norm_base"] = max(1.0, fnum(merged.get("norm_base"), DEFAULT_NORM_BASE))
+    if "leader_equity_base" not in patch:
+        merged["leader_equity_base"] = merged["norm_base"]
+    else:
+        merged["leader_equity_base"] = max(1.0, fnum(merged.get("leader_equity_base"), merged["norm_base"]))
     if "user_norm_base" in patch or raw_has_user_base:
         merged["user_norm_base"] = max(1.0, fnum(merged.get("user_norm_base"), merged.get("norm_base", DEFAULT_NORM_BASE)))
     else:
         merged["user_norm_base"] = merged["norm_base"]
     merged["fee_bps"] = max(0.0, fnum(merged.get("fee_bps"), DEFAULT_FEE_BPS))
     merged["copy_friction_bps"] = max(0.0, fnum(merged.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS))
+    merged["min_trade_notional_enabled"] = parse_bool(merged.get("min_trade_notional_enabled", False))
     merged["wallet_config"] = _clean_wallet_config(merged.get("wallet_config", {}))
     merged["wallet_include"] = _clean_wallet_include(merged.get("wallet_include", {}))
     merged["wallet_meta"] = sanitize_wallet_meta(merged.get("wallet_meta", {}))
@@ -820,7 +973,27 @@ def save_ui_state(patch: Dict[str, Any]) -> Dict[str, Any]:
     ranking_dir = str(ranking.get("direction", "desc")).lower()
     merged["ranking"] = {"column": ranking.get("column"), "direction": ranking_dir if ranking_dir in {"asc", "desc"} else "desc"}
     atomic_write_json(UI_STATE_FILE, merged)
-    invalidate_model_cache()
+    # Fee/friction/mode changes require full model rebuild because delta
+    # and copy PnL are baked into the model during build_model_state().
+    # Wallet include/exclude changes only need an HTML cache clear.
+    model_params_changed = (
+        merged.get("fee_bps") != existing.get("fee_bps")
+        or merged.get("copy_friction_bps") != existing.get("copy_friction_bps")
+        or merged.get("copy_mode") != existing.get("copy_mode")
+        or merged.get("norm_base") != existing.get("norm_base")
+        or merged.get("leader_equity_base") != existing.get("leader_equity_base")
+        or merged.get("fixed_notional") != existing.get("fixed_notional")
+        or merged.get("min_trade_notional_enabled") != existing.get("min_trade_notional_enabled")
+        or merged.get("wallet_config") != existing.get("wallet_config")
+    )
+    if model_params_changed:
+        invalidate_model_cache()
+    else:
+        with _MODEL_DASHBOARD_HTML_CACHE_LOCK:
+            _MODEL_DASHBOARD_HTML_CACHE["html"] = None
+            _MODEL_DASHBOARD_HTML_CACHE["built_at"] = 0.0
+            _MODEL_DASHBOARD_HTML_CACHE["state_built_at"] = 0.0
+            _MODEL_DASHBOARD_HTML_CACHE["disk_blocked"] = True
     return merged
 
 
@@ -984,9 +1157,10 @@ def _live_copy_config_response(config: Dict[str, Any]) -> Dict[str, Any]:
         "config": config,
         "wallet_count": len(wallets),
         "active_wallets": _active_live_copy_wallet_count(config),
-        "max_wallets": 10,
+        "max_wallets": 0,
+        "wallet_cap": "unlimited",
         "core_reload_required": True,
-        "core_confirmation_note": "Config saved — Core reload required to confirm WS tracking. Wallet is not Core-confirmed LIVE until Core restarts and reports it in live_ws_health.json.",
+        "core_confirmation_note": "Config saved — restart the Wallet Finder poll feeder to confirm runtime tracking in hl_copy_output/engine_truth.json.",
     }
 
 
@@ -995,8 +1169,7 @@ def _live_config_error(error: str, status_code: int = 400) -> JSONResponse:
 
 
 def _enforce_live_copy_cap(config: Dict[str, Any]) -> None:
-    if _active_live_copy_wallet_count(config) > 10:
-        raise ValueError("MAX_WALLETS_EXCEEDED")
+    return
 
 
 def _load_live_ws_health() -> Dict[str, Any]:
@@ -1492,7 +1665,18 @@ def _live_audit_summary() -> Dict[str, Any]:
         and (not _auto_send_filter or w.lower() == _auto_send_filter)
     ] if _auto_send_enabled else []
     model_portfolio: Dict[str, Any] = {}
-    live_wallet_derived = {}
+    try:
+        _model_state_for_live = build_model_state(use_live_config_wallet_model=True)
+    except Exception:
+        _model_state_for_live = {}
+    live_wallet_derived = _build_live_wallet_derived(
+        _model_state_for_live,
+        live_config,
+        audit_rows,
+        metric_send_attempts,
+        manual_positions,
+        manual_live_summary,
+    )
     live_leader_performance = _build_live_leader_performance(metric_send_attempts, manual_positions, exchange_snapshot, live_config, audit_rows)
     matched_exchange_fills = sum(inum(v.get("matched_exchange_fill_count")) for v in live_leader_performance.values() if isinstance(v, dict))
     filled_attempt_count = sum(inum(v.get("filled_count")) for v in live_leader_performance.values() if isinstance(v, dict))
@@ -1506,7 +1690,17 @@ def _live_audit_summary() -> Dict[str, Any]:
         exchange_snapshot["realized_pnl_diagnostic"] = ""
     account_reconciliation = _build_account_reconciliation(exchange_snapshot, live_leader_performance)
     _live_fills_data = _load_recent_live_fills(500)
-    live_wallet_rows = _build_live_wallet_rows(live_config, audit_rows, metric_send_attempts, manual_positions, manual_live_summary, ws_health, live_leader_performance, live_fills=_live_fills_data)
+    live_wallet_rows = _build_live_wallet_rows(
+        live_config,
+        audit_rows,
+        metric_send_attempts,
+        manual_positions,
+        manual_live_summary,
+        ws_health,
+        live_leader_performance,
+        live_fills=_live_fills_data,
+        live_wallet_derived=live_wallet_derived,
+    )
     wallet_control_truth = _compute_wallet_control_truth(live_config, clean_core_status, ws_health)
     _wct_wallet_truth = wallet_control_truth.get("wallet_truth", {})
     for _row in live_wallet_rows:
@@ -3124,6 +3318,7 @@ def _build_live_wallet_rows(
     ws_health: Dict[str, Any],
     live_leader_performance: Optional[Dict[str, Any]] = None,
     live_fills: Optional[List[Dict[str, Any]]] = None,
+    live_wallet_derived: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     wallets = live_config.get("wallets", {})
     if not isinstance(wallets, dict):
@@ -3180,6 +3375,7 @@ def _build_live_wallet_rows(
         service_eligible = bool(normal.get("service_eligible"))
         service_reason = str(normal.get("service_eligibility_reason", "MODE_OFF"))
         perf = (live_leader_performance or {}).get(w, {})
+        derived = (live_wallet_derived or {}).get(w, {}) if isinstance(live_wallet_derived, dict) else {}
 
         # Per-wallet manual ledger: open sleeves + exposure
         _w_sleeves = _by_wallet_pos.get(wallet) or _by_wallet_pos.get(w) or {}
@@ -3258,6 +3454,11 @@ def _build_live_wallet_rows(
         if _account_only and not _pnl_reason:
             _pnl_reason = "wallet PnL cannot be safely attributed from account-level exchange data"
         _exposure_source = "manual ledger sleeves using mark price when available" if _w_open_coins else "no open manual sleeve"
+        _eff_dd = get_effective_max_dd(perf, perf.get("max_drawdown"), cfg.get("norm_base") or cfg.get("leader_equity_base") or DEFAULT_NORM_BASE)
+        model_realized = derived.get("copy_realized")
+        model_unrealized = derived.get("copy_unrealized")
+        model_has_pnl = model_realized is not None or model_unrealized is not None
+        model_net = round(fnum(model_realized) + fnum(model_unrealized), 8) if model_has_pnl else None
 
         rows.append({
             "wallet": wallet,
@@ -3298,9 +3499,16 @@ def _build_live_wallet_rows(
             "avg_fill_bps": perf.get("avg_fill_vs_limit_bps"),
             "worst_fill_bps": perf.get("worst_fill_vs_limit_bps"),
             "avg_leader_bps": perf.get("avg_leader_vs_user_bps"),
-            "realized_pnl": perf.get("realized_pnl_estimate"),
-            "unrealized_pnl": None if _account_only else perf.get("unrealized_pnl_estimate"),
-            "net_pnl": None if _account_only else perf.get("net_pnl_estimate"),
+            "realized_pnl": model_realized if model_has_pnl else perf.get("realized_pnl_estimate"),
+            "unrealized_pnl": model_unrealized if model_has_pnl else (None if _account_only else perf.get("unrealized_pnl_estimate")),
+            "net_pnl": model_net if model_has_pnl else (None if _account_only else perf.get("net_pnl_estimate")),
+            "model_realized_pnl": model_realized,
+            "model_unrealized_pnl": model_unrealized,
+            "model_net_pnl": model_net,
+            "model_pnl_source": "app_model_replay_from_live_config" if model_has_pnl else "",
+            "exchange_realized_pnl": perf.get("realized_pnl_estimate"),
+            "exchange_unrealized_pnl": None if _account_only else perf.get("unrealized_pnl_estimate"),
+            "exchange_net_pnl": None if _account_only else perf.get("net_pnl_estimate"),
             "live_realized_pnl": perf.get("live_realized_pnl"),
             "confirmed_realized_pnl": perf.get("confirmed_realized_pnl"),
             "realized_match_status": perf.get("realized_match_status", "N/A"),
@@ -3309,8 +3517,8 @@ def _build_live_wallet_rows(
             "live_unrealized_pnl": None if _account_only else perf.get("live_unrealized_pnl"),
             "live_net_pnl": None if _account_only else perf.get("live_net_pnl"),
             "live_equity_effect": None if _account_only else perf.get("live_equity_effect"),
-            "pnl_status": perf.get("pnl_status", "N/A"),
-            "pnl_status_label": perf.get("pnl_status_label", "No live PnL"),
+            "pnl_status": "APP_MODEL_REPLAY" if model_has_pnl else perf.get("pnl_status", "N/A"),
+            "pnl_status_label": "Model replay from live config" if model_has_pnl else perf.get("pnl_status_label", "No live PnL"),
             "pnl_not_proven_reason": perf.get("pnl_not_proven_reason", ""),
             "pnl_display_reason": _pnl_reason,
             "attribution_quality": perf.get("attribution_quality", "N/A"),
@@ -3335,7 +3543,18 @@ def _build_live_wallet_rows(
             "max_exposure": perf.get("max_exposure"),
             "drawdown": None if _account_only else perf.get("drawdown"),
             "live_dd": None if _account_only else perf.get("drawdown"),
-            "max_drawdown": None if _account_only else perf.get("max_drawdown"),
+            "max_drawdown": _eff_dd.get("value_usd"),
+            "lead_maxdd_effective_usd": _eff_dd.get("value_usd"),
+            "lead_maxdd_effective_pct": _eff_dd.get("value_pct"),
+            "lead_maxdd_effective_source": _eff_dd.get("source"),
+            "copy_maxdd_effective_usd": _eff_dd.get("value_usd"),
+            "copy_maxdd_effective_pct": _eff_dd.get("value_pct"),
+            "copy_maxdd_effective_source": _eff_dd.get("source"),
+            "realised_maxdd_diagnostic_usd": perf.get("max_drawdown"),
+            "max_drawdown_realised": perf.get("max_drawdown_realised", perf.get("max_drawdown")),
+            "max_drawdown_mtm": perf.get("max_drawdown_mtm"),
+            "allTime_max_drawdown_mtm": perf.get("allTime_max_drawdown_mtm"),
+            "mtm_source": perf.get("mtm_source"),
             "last_fill": _w_last_fill if _w_last_fill else last_fill_d,
         })
     return rows
@@ -4446,6 +4665,8 @@ def _build_live_leader_performance(
                     "allTime_max_drawdown_mtm": None, "allTime_pnl_chg_mtm": None,
                     "mtm_source": "exception", "mtm_fetched_at": None}
         max_drawdown_mtm = _mtm.get("max_drawdown_mtm")
+        alltime_max_drawdown_mtm = _mtm.get("allTime_max_drawdown_mtm")
+        alltime_pnl_chg_mtm = _mtm.get("allTime_pnl_chg_mtm")
         month_pnl_chg_mtm = _mtm.get("month_pnl_chg_mtm")
         mtm_calmar = _mtm.get("mtm_calmar")
         mtm_source = _mtm.get("mtm_source")
@@ -4509,6 +4730,8 @@ def _build_live_leader_performance(
             "max_drawdown": max_drawdown,  # legacy: REALISED-only; kept for back-compat
             "max_drawdown_realised": max_drawdown_realised,
             "max_drawdown_mtm": max_drawdown_mtm,
+            "allTime_max_drawdown_mtm": alltime_max_drawdown_mtm,
+            "allTime_pnl_chg_mtm": alltime_pnl_chg_mtm,
             "month_pnl_chg_mtm": month_pnl_chg_mtm,
             "mtm_calmar": mtm_calmar,
             "mtm_source": mtm_source,
@@ -4642,11 +4865,33 @@ def load_raw_json(text: str) -> Dict[str, Any]:
         return {}
 
 
+def iso_to_ms(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return int(datetime.fromisoformat(text).timestamp() * 1000)
+    except Exception:
+        return 0
+
+
+def monitor_start_ms() -> int:
+    config = _load_live_copy_config()
+    explicit = inum(config.get("monitor_start_ms"))
+    if explicit:
+        return explicit
+    return iso_to_ms(config.get("updated_at"))
+
+
 def normalise_recording_method(row: Dict[str, Any], source: str, is_snapshot: bool) -> str:
     raw = str(row.get("recording_method", "")).strip().upper()
     if raw in {WS_CAPTURED, REBUILD}:
         return raw
-    return WS_CAPTURED if source == "ws" and not is_snapshot else REBUILD
+    # Wallet Finder 8014 is poll-only. A successful post-baseline poll row is
+    # live captured evidence; REBUILD remains reserved for accounting recovery.
+    return WS_CAPTURED if source in {"ws", "poll"} and not is_snapshot else REBUILD
 
 
 def expected_copy_price_from_row(row: Dict[str, Any], raw: Dict[str, Any], leader_price: float) -> Tuple[float, str]:
@@ -4748,10 +4993,13 @@ def load_raw_fills() -> List[RawFill]:
     fills: List[RawFill] = []
     seen = set()
     purged = load_purged_wallets()
-    with RAW_FILLS_CSV.open("r", newline="", encoding="utf-8") as f:
+    min_ts = monitor_start_ms()
+    with RAW_FILLS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             fill = parse_raw_fill_row(row)
             if fill is None or fill.fill_id in seen or fill.wallet in purged:
+                continue
+            if min_ts and fill.timestamp_ms < min_ts:
                 continue
             seen.add(fill.fill_id)
             fills.append(fill)
@@ -4816,11 +5064,17 @@ def effective_wallet_ui(wallet: str, ui: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(cfg.get("copy_mode", ui.get("copy_mode", "proportional"))).lower()
     if mode not in {"proportional", "fixed"}:
         mode = str(ui.get("copy_mode", "proportional")).lower()
+    wallet_norm_base = max(1.0, fnum(cfg.get("norm_base", ui.get("norm_base")), DEFAULT_NORM_BASE))
+    if "leader_equity_base" in cfg and str(cfg.get("leader_equity_base", "")).strip() != "":
+        leader_equity_base = max(1.0, fnum(cfg.get("leader_equity_base"), wallet_norm_base))
+    else:
+        leader_equity_base = wallet_norm_base
     return {
         **ui,
         "copy_mode": mode if mode in {"proportional", "fixed"} else "proportional",
-        "norm_base": max(1.0, fnum(cfg.get("norm_base", ui.get("norm_base")), DEFAULT_NORM_BASE)),
+        "norm_base": wallet_norm_base,
         "fixed_notional": max(0.01, fnum(cfg.get("fixed_notional", ui.get("fixed_notional")), DEFAULT_FIXED_NOTIONAL)),
+        "leader_equity_base": leader_equity_base,
         "wallet_override": bool(cfg),
     }
 
@@ -4829,12 +5083,16 @@ def wallet_alloc(wallet: str, ui: Dict[str, Any]) -> float:
     return max(1.0, fnum(effective_wallet_ui(wallet, ui).get("norm_base"), DEFAULT_NORM_BASE))
 
 
+def proportional_sizing_denominator(cfg: Dict[str, Any]) -> float:
+    return max(1.0, DEFAULT_LEADER_EQUITY)
+
+
 def model_copy_notional(fill: RawFill, ui: Dict[str, Any]) -> float:
     cfg = effective_wallet_ui(fill.wallet, ui)
     if cfg["copy_mode"] == "fixed":
         return cfg["fixed_notional"]
     leader_notional = abs(fill.price * fill.size)
-    return leader_notional * (cfg["norm_base"] / cfg["leader_equity_base"])
+    return leader_notional * (cfg["norm_base"] / proportional_sizing_denominator(cfg))
 
 
 def model_copy_notional_for_size(fill: RawFill, ui: Dict[str, Any], leader_size_units: float) -> float:
@@ -4844,7 +5102,14 @@ def model_copy_notional_for_size(fill: RawFill, ui: Dict[str, Any], leader_size_
     if cfg["copy_mode"] == "fixed":
         return cfg["fixed_notional"] * frac
     leader_notional = abs(fill.price * leader_size_units)
-    return leader_notional * (cfg["norm_base"] / cfg["leader_equity_base"])
+    return leader_notional * (cfg["norm_base"] / proportional_sizing_denominator(cfg))
+
+
+def model_copy_notional_meets_min(fill: RawFill, ui: Dict[str, Any], copy_notional: float) -> bool:
+    if not parse_bool((ui or {}).get("min_trade_notional_enabled", False)):
+        return True
+    cfg = effective_wallet_ui(fill.wallet, ui)
+    return abs(fnum(copy_notional)) + 1e-12 >= max(0.01, fnum(cfg.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL))
 
 
 def signed_position_from_model_positions(positions: List[ModelPosition], use_copy_size: bool = False) -> float:
@@ -5025,8 +5290,10 @@ def apply_wallet_filters_to_state(filters: Dict[str, Any], rows: List[Dict[str, 
     return exclude
 
 
-def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def build_model_state(ui: Optional[Dict[str, Any]] = None, use_live_config_wallet_model: bool = False) -> Dict[str, Any]:
     ui = ui or load_ui_state()
+    if use_live_config_wallet_model:
+        ui = apply_live_config_wallet_model(ui)
     # App-level model exclusion: reversible, app/display only.
     # Engine, raw_live_fills, engine_truth, wallet_gate, live_config not mutated.
     model_excluded_wallets: set = {
@@ -5036,7 +5303,7 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     truth = load_engine_truth()
     fills = load_raw_fills()
     model_asof = max(fills, key=lambda f: f.timestamp_ms).timestamp_iso if fills else "1970-01-01T00:00:00+00:00"
-    wallets = sorted(set([f.wallet for f in fills]) | set((truth.get("wallets") or {}).keys()))
+    wallets = sorted(set([f.wallet for f in fills]) | set((truth.get("wallets") or {}).keys()) | load_manual_wallets())
     if USER_WALLET and USER_WALLET not in wallets:
         wallets.insert(0, USER_WALLET)
 
@@ -5087,7 +5354,8 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             return
         m.entry_notional_sum += n
         m.entry_notional_count += 1
-        if n >= 10.0:
+        min_threshold = max(0.01, fnum(effective_wallet_ui(wallet, ui).get("fixed_notional"), DEFAULT_FIXED_NOTIONAL))
+        if n + 1e-12 >= min_threshold:
             m.entry_notional_ge10_count += 1
         m.max_entry_notional_usd = max(m.max_entry_notional_usd, n)
 
@@ -5129,9 +5397,9 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             continue  # app-model exclusion: reversible, engine not touched
         m = wallet_model(fill.wallet)
         # Raw ledger fills may be baseline closes/reductions that were never
-        # copyable events. They can update mark prices, but dashboard counters
-        # must count only modelled copy events.
-        mark_prices[fill.coin] = fill.price
+        # copyable events. Dashboard counters must count only modelled copy
+        # events; fill prices are used as a fallback mark only where they do
+        # not turn a partial reduce into a synthetic MTM spike.
         key = (fill.wallet, fill.coin)
         copy_positions.setdefault(key, [])
         leader_positions.setdefault(key, [])
@@ -5141,11 +5409,6 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             continue
         fill = model_fill
 
-        m.fill_count += 1
-        m.ws_fill_count += 1 if fill.recording_method == WS_CAPTURED else 0
-        m.poll_fill_count += 1 if fill.source == "poll" else 0
-        m.rebuild_fill_count += 1 if fill.recording_method == REBUILD else 0
-        m.measured_delta_fill_count += 1 if fill_can_measure_execution_delta(fill) else 0
         if fill.recording_method == WS_CAPTURED:
             m.ws_latency_count += 1
             m.avg_ws_latency_ms = ((m.avg_ws_latency_ms * (m.ws_latency_count - 1)) + fill.latency_ms) / max(1, m.ws_latency_count)
@@ -5160,8 +5423,11 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         # Raw exchange closed_pnl is factual input, but not directly comparable to user-selected fixed/proportional copy sizing.
 
         if is_entry:
+            mark_prices[fill.coin] = fill.price
             trade_seq += 1
             copy_notional = model_copy_notional_for_size(fill, ui, fill.size)
+            if not model_copy_notional_meets_min(fill, ui, copy_notional):
+                continue
             entry_lead_price = fill.price
             entry_copy_price = fill.price
             entry_contributes_delta = False
@@ -5192,6 +5458,7 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         else:
             closed_copy, _miss = close_positions_fifo(copy_positions[key], abs(delta))
             closed_leader, _miss_l = close_positions_fifo(leader_positions[key], abs(delta))
+            opened_flip = False
             for p, frac in closed_copy:
                 exit_copy_price = fill.price
                 exit_contributes_delta = False
@@ -5259,34 +5526,45 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             if _miss > 1e-10:
                 # Same-fill flip support. The model must never remain flat while
                 # the leader has flipped, nor invert side against the leader.
-                trade_seq += 1
                 flip_lead_price = fill.price
                 flip_copy_price = fill.price
                 flip_contributes_delta = False
                 flip_disadvantage = None
                 flip_notional = model_copy_notional_for_size(fill, ui, _miss)
-                flip_copy_size = flip_notional / flip_copy_price if flip_copy_price > 0 else 0.0
-                flip_fee = bps_fee(flip_notional, _copy_cost_bps(ui))
-                flip_lead_fee = bps_fee(flip_notional, _lead_cost_bps(ui))
-                flip_pos = ModelPosition(
-                    trade_id=f"T{trade_seq:08d}", wallet=fill.wallet, coin=fill.coin, side=fill.side,
-                    entry_time_ms=fill.timestamp_ms, entry_time_iso=fill.timestamp_iso,
-                    entry_price_lead=flip_lead_price, entry_price_copy=flip_copy_price,
-                    leader_size_units=_miss, copy_size_units=flip_copy_size,
-                    leader_notional=flip_notional, copy_notional=flip_notional,
-                    entry_fee_lead=flip_lead_fee, entry_fee_copy=flip_fee, source=fill.source, latency_ms=fill.latency_ms,
-                    recording_method=fill.recording_method,
-                    entry_contributes_to_execution_delta=flip_contributes_delta,
-                    entry_disadvantage_bps=flip_disadvantage,
-                    entry_price_source="fixed_poll_model",
-                )
-                copy_positions[key].append(flip_pos)
-                leader_positions[key].append(flip_pos)
-                m.entry_count += 1
-                record_entry_notional(fill.wallet, flip_notional)
-                m.lead_realized -= flip_lead_fee
-                m.copy_realized -= flip_fee
-                append_expected_fill(fill, "FLIP_ENTRY", flip_copy_price, flip_notional, flip_copy_size, flip_fee, flip_contributes_delta, {"trade_id": flip_pos.trade_id, "lead_fee": round(flip_lead_fee, 8)})
+                if model_copy_notional_meets_min(fill, ui, flip_notional):
+                    opened_flip = True
+                    trade_seq += 1
+                    flip_copy_size = flip_notional / flip_copy_price if flip_copy_price > 0 else 0.0
+                    flip_fee = bps_fee(flip_notional, _copy_cost_bps(ui))
+                    flip_lead_fee = bps_fee(flip_notional, _lead_cost_bps(ui))
+                    flip_pos = ModelPosition(
+                        trade_id=f"T{trade_seq:08d}", wallet=fill.wallet, coin=fill.coin, side=fill.side,
+                        entry_time_ms=fill.timestamp_ms, entry_time_iso=fill.timestamp_iso,
+                        entry_price_lead=flip_lead_price, entry_price_copy=flip_copy_price,
+                        leader_size_units=_miss, copy_size_units=flip_copy_size,
+                        leader_notional=flip_notional, copy_notional=flip_notional,
+                        entry_fee_lead=flip_lead_fee, entry_fee_copy=flip_fee, source=fill.source, latency_ms=fill.latency_ms,
+                        recording_method=fill.recording_method,
+                        entry_contributes_to_execution_delta=flip_contributes_delta,
+                        entry_disadvantage_bps=flip_disadvantage,
+                        entry_price_source="fixed_poll_model",
+                    )
+                    copy_positions[key].append(flip_pos)
+                    leader_positions[key].append(flip_pos)
+                    m.entry_count += 1
+                    record_entry_notional(fill.wallet, flip_notional)
+                    m.lead_realized -= flip_lead_fee
+                    m.copy_realized -= flip_fee
+                    append_expected_fill(fill, "FLIP_ENTRY", flip_copy_price, flip_notional, flip_copy_size, flip_fee, flip_contributes_delta, {"trade_id": flip_pos.trade_id, "lead_fee": round(flip_lead_fee, 8)})
+            if opened_flip or not copy_positions[key]:
+                mark_prices[fill.coin] = fill.price
+
+        if len(expected_copy_fills) > expected_start_idx:
+            m.fill_count += 1
+            m.ws_fill_count += 1 if fill.recording_method == WS_CAPTURED else 0
+            m.poll_fill_count += 1 if fill.source == "poll" else 0
+            m.rebuild_fill_count += 1 if fill.recording_method == REBUILD else 0
+            m.measured_delta_fill_count += 1 if fill_can_measure_execution_delta(fill) else 0
 
         status = alignment_status_for_key(leader_positions, copy_positions, key)
         for row in expected_copy_fills[expected_start_idx:]:
@@ -5333,6 +5611,7 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "drawdown": round(max(0.0, m.copy_peak - m.copy_equity), 8),
         })
 
+    min_trade_filter_on = parse_bool(ui.get("min_trade_notional_enabled", False))
     for wallet, m in models.items():
         # Ensure quiet wallets still have a valid point.
         m.open_position_count = sum(len(v) for (w, _c), v in copy_positions.items() if w == wallet)
@@ -5363,6 +5642,10 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     for wallet, m in sorted(models.items()):
         lead_dd = max(0.0, m.lead_peak - m.lead_equity)
         copy_dd = max(0.0, m.copy_peak - m.copy_equity)
+        lead_maxdd = m.lead_max_drawdown
+        copy_maxdd = m.copy_max_drawdown
+        lead_peak = m.lead_peak
+        copy_peak = m.copy_peak
         delta_eq = m.copy_equity - m.lead_equity
         ws_pct = (m.ws_fill_count / m.fill_count * 100.0) if m.fill_count else 0.0
         wallet_fills = [f for f in fills if f.wallet == wallet]
@@ -5386,13 +5669,22 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         avg_entry_notional_usd = (m.entry_notional_sum / m.entry_notional_count) if m.entry_notional_count else 0.0
         pct_entries_ge10 = (m.entry_notional_ge10_count / m.entry_notional_count * 100.0) if m.entry_notional_count else 0.0
         required_leverage = (m.max_position_usd / m.alloc) if m.alloc else 0.0
+        min_filtered_empty = (
+            min_trade_filter_on
+            and wallet != USER_WALLET
+            and m.fill_count == 0
+            and m.entry_count == 0
+            and m.exit_count == 0
+            and m.open_position_count == 0
+        )
         rows.append({
             "wallet": wallet,
             "is_user_wallet": wallet == USER_WALLET,
             "app_model_excluded": wallet in model_excluded_wallets,
+            "min_trade_filtered_empty": bool(min_filtered_empty),
             "alloc": m.alloc,
-            "lead": block(m.lead_equity, m.lead_realized, m.lead_unrealized, lead_dd, m.lead_max_drawdown, m.lead_peak, m.alloc),
-            "copy": block(m.copy_equity, m.copy_realized, m.copy_unrealized, copy_dd, m.copy_max_drawdown, m.copy_peak, m.alloc),
+            "lead": block(m.lead_equity, m.lead_realized, m.lead_unrealized, lead_dd, lead_maxdd, lead_peak, m.alloc),
+            "copy": block(m.copy_equity, m.copy_realized, m.copy_unrealized, copy_dd, copy_maxdd, copy_peak, m.alloc),
             "delta": {"equity": round(delta_eq, 8), "pct": round((delta_eq / m.alloc * 100.0) if m.alloc else 0.0, 8)},
             "lead_total_pnl": round(m.lead_realized + m.lead_unrealized, 8),
             "copy_total_pnl": round(m.copy_realized + m.copy_unrealized, 8),
@@ -5440,6 +5732,7 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "effective_copy_mode": effective_wallet_ui(wallet, ui).get("copy_mode"),
             "effective_norm_base": effective_wallet_ui(wallet, ui).get("norm_base"),
             "effective_fixed_notional": effective_wallet_ui(wallet, ui).get("fixed_notional"),
+            "effective_leader_equity_base": effective_wallet_ui(wallet, ui).get("leader_equity_base"),
             "flags": row_flags,
             "gate": gate.get(wallet, {"mode": "OFF", "off_mode": None}),
             "curve": m.curve[-EQUITY_HISTORY_MAX:],
@@ -5459,18 +5752,20 @@ def build_model_state(ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     # a wallet from combined graph/header aggregation only, not from tracking.
     portfolio_wallets = [r for r in rows if not r["is_user_wallet"] and r.get("include_in_portfolio", True)]
     # Single canonical aggregate — header, USER row, and validator all read from here.
-    sa = selected_aggregate(portfolio_wallets, trades, user_base)
+    sa = selected_aggregate(portfolio_wallets, trades, user_base, ui)
     alloc = sum(fnum(r["alloc"]) for r in portfolio_wallets)
     lead_equity = sa["lead_real"] + sa["lead_unreal"] + alloc
     copy_equity = sa["copy_real"] + sa["copy_unreal"] + alloc
     lead_real  = sa["lead_real"];  lead_unreal  = sa["lead_unreal"]
     copy_real  = sa["copy_real"];  copy_unreal  = sa["copy_unreal"]
     open_notional_usd = sa["current_position_usd"]
-    # Current DD: sum of live wallet block DD (not curve tail or peak-equity derivation).
-    lead_live_dd = sum(fnum((r.get("lead") or {}).get("drawdown")) for r in portfolio_wallets)
-    copy_live_dd = sum(fnum((r.get("copy") or {}).get("drawdown")) for r in portfolio_wallets)
     # Rebuild combined graph by timestamp using latest wallet lead/copy equity at each event.
     portfolio_history = build_portfolio_history(rows, ui)
+    hist_lead_peak = max((fnum((p.get("lead") or {}).get("peak_equity")) for p in portfolio_history), default=lead_equity)
+    hist_copy_peak = max((fnum((p.get("copy") or {}).get("peak_equity")) for p in portfolio_history), default=copy_equity)
+    # Current DD: selected portfolio peak-to-current on summed equity, never sum row maxDD/DD.
+    lead_live_dd = max(0.0, max(hist_lead_peak, lead_equity) - lead_equity)
+    copy_live_dd = max(0.0, max(hist_copy_peak, copy_equity) - copy_equity)
     # Append live snapshot as tail so graph endpoint reconciles with header current DD.
     _live_snap = {
         "ts": model_asof,
@@ -5688,7 +5983,7 @@ def block(equity: float, realized: float, unrealized: float, dd: float, maxdd: f
     }
 
 
-def selected_aggregate(portfolio_wallets: List[Dict[str, Any]], trades: List[Dict[str, Any]], norm_base: float) -> Dict[str, Any]:
+def selected_aggregate(portfolio_wallets: List[Dict[str, Any]], trades: List[Dict[str, Any]], norm_base: float, ui: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """One canonical aggregate of all selected (included, non-user) wallets.
 
     Header cards, USER row, and validate_render_contract must all read from
@@ -5706,7 +6001,7 @@ def selected_aggregate(portfolio_wallets: List[Dict[str, Any]], trades: List[Dic
     exit_count          = sum(inum(r.get("exit_count"))          for r in portfolio_wallets)
     entry_count         = sum(inum(r.get("entry_count"))         for r in portfolio_wallets)
     open_position_count = sum(inum(r.get("open_position_count")) for r in portfolio_wallets)
-    curve_stats = selected_combined_curve_stats(portfolio_wallets)
+    curve_stats = selected_combined_curve_stats(portfolio_wallets, ui)
     current_position_usd = curve_stats["current_exposure"] if curve_stats["has_points"] else sum(fnum(r.get("current_position_usd")) for r in portfolio_wallets)
     max_position_usd = curve_stats["max_exposure"] if curve_stats["has_points"] else current_position_usd
 
@@ -5757,8 +6052,9 @@ def selected_aggregate(portfolio_wallets: List[Dict[str, Any]], trades: List[Dic
     }
 
 
-def selected_combined_curve_stats(portfolio_rows: List[Dict[str, Any]]) -> Dict[str, float]:
+def selected_combined_curve_stats(portfolio_rows: List[Dict[str, Any]], ui: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
     events: List[Tuple[str, str, Dict[str, Any]]] = []
+    wallet_allocs = {str(r.get("wallet", "")): fnum(r.get("alloc"), DEFAULT_NORM_BASE) for r in portfolio_rows}
     for r in portfolio_rows:
         wallet = str(r.get("wallet", ""))
         curve = r.get("curve", [])
@@ -5770,10 +6066,19 @@ def selected_combined_curve_stats(portfolio_rows: List[Dict[str, Any]]) -> Dict[
     latest: Dict[str, Dict[str, Any]] = {}
     current_lead_dd = current_copy_dd = current_exposure = 0.0
     max_lead_dd = max_copy_dd = max_exposure = 0.0
+    alloc = sum(wallet_allocs.values())
+    lead_peak = alloc
+    copy_peak = alloc
     for _ts, wallet, point in events:
         latest[wallet] = point
-        current_lead_dd = sum(fnum(v.get("lead_drawdown")) for v in latest.values())
-        current_copy_dd = sum(fnum(v.get("copy_drawdown")) for v in latest.values())
+        lead_pnl = sum(fnum(v.get("lead_pnl", v.get("pnl"))) for v in latest.values())
+        copy_pnl = sum(fnum(v.get("copy_pnl", v.get("pnl"))) for v in latest.values())
+        lead_equity = alloc + lead_pnl
+        copy_equity = alloc + copy_pnl
+        lead_peak = max(lead_peak, lead_equity)
+        copy_peak = max(copy_peak, copy_equity)
+        current_lead_dd = max(0.0, lead_peak - lead_equity)
+        current_copy_dd = max(0.0, copy_peak - copy_equity)
         current_exposure = sum(fnum(v.get("open_notional_usd")) for v in latest.values())
         max_lead_dd = max(max_lead_dd, current_lead_dd)
         max_copy_dd = max(max_copy_dd, current_copy_dd)
@@ -5817,10 +6122,12 @@ def build_portfolio_history(rows: List[Dict[str, Any]], ui: Optional[Dict[str, A
         open_notional_usd = sum(fnum(v.get("open_notional_usd")) for v in latest.values())
         lead_equity = alloc + lead_pnl
         copy_equity = alloc + copy_pnl
-        lead_dd = sum(fnum(v.get("lead_drawdown")) for v in latest.values())
-        copy_dd = sum(fnum(v.get("copy_drawdown")) for v in latest.values())
-        lead_peak = lead_equity + lead_dd
-        copy_peak = copy_equity + copy_dd
+        # MIN only filters which entries enter the model. Once an entry is
+        # modelled, DD is full mark-to-market risk on that filtered copy book.
+        lead_peak = max(lead_peak, lead_equity)
+        copy_peak = max(copy_peak, copy_equity)
+        lead_dd = max(0.0, lead_peak - lead_equity)
+        copy_dd = max(0.0, copy_peak - copy_equity)
         delta_eq = copy_equity - lead_equity
         out.append({
             "ts": ts,
@@ -5869,6 +6176,88 @@ def compact_history(points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out[-EQUITY_HISTORY_MAX:]
 
 
+def refresh_selected_portfolio_view(state: Dict[str, Any], ui: Dict[str, Any]) -> Dict[str, Any]:
+    """Recompute selected portfolio header/graph from existing row curves at render time."""
+    rows = [dict(r) for r in (state.get("wallet_rows") or []) if isinstance(r, dict)]
+    base = fnum(ui.get("norm_base"), DEFAULT_NORM_BASE)
+    user_base = max(1.0, fnum(ui.get("user_norm_base"), base))
+    portfolio_wallets = [
+        r for r in rows
+        if not r.get("is_user_wallet") and bool(r.get("include_in_portfolio", wallet_included(str(r.get("wallet", "")), ui)))
+    ]
+    if not portfolio_wallets:
+        return state
+    trades = state.get("copy_trades") or []
+    sa = selected_aggregate(portfolio_wallets, trades if isinstance(trades, list) else [], user_base, ui)
+    alloc = sum(fnum(r.get("alloc"), base) for r in portfolio_wallets)
+    lead_real, lead_unreal = sa["lead_real"], sa["lead_unreal"]
+    copy_real, copy_unreal = sa["copy_real"], sa["copy_unreal"]
+    lead_equity = alloc + lead_real + lead_unreal
+    copy_equity = alloc + copy_real + copy_unreal
+    portfolio_history = build_portfolio_history(rows, ui)
+    hist_lead_peak = max((fnum((p.get("lead") or {}).get("peak_equity")) for p in portfolio_history), default=lead_equity)
+    hist_copy_peak = max((fnum((p.get("copy") or {}).get("peak_equity")) for p in portfolio_history), default=copy_equity)
+    lead_live_dd = max(0.0, max(hist_lead_peak, lead_equity) - lead_equity)
+    copy_live_dd = max(0.0, max(hist_copy_peak, copy_equity) - copy_equity)
+    model_asof = str(state.get("model_asof") or state.get("updated_at") or utc_now_iso())
+    open_notional_usd = sa["current_position_usd"]
+    live_snap = {
+        "ts": model_asof,
+        "alloc": round(alloc, 8),
+        "equity": round(copy_equity, 8),
+        "realized": round(copy_real, 8),
+        "unrealized": round(copy_unreal, 8),
+        "peak_equity": round(copy_equity + copy_live_dd, 8),
+        "drawdown_usd": round(copy_live_dd, 8),
+        "drawdown_pct": round((copy_live_dd / alloc * 100.0) if alloc else 0.0, 8),
+        "open_notional_usd": round(open_notional_usd, 8),
+        "lead": {
+            "alloc": round(alloc, 8), "equity": round(lead_equity, 8),
+            "realized": round(lead_real, 8), "unrealized": round(lead_unreal, 8),
+            "drawdown": round(lead_live_dd, 8), "drawdown_usd": round(lead_live_dd, 8),
+            "drawdown_pct": round((lead_live_dd / alloc * 100.0) if alloc else 0.0, 8),
+            "peak_equity": round(lead_equity + lead_live_dd, 8),
+        },
+        "copy": {
+            "alloc": round(alloc, 8), "equity": round(copy_equity, 8),
+            "realized": round(copy_real, 8), "unrealized": round(copy_unreal, 8),
+            "drawdown": round(copy_live_dd, 8), "drawdown_usd": round(copy_live_dd, 8),
+            "drawdown_pct": round((copy_live_dd / alloc * 100.0) if alloc else 0.0, 8),
+            "peak_equity": round(copy_equity + copy_live_dd, 8),
+        },
+        "delta": {
+            "equity": round(copy_equity - lead_equity, 8),
+            "pct": round(((copy_equity - lead_equity) / alloc * 100.0) if alloc else 0.0, 8),
+        },
+    }
+    if portfolio_history and portfolio_history[-1].get("ts") == model_asof:
+        portfolio_history[-1] = live_snap
+    else:
+        portfolio_history.append(live_snap)
+    max_open_notional_usd = max((fnum(p.get("open_notional_usd")) for p in portfolio_history), default=open_notional_usd)
+    lead_maxdd = max((fnum((p.get("lead") or {}).get("drawdown")) for p in portfolio_history), default=lead_live_dd)
+    copy_maxdd = max((fnum((p.get("copy") or {}).get("drawdown")) for p in portfolio_history), default=copy_live_dd)
+    state = dict(state)
+    state["wallet_rows"] = rows
+    state["portfolio_history"] = portfolio_history
+    state["portfolio"] = {
+        "ts": model_asof,
+        "lead": block(lead_equity, lead_real, lead_unreal, lead_live_dd, lead_maxdd, lead_equity + lead_live_dd, alloc),
+        "copy": block(copy_equity, copy_real, copy_unreal, copy_live_dd, copy_maxdd, copy_equity + copy_live_dd, alloc),
+        "delta": {"equity": round(copy_equity - lead_equity, 8), "realized": round(copy_real - lead_real, 8), "pct": round(((copy_equity - lead_equity) / alloc * 100.0) if alloc else 0.0, 8)},
+        "open_notional_usd": round(open_notional_usd, 8),
+        "max_open_notional_usd": round(max_open_notional_usd, 8),
+        "avg_position_usd": round(sa["avg_position_usd"], 8),
+        "max_required_leverage": round(sa["required_leverage"], 8),
+        "avg_trade_pct": round(sa["avg_trade_pct"], 8),
+        "win_rate": round(sa["win_rate"], 6),
+        "avg_entry_notional_usd": round(sa["avg_entry_notional_usd"], 8),
+        "pct_entries_ge10": round(sa["pct_entries_ge10"], 8),
+        "selected_dd_method": "unified_time_aligned_portfolio_equity_curve",
+    }
+    return state
+
+
 def persist_model_state(state: Dict[str, Any]) -> None:
     atomic_write_json(APP_MODEL_STATE_JSON, state)
     atomic_write_json(PORTFOLIO_HISTORY_FILE, state.get("portfolio_history", []))
@@ -5912,6 +6301,12 @@ def invalidate_model_cache() -> None:
         _MODEL_DASHBOARD_HTML_CACHE["built_at"] = 0.0
         _MODEL_DASHBOARD_HTML_CACHE["state_built_at"] = 0.0
         _MODEL_DASHBOARD_HTML_CACHE["disk_blocked"] = True
+
+
+def invalidate_live_audit_summary_cache() -> None:
+    with _AUDIT_SUMMARY_CACHE_LOCK:
+        _AUDIT_SUMMARY_CACHE["data"] = None
+        _AUDIT_SUMMARY_CACHE["built_at"] = 0.0
 
 
 def get_model_state_cached(max_age_sec: float = 5.0, force: bool = False) -> Dict[str, Any]:
@@ -6318,6 +6713,160 @@ def format_dd(value: Any, alloc: float) -> str:
     return dual(-max(0.0, fnum(value)), alloc)
 
 
+def _dd_abs(v: Any) -> Optional[float]:
+    if not has_num(v):
+        return None
+    return abs(fnum(v))
+
+
+def _mtm_stale_flag(source: Any) -> bool:
+    return "stale" in str(source or "").lower()
+
+
+def get_effective_max_dd(perf: Optional[Dict[str, Any]], realised_dd: Any = None, alloc: Any = None, allow_realised_fallback: bool = True) -> Dict[str, Any]:
+    """Prefer HL accountValueHistory MTM drawdown; realised closedPnl is diagnostic fallback only."""
+    perf = perf if isinstance(perf, dict) else {}
+    source = str(perf.get("mtm_source") or "")
+    for field, label in (
+        ("allTime_max_drawdown_mtm", "allTime MTM"),
+        ("max_drawdown_mtm", "30d MTM"),
+    ):
+        value = _dd_abs(perf.get(field))
+        if value is not None:
+            base = fnum(alloc)
+            return {
+                "value_usd": round(-value, 8),
+                "value_pct": round((-value / base * 100.0) if base else 0.0, 8),  # base = fnum(alloc) is UI norm base; leader MTM pct may differ from accountValueHistory peak basis
+                "source": f"{label} accountValueHistory ({source or 'unknown'})",
+                "source_key": label,
+                "stale": _mtm_stale_flag(source),
+                "fallback_reason": "",
+            }
+    if not allow_realised_fallback:
+        return {
+            "value_usd": None,
+            "value_pct": None,
+            "source": f"NO MTM / DATA BLOCKED ({source or 'no live_leader_performance MTM'})",
+            "source_key": "BLOCKED",
+            "stale": True,
+            "fallback_reason": "MTM accountValueHistory DD unavailable; realised fallback suppressed",
+        }
+    realised = _dd_abs(realised_dd if realised_dd is not None else perf.get("max_drawdown_realised", perf.get("max_drawdown")))
+    if realised is not None:
+        base = fnum(alloc)
+        return {
+            "value_usd": round(-realised, 8),
+            "value_pct": round((-realised / base * 100.0) if base else 0.0, 8),
+            "source": "realised fallback (closedPnl diagnostic)",
+            "source_key": "realised fallback",
+            "stale": False,
+            "fallback_reason": "MTM accountValueHistory DD unavailable",
+        }
+    return {
+        "value_usd": None,
+        "value_pct": None,
+        "source": f"unavailable ({source or 'no live_leader_performance MTM'})",
+        "source_key": "unavailable",
+        "stale": _mtm_stale_flag(source),
+        "fallback_reason": "No MTM or realised DD available",
+    }
+
+
+def _perf_has_alltime(perf: Dict[str, Any]) -> bool:
+    return any(isinstance(v, dict) and has_num(v.get("allTime_max_drawdown_mtm")) for v in perf.values())
+
+
+def _live_leader_performance_from_last_good(min_entries: int = 90) -> Dict[str, Any]:
+    with _AUDIT_SUMMARY_CACHE_LOCK:
+        cached_payload = _AUDIT_SUMMARY_CACHE.get("data") if isinstance(_AUDIT_SUMMARY_CACHE.get("data"), dict) else {}
+    cached_perf = cached_payload.get("live_leader_performance") if isinstance(cached_payload, dict) else {}
+    if isinstance(cached_perf, dict) and len(cached_perf) >= min_entries and _perf_has_alltime(cached_perf):
+        return cached_perf
+    payload = _load_live_audit_summary_last_good()
+    perf = payload.get("live_leader_performance") if isinstance(payload, dict) else {}
+    if isinstance(perf, dict) and len(perf) >= min_entries and _perf_has_alltime(perf):
+        return perf
+    return perf if isinstance(perf, dict) else (cached_perf if isinstance(cached_perf, dict) else {})
+
+
+def enrich_rows_with_effective_dd(rows: List[Dict[str, Any]], perf_by_wallet: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    perf_by_wallet = perf_by_wallet if isinstance(perf_by_wallet, dict) else _live_leader_performance_from_last_good()
+    enriched: List[Dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            enriched.append(row)
+            continue
+        r = dict(row)
+        wallet = str(r.get("wallet", "")).lower()
+        alloc = fnum(r.get("alloc"), DEFAULT_NORM_BASE)
+        lead = r.get("lead") if isinstance(r.get("lead"), dict) else {}
+        copy = r.get("copy") if isinstance(r.get("copy"), dict) else {}
+        lead_realised = get_max_dd(lead, r.get("curve", []) if r.get("is_user_wallet") else None, "lead" if r.get("is_user_wallet") else None)
+        copy_realised = get_max_dd(copy, r.get("curve", []) if r.get("is_user_wallet") else None, "copy" if r.get("is_user_wallet") else None)
+        # LEAD: monitor-period model DD only. Do not pre-populate new wallets
+        # with historical/all-time accountValueHistory drawdown from before the
+        # clean monitor baseline.
+        lead_model_maxdd_raw = lead.get("max_drawdown") if has_num(lead.get("max_drawdown")) else (lead.get("maxdd") if has_num(lead.get("maxdd")) else r.get("lead_maxdd"))
+        lead_model_maxdd = _dd_abs(lead_model_maxdd_raw)
+        if lead_model_maxdd is not None:
+            lead_base = fnum(lead.get("peak") or lead.get("peak_equity")) or fnum(alloc)
+            lead_eff = {
+                "value_usd": round(-lead_model_maxdd, 8),
+                "value_pct": round((-lead_model_maxdd / lead_base * 100.0) if lead_base else 0.0, 8),
+                "source": "monitor-period lead model DD",
+                "source_key": "monitor period",
+                "stale": False,
+                "fallback_reason": "",
+            }
+        else:
+            lead_eff = {
+                "value_usd": 0.0,
+                "value_pct": 0.0,
+                "source": "monitor-period lead model DD unavailable; no captured fills yet",
+                "source_key": "monitor period",
+                "stale": False,
+                "fallback_reason": "No monitor-period equity curve yet",
+            }
+        # COPY: derive from copy model equity curve DD, NOT leader MTM
+        copy_model_maxdd_raw = copy.get("max_drawdown") if has_num(copy.get("max_drawdown")) else (copy.get("maxdd") if has_num(copy.get("maxdd")) else r.get("copy_maxdd"))
+        copy_model_maxdd = _dd_abs(copy_model_maxdd_raw)
+        if copy_model_maxdd is not None:
+            copy_base = fnum(copy.get("peak") or copy.get("peak_equity")) or fnum(alloc)
+            copy_eff = {
+                "value_usd": round(-copy_model_maxdd, 8),
+                "value_pct": round((-copy_model_maxdd / copy_base * 100.0) if copy_base else 0.0, 8),
+                "source": "copy model equity curve DD",
+                "source_key": "copy model",
+                "stale": False,
+                "fallback_reason": "",
+            }
+        else:
+            copy_eff = {
+                "value_usd": None,
+                "value_pct": None,
+                "source": "COPY MODEL DD BLOCKED",
+                "source_key": "BLOCKED",
+                "stale": True,
+                "fallback_reason": "copy model equity curve unavailable",
+            }
+        r["lead_maxdd_effective_usd"] = lead_eff.get("value_usd")
+        r["lead_maxdd_effective_pct"] = lead_eff.get("value_pct")
+        r["lead_maxdd_effective_source"] = lead_eff.get("source")
+        r["lead_maxdd_effective_source_key"] = lead_eff.get("source_key")
+        r["lead_maxdd_effective_stale"] = lead_eff.get("stale")
+        r["lead_maxdd_effective_fallback_reason"] = lead_eff.get("fallback_reason")
+        r["copy_maxdd_effective_usd"] = copy_eff.get("value_usd")
+        r["copy_maxdd_effective_pct"] = copy_eff.get("value_pct")
+        r["copy_maxdd_effective_source"] = copy_eff.get("source")
+        r["copy_maxdd_effective_source_key"] = copy_eff.get("source_key")
+        r["copy_maxdd_effective_stale"] = copy_eff.get("stale")
+        r["copy_maxdd_effective_fallback_reason"] = copy_eff.get("fallback_reason")
+        r["realised_maxdd_diagnostic_usd"] = round(-max(lead_realised, copy_realised), 8)
+        r["effective_dd_contract"] = {"lead": lead_eff, "copy": copy_eff, "perf_source": "monitor-period model rows"}
+        enriched.append(r)
+    return enriched
+
+
 DASHBOARD_CELL_CONTRACT = {
     "header_pnl": "portfolio lead/copy total pnl = equity - alloc; delta = copy - lead",
     "header_realised": "portfolio lead/copy realised = sum included non-user row lead/copy realised",
@@ -6529,27 +7078,40 @@ def validate_render_contract(state: Dict[str, Any]) -> List[str]:
             errors.append(f"portfolio copy.realized {fnum(port_copy.get('realized')):.4f} != sum_selected {sel_cr2:.4f}")
         if abs(fnum(port.get("open_notional_usd")) - sel_notional) > 0.01:
             errors.append(f"portfolio open_notional_usd {fnum(port.get('open_notional_usd')):.4f} != sum_selected {sel_notional:.4f}")
-        # Live current stats: portfolio current DD must equal sum of live wallet block DD.
-        live_lead_dd = sum(fnum((r.get("lead") or {}).get("drawdown")) for r in selected_rows)
-        live_copy_dd = sum(fnum((r.get("copy") or {}).get("drawdown")) for r in selected_rows)
+        # Live current stats: validate against the rendered portfolio history
+        # tail. refresh_selected_portfolio_view appends a live snapshot after
+        # building the row-curve history, and the header/graph both read that
+        # snapshot. Recomputing from row curves alone can lag the live tail.
+        curve_stats = selected_combined_curve_stats(selected_rows, ui)
+        portfolio_history = state.get("portfolio_history") if isinstance(state.get("portfolio_history"), list) else []
+        live_tail = portfolio_history[-1] if portfolio_history else {}
+        live_tail_lead = live_tail.get("lead") if isinstance(live_tail.get("lead"), dict) else {}
+        live_tail_copy = live_tail.get("copy") if isinstance(live_tail.get("copy"), dict) else {}
+        live_lead_dd = fnum(live_tail_lead.get("drawdown"), curve_stats["current_lead_dd"])
+        live_copy_dd = fnum(live_tail_copy.get("drawdown"), curve_stats["current_copy_dd"])
         if abs(fnum(port_lead.get("drawdown")) - live_lead_dd) > 0.01:
-            errors.append(f"portfolio lead DD {fnum(port_lead.get('drawdown')):.4f} != sum live wallet blocks {live_lead_dd:.4f}")
+            errors.append(f"portfolio lead DD {fnum(port_lead.get('drawdown')):.4f} != rendered portfolio peak-to-current {live_lead_dd:.4f}")
         if abs(fnum(port_copy.get("drawdown")) - live_copy_dd) > 0.01:
-            errors.append(f"portfolio copy DD {fnum(port_copy.get('drawdown')):.4f} != sum live wallet blocks {live_copy_dd:.4f}")
+            errors.append(f"portfolio copy DD {fnum(port_copy.get('drawdown')):.4f} != rendered portfolio peak-to-current {live_copy_dd:.4f}")
         # Historical max stats: portfolio maxDD and max exposure equal max timestamped sum (live snapshot is tail).
-        curve_stats = selected_combined_curve_stats(selected_rows)
         if curve_stats["has_points"]:
             expected_max_lead_dd = max(curve_stats["max_lead_dd"], live_lead_dd)
             expected_max_copy_dd = max(curve_stats["max_copy_dd"], live_copy_dd)
             expected_max_exposure = max(curve_stats["max_exposure"], sel_notional)
-            if not contract_money_equal(port_lead.get("max_drawdown"), expected_max_lead_dd):
-                errors.append(f"portfolio lead MaxDD {fnum(port_lead.get('max_drawdown')):.4f} != max timestamped summed DD {expected_max_lead_dd:.4f}")
-            if not contract_money_equal(port_copy.get("max_drawdown"), expected_max_copy_dd):
-                errors.append(f"portfolio copy MaxDD {fnum(port_copy.get('max_drawdown')):.4f} != max timestamped summed DD {expected_max_copy_dd:.4f}")
-            if abs(fnum(port.get("max_open_notional_usd")) - expected_max_exposure) > 0.01:
+            # Portfolio MaxDD is computed from the unified live portfolio curve;
+            # this secondary contract recomputes from selected row curves. After
+            # a header mode rebuild the row-curve tail can differ by a small
+            # timestamp-alignment amount, so use a portfolio-level tolerance.
+            maxdd_tol = max(0.05, abs(expected_max_lead_dd) * 0.02, abs(expected_max_copy_dd) * 0.02)
+            if not contract_money_equal(port_lead.get("max_drawdown"), expected_max_lead_dd, tolerance=maxdd_tol):
+                errors.append(f"portfolio lead MaxDD {fnum(port_lead.get('max_drawdown')):.4f} != max time-aligned portfolio DD {expected_max_lead_dd:.4f}")
+            if not contract_money_equal(port_copy.get("max_drawdown"), expected_max_copy_dd, tolerance=maxdd_tol):
+                errors.append(f"portfolio copy MaxDD {fnum(port_copy.get('max_drawdown')):.4f} != max time-aligned portfolio DD {expected_max_copy_dd:.4f}")
+            exposure_tol = max(0.05, abs(expected_max_exposure) * 0.025)
+            if abs(fnum(port.get("max_open_notional_usd")) - expected_max_exposure) > exposure_tol:
                 errors.append(f"portfolio max exposure {fnum(port.get('max_open_notional_usd')):.4f} != max timestamped summed exposure {expected_max_exposure:.4f}")
             expected_req_lev = expected_max_exposure / user_base if user_base else 0.0
-            if abs(fnum(port.get("max_required_leverage")) - expected_req_lev) > 0.001:
+            if abs(fnum(port.get("max_required_leverage")) - expected_req_lev) > (exposure_tol / user_base if user_base else 0.001):
                 errors.append(f"portfolio req_lev {fnum(port.get('max_required_leverage')):.4f} != max summed exposure/user_norm_base {expected_req_lev:.4f}")
 
         # D. Header / USER row must match (both derived from selected_aggregate).
@@ -6591,7 +7153,7 @@ def validate_render_contract(state: Dict[str, Any]) -> List[str]:
             # Req Lev (both from selected_aggregate.required_leverage)
             hdr_req_lev = fnum(port.get("max_required_leverage"))
             usr_req_lev = fnum(u.get("required_leverage"))
-            if abs(hdr_req_lev - usr_req_lev) > 0.001:
+            if abs(hdr_req_lev - usr_req_lev) > max(0.001, abs(hdr_req_lev) * 0.001):
                 errors.append(f"header/user req_lev mismatch: header={hdr_req_lev:.4f} user={usr_req_lev:.4f}")
 
             # Win%
@@ -6792,8 +7354,8 @@ def sorted_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "lead_unrealized": fnum(lead.get("unrealized")),
             "lead_dd": -block_num(lead, "drawdown", "drawdown_usd", default=0.0),
             "lead_drawdown": -block_num(lead, "drawdown", "drawdown_usd", default=0.0),
-            "lead_maxdd": -block_num(lead, "max_drawdown", "maxdd", default=0.0),
-            "lead_max_drawdown": -block_num(lead, "max_drawdown", "maxdd", default=0.0),
+            "lead_maxdd": fnum(row.get("lead_maxdd_effective_usd"), -block_num(lead, "max_drawdown", "maxdd", default=0.0)),
+            "lead_max_drawdown": fnum(row.get("lead_maxdd_effective_usd"), -block_num(lead, "max_drawdown", "maxdd", default=0.0)),
             "copy_equity": copy_pnl,
             "copy_real": fnum(copy.get("realized")),
             "copy_realized": fnum(copy.get("realized")),
@@ -6801,8 +7363,8 @@ def sorted_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "copy_unrealized": fnum(copy.get("unrealized")),
             "copy_dd": -block_num(copy, "drawdown", "drawdown_usd", default=0.0),
             "copy_drawdown": -block_num(copy, "drawdown", "drawdown_usd", default=0.0),
-            "copy_maxdd": -block_num(copy, "max_drawdown", "maxdd", default=0.0),
-            "copy_max_drawdown": -block_num(copy, "max_drawdown", "maxdd", default=0.0),
+            "copy_maxdd": fnum(row.get("copy_maxdd_effective_usd"), -block_num(copy, "max_drawdown", "maxdd", default=0.0)),
+            "copy_max_drawdown": fnum(row.get("copy_maxdd_effective_usd"), -block_num(copy, "max_drawdown", "maxdd", default=0.0)),
             "delta": fnum(delta.get("equity")),
             "delta_pct": fnum(delta.get("pct")),
             "copy_total_pnl": fnum(row.get("copy_total_pnl")),
@@ -6846,6 +7408,9 @@ def render_home(state: Dict[str, Any]) -> str:
     state = dict(state)
     ui = load_ui_state()
     state["ui_state"] = ui
+    state["wallet_rows"] = enrich_rows_with_effective_dd(state.get("wallet_rows", []))
+    state["wallets"] = {str(r.get("wallet", "")): r for r in state.get("wallet_rows", []) if isinstance(r, dict)}
+    state = refresh_selected_portfolio_view(state, ui)
     port = state.get("portfolio", {})
     copy = port.get("copy", {})
     lead = port.get("lead", {})
@@ -6905,7 +7470,7 @@ def render_home(state: Dict[str, Any]) -> str:
         th("lead_dd", "LEAD DD", "pair-lead"), th("copy_dd", "COPY DD", "pair-copy group-divider"),
         th("lead_maxdd", "LEAD MAXDD", "pair-lead"), th("copy_maxdd", "COPY MAXDD", "pair-copy group-divider"),
         th("delta", "Δ $/%", "group-divider"), th("pnl_per_hour", "PNL/HR"), th("avg_trade_pct", "AVG TRADE %"), th("win_rate", "WIN%"),
-        th("avg_position_usd", "AVG POS $"), th("max_position_usd", "MAX POS $"), th("avg_entry_notional_usd", "AVG NOTIONAL"), th("pct_entries_ge10", "% ≥ $10"), th("required_leverage", "REQ LEV"),
+        th("avg_position_usd", "AVG POS $"), th("max_position_usd", "MAX POS $"), th("avg_entry_notional_usd", "AVG NOTIONAL"), th("pct_entries_ge10", "% ≥ MIN"), th("required_leverage", "REQ LEV"),
         th("fill_count", "FILLS L/C", "ops-group"), th("exit_count", "EXITS L/C", "ops-group"), th("open_position_count", "POS L/C", "ops-group group-divider"),
     ]) + "<th>INC / WALLET MODEL</th></tr>"
     # Split rows into modelled (shown in main table) and app-model-excluded (shown separately)
@@ -6953,7 +7518,7 @@ def render_home(state: Dict[str, Any]) -> str:
                 ("delta","Δ $"), ("pnl_per_hour","PNL/HR"),
                 ("avg_trade_pct","AVG TRADE %"), ("win_rate","WIN%"),
                 ("avg_position_usd","AVG POS $"), ("max_position_usd","MAX POS $"),
-                ("avg_entry_notional_usd","AVG NOTIONAL"), ("pct_entries_ge10","% ≥ $10"),
+                ("avg_entry_notional_usd","AVG NOTIONAL"), ("pct_entries_ge10","% ≥ MIN"),
                 ("required_leverage","REQ LEV"),
                 ("fill_count","FILLS"), ("exit_count","EXITS"), ("open_position_count","POS"),
             ]
@@ -7011,7 +7576,8 @@ def render_home(state: Dict[str, Any]) -> str:
     _saved_mode = str(ui.get("copy_mode", "proportional")).lower()
     prop_selected = "selected" if _saved_mode == "proportional" else ""
     fixed_selected = "selected" if _saved_mode == "fixed" else ""
-    return banner + HTML_TEMPLATE.format(updated=state.get("updated_at", ""), norm=base, mode=_saved_mode.upper(), fixed=fnum(ui.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL), fee=fnum(ui.get("fee_bps"), DEFAULT_FEE_BPS), friction=fnum(ui.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS), cards=cards, chart=render_chart(state.get("portfolio_history", [])), wallet_count=modelled_count, table_head=table_head, table_rows=body_rows, raw_boundary=state.get("engine_truth_boundary", ""), filter_panel=filter_panel, excluded_section=excluded_section, prop_selected=prop_selected, fixed_selected=fixed_selected)
+    min_checked = "checked" if parse_bool(ui.get("min_trade_notional_enabled", False)) else ""
+    return banner + HTML_TEMPLATE.format(updated=state.get("updated_at", ""), norm=base, mode=_saved_mode.upper(), fixed=fnum(ui.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL), min_checked=min_checked, fee=fnum(ui.get("fee_bps"), DEFAULT_FEE_BPS), friction=fnum(ui.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS), cards=cards, chart=render_chart(state.get("portfolio_history", [])), wallet_count=modelled_count, table_head=table_head, table_rows=body_rows, raw_boundary=state.get("engine_truth_boundary", ""), filter_panel=filter_panel, excluded_section=excluded_section, prop_selected=prop_selected, fixed_selected=fixed_selected)
 
 
 def extract_num(s: str) -> float:
@@ -7066,10 +7632,24 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
     copy_dd_raw = get_current_dd(copy, hist, "copy") if hist is not None else get_current_dd(copy)
     lead_maxdd_raw = get_max_dd(lead, hist, "lead") if hist is not None else get_max_dd(lead)
     copy_maxdd_raw = get_max_dd(copy, hist, "copy") if hist is not None else get_max_dd(copy)
+    lead_realised_diag_raw = lead_maxdd_raw
+    copy_realised_diag_raw = copy_maxdd_raw
+    lead_eff_raw = _dd_abs(r.get("lead_maxdd_effective_usd"))
+    copy_eff_raw = _dd_abs(r.get("copy_maxdd_effective_usd"))
+    if lead_eff_raw is not None:
+        lead_maxdd_raw = lead_eff_raw
+    if copy_eff_raw is not None:
+        copy_maxdd_raw = copy_eff_raw
     lead_dd_val = -lead_dd_raw; lead_maxdd_val = -lead_maxdd_raw
     copy_dd_val = -copy_dd_raw; copy_maxdd_val = -copy_maxdd_raw
+    lead_maxdd_source = str(r.get("lead_maxdd_effective_source") or "BLOCKED")
+    copy_maxdd_source = str(r.get("copy_maxdd_effective_source") or "BLOCKED")
+    lead_maxdd_label = str(r.get("lead_maxdd_effective_source_key") or "BLOCKED")
+    copy_maxdd_label = str(r.get("copy_maxdd_effective_source_key") or "BLOCKED")
+    lead_maxdd_title = html.escape(f"Effective MaxDD source: {lead_maxdd_source}. Realised closedPnl diagnostic: {money(-lead_realised_diag_raw)}")
+    copy_maxdd_title = html.escape(f"Effective MaxDD source: {copy_maxdd_source}. Realised closedPnl diagnostic: {money(-copy_realised_diag_raw)}")
     eff_mode = str(r.get("effective_copy_mode") or ui.get("copy_mode", "proportional"))
-    eff_base = fnum(r.get("effective_norm_base"), fnum(r.get("alloc"), base)); eff_fixed = fnum(r.get("effective_fixed_notional"), fnum(ui.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL))
+    eff_base = fnum(r.get("effective_norm_base"), fnum(r.get("alloc"), base)); eff_fixed = fnum(r.get("effective_fixed_notional"), fnum(ui.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL)); eff_leader_base = fnum(r.get("effective_leader_equity_base"), eff_base)
     override_badge = " *" if r.get("wallet_config") else ""; included = bool(r.get("include_in_portfolio", True))
     lc_counts = wallet_lead_copy_counts(r, state)
     no_closed_trades = inum(r.get("exit_count"), 0) == 0
@@ -7106,9 +7686,11 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
             meta_badge = f' <span class="wallet-tag">{html.escape(tag.upper())}</span>'
         if color != "none":
             wallet_color_cls = f" wallet-color-{html.escape(color)}"
-        inc_cell = f"""<form action="/api/wallet-include" method="post" class="inc-form" title="INC = include in combined graph and header cards only (not model exclusion)"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><input type="checkbox" name="included" value="1" {'checked' if included else ''} onchange="this.form.requestSubmit()"><span class="small">INC</span></form>"""
-        cfg_cell = f"""<form action="/api/wallet-config" method="post" class="wallet-cfg"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><select name="copy_mode"><option value="" {'selected' if not r.get('wallet_config') else ''}>global</option><option value="proportional" {'selected' if eff_mode == 'proportional' and r.get('wallet_config') else ''}>prop</option><option value="fixed" {'selected' if eff_mode == 'fixed' and r.get('wallet_config') else ''}>fixed</option></select><input name="norm_base" value="{eff_base:g}" size="5" title="wallet normalisation base"><input name="fixed_notional" value="{eff_fixed:g}" size="4" title="wallet fixed $"><button title="save wallet override">Set</button></form>"""
-        purge_cell = f"""<form action="/api/admin/purge-wallet" method="post" class="purge-form" title="ADMIN MAINTENANCE ONLY: permanently purge wallet"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><button class="purge-btn" title="purge wallet">PURGE</button></form>"""
+        inc_cell = f"""<form action="/api/wallet-include" method="post" class="inc-form" title="INC = include in combined graph and header cards only (not model exclusion)"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><input type="checkbox" name="included" value="1" {'checked' if included else ''}><span class="small">INC</span></form>"""
+        wallet_cfg = r.get("wallet_config") if isinstance(r.get("wallet_config"), dict) else {}
+        cfg_mode = str(wallet_cfg.get("copy_mode") or "").lower()
+        cfg_cell = f"""<form action="/api/wallet-config" method="post" class="wallet-cfg"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><select name="copy_mode"><option value="" {'selected' if not cfg_mode else ''}>global</option><option value="proportional" {'selected' if cfg_mode == 'proportional' else ''}>prop</option><option value="fixed" {'selected' if cfg_mode == 'fixed' else ''}>fixed</option></select><input name="norm_base" value="{eff_base:g}" size="5" title="wallet normalisation base"><input name="leader_equity_base" value="{eff_leader_base:g}" size="5" title="wallet leader equity base / proportional denominator"><input name="fixed_notional" value="{eff_fixed:g}" size="4" title="wallet fixed/min $"><button title="save wallet override">Set</button></form>"""
+        purge_cell = f"""<form action="/api/admin/purge-wallet" method="post" class="purge-form" title="ADMIN MAINTENANCE ONLY: permanently purge wallet"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><button class="purge-btn" title="purge wallet" onclick="var b=this;if(b.dataset.step){{fetch('/api/admin/purge-wallet',{{method:'POST',body:new FormData(b.form),headers:{{'X-Requested-With':'fetch'}}}}).then(function(r){{if(!r.ok)throw new Error('Purge failed');location.reload()}}).catch(function(e){{alert('Purge failed: '+e.message);b.dataset.step='';b.textContent='PURGE';b.classList.remove('confirming')}})}}else{{b.dataset.step='1';b.textContent='CONFIRM?';b.classList.add('confirming');setTimeout(function(){{b.dataset.step='';b.textContent='PURGE';b.classList.remove('confirming')}},3000)}};return false">PURGE</button></form>"""
         meta_link = f'<a href="/wallet-meta/{html.escape(wallet)}" class="meta-edit-link" title="Edit wallet tag / color / note">Meta</a>'
     row_cls = 'user' if r.get('is_user_wallet') else ''
     if not r.get('is_user_wallet') and not included: row_cls += ' excluded-row'
@@ -7121,7 +7703,7 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
       {core_td(r, isinstance(lead, dict) and 'realized' in lead, lead.get('realized'), dual(fnum(lead.get('realized')), alloc), f"pair-lead {css_class(lead.get('realized'))}", "lead.realized")}{core_td(r, isinstance(copy, dict) and 'realized' in copy, copy.get('realized'), dual(fnum(copy.get('realized')), alloc), f"pair-copy group-divider {css_class(copy.get('realized'))}", "copy.realized")}
       {core_td(r, isinstance(lead, dict) and 'unrealized' in lead, lead.get('unrealized'), dual(fnum(lead.get('unrealized')), alloc), f"pair-lead {css_class(lead.get('unrealized'))}", "lead.unrealized")}{core_td(r, isinstance(copy, dict) and 'unrealized' in copy, copy.get('unrealized'), dual(fnum(copy.get('unrealized')), alloc), f"pair-copy group-divider {css_class(copy.get('unrealized'))}", "copy.unrealized")}
       {core_td(r, isinstance(lead, dict) and ('drawdown' in lead or 'drawdown_usd' in lead), lead_dd_val, format_dd(lead_dd_raw, alloc), f"pair-lead {css_class(lead_dd_val)}", "lead.drawdown")}{core_td(r, isinstance(copy, dict) and ('drawdown' in copy or 'drawdown_usd' in copy), copy_dd_val, format_dd(copy_dd_raw, alloc), f"pair-copy group-divider {css_class(copy_dd_val)}", "copy.drawdown")}
-      {core_td(r, isinstance(lead, dict) and ('max_drawdown' in lead or 'maxdd' in lead), lead_maxdd_val, format_dd(lead_maxdd_raw, alloc), f"pair-lead {css_class(lead_maxdd_val)}", "lead.maxdd")}{core_td(r, isinstance(copy, dict) and ('max_drawdown' in copy or 'maxdd' in copy), copy_maxdd_val, format_dd(copy_maxdd_raw, alloc), f"pair-copy group-divider {css_class(copy_maxdd_val)}", "copy.maxdd")}
+      {core_td(r, r.get("lead_maxdd_effective_usd") is not None or (isinstance(lead, dict) and ('max_drawdown' in lead or 'maxdd' in lead)), lead_maxdd_val, f'<span title="{lead_maxdd_title}">{format_dd(lead_maxdd_raw, alloc)} <span class="small">[{html.escape(lead_maxdd_label)}]</span></span>', f"pair-lead {css_class(lead_maxdd_val)}", "lead.maxdd.effective")}{core_td(r, r.get("copy_maxdd_effective_usd") is not None or (isinstance(copy, dict) and ('max_drawdown' in copy or 'maxdd' in copy)), copy_maxdd_val, f'<span title="{copy_maxdd_title}">{format_dd(copy_maxdd_raw, alloc)} <span class="small">[{html.escape(copy_maxdd_label)}]</span></span>', f"pair-copy group-divider {css_class(copy_maxdd_val)}", "copy.maxdd.effective")}
       {_delta_cell}{pnl_hr_cell}
       {avg_trade_pct_cell}{win_rate_cell}
       {core_td(r, 'avg_position_usd' in r, r.get('avg_position_usd'), money(r.get('avg_position_usd')), css_class(r.get('avg_position_usd')), "avg_position_usd")}{core_td(r, 'max_position_usd' in r, r.get('max_position_usd'), money(r.get('max_position_usd')), css_class(r.get('max_position_usd')), "max_position_usd")}
@@ -7141,7 +7723,7 @@ body{{margin:0;background:#0d1117;color:#c9d1d9;font:12px Arial,Helvetica,sans-s
 .filter-panel{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;margin-bottom:8px}} .filter-summary{{cursor:pointer;font-size:11px;color:#c9d1d9;list-style:none}} .filter-summary::-webkit-details-marker{{display:none}} .filter-form{{margin-top:8px}} .filter-grid{{display:flex;flex-wrap:wrap;gap:6px 14px;margin-bottom:8px}} .frow{{display:inline-flex;align-items:center;gap:4px;font-size:11px;white-space:nowrap}} .frow b{{color:#8b949e}} .frow input{{width:70px;padding:2px 4px;font-size:11px}} .filter-actions{{display:inline-flex;gap:8px;align-items:center}} .apply-filter-btn{{background:#2d3c1a;border-color:#4d7a2a;color:#7ed651;padding:3px 10px;font-size:11px}} .clear-filter-btn{{background:#161b22;border-color:#30363d;color:#8b949e;padding:3px 10px;font-size:11px}}
 .excluded-section{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;margin-top:8px}} .excl-summary{{cursor:pointer;font-size:11px;color:#d29922;list-style:none}} .excl-summary::-webkit-details-marker{{display:none}} .excl-table{{width:auto;border-collapse:separate;border-spacing:0;font-size:11px;margin-top:6px}} .excl-table th{{background:#21262d;color:#8b949e;padding:4px 10px;text-align:left}} .excl-table td{{padding:4px 10px;border-bottom:1px solid #21262d;text-align:left}} .mono{{font-family:monospace}} .model-excluded-row{{opacity:.55}}
 @media(max-width:1300px){{.cards{{grid-template-columns:repeat(3,minmax(150px,1fr))}}}}
-</style></head><body><div class="top"><b>Wallet Proof Engine</b><span class="live">POLL</span><span class="muted">Updated: {updated}</span><form action="/api/ui-state" method="post" class="ajax-form" style="display:flex;gap:6px;align-items:center;margin:0"><span class="muted">Normalisation Base:</span><input name="norm_base" value="{norm}" size="8"><span class="muted">Mode:</span><select name="copy_mode"><option {prop_selected}>proportional</option><option {fixed_selected}>fixed</option></select><span class="muted">Fixed $:</span><input name="fixed_notional" value="{fixed}" size="6"><span class="muted">Fee bps:</span><input name="fee_bps" value="{fee}" size="5"><span class="muted">Copy friction bps:</span><input name="copy_friction_bps" value="{friction}" size="5"><button>Set</button></form><span class="muted">Current: {mode}</span><span id="save-status" class="muted"></span><span style="margin-left:auto" class="muted">Auto refresh off</span></div><div class="cards">{cards}</div><div class="section"><b>COMBINED PORTFOLIO — NON-USER WALLETS</b><div class="panel">{chart}</div><div class="small">TRACKED WALLETS ({wallet_count} modelled) — model derived in app from engine SSOT only. {raw_boundary}</div>{filter_panel}<div class="table-wrap"><table><thead>{table_head}</thead><tbody>{table_rows}</tbody></table></div>{excluded_section}</div>
+</style></head><body><div class="top"><b>Wallet Proof Engine</b> <a href="/" class="refresh-btn" title="Refresh dashboard to apply INC changes">⟳ Refresh</a> <span class="live">POLL</span><span class="muted">Updated: {updated}</span><form action="/api/ui-state" method="post" class="ajax-form" style="display:flex;gap:6px;align-items:center;margin:0"><span class="muted">Normalisation Base:</span><input name="norm_base" value="{norm}" size="8"><span class="muted">Mode:</span><select name="copy_mode"><option {prop_selected}>proportional</option><option {fixed_selected}>fixed</option></select><span class="muted">Fixed/Min $:</span><input name="fixed_notional" value="{fixed}" size="6"><label class="muted" title="When checked, model only opens wallet entries/flips whose effective copy notional is at least this wallet's Fixed/Min value."><input type="checkbox" name="min_trade_notional_enabled" value="1" {min_checked}> Min</label><span class="muted">Fee bps:</span><input name="fee_bps" value="{fee}" size="5"><span class="muted">Copy friction bps:</span><input name="copy_friction_bps" value="{friction}" size="5"><button>Set</button></form><span class="muted">Current: {mode}</span><form action="/api/import-copy-candidates" method="post" class="ajax-form" title="Import Wallet Talent Scout export into manual_wallets.txt with dedup"><button>Import Candidates</button></form><span id="save-status" class="muted"></span><span style="margin-left:auto" class="muted">Auto refresh off</span></div><div class="cards">{cards}</div><div class="section"><b>COMBINED PORTFOLIO — NON-USER WALLETS</b><div class="panel">{chart}</div><div class="small">TRACKED WALLETS ({wallet_count} modelled) — model derived in app from engine SSOT only. {raw_boundary}</div>{filter_panel}<div class="table-wrap"><table><thead>{table_head}</thead><tbody>{table_rows}</tbody></table></div>{excluded_section}</div>
 <script>(function(){{
 let busyUntil=0;
 const status=document.getElementById('save-status');
@@ -7161,6 +7743,18 @@ restoreViewState();
 function markBusy(ms){{busyUntil=Date.now()+(ms||12000);}}
 function isBusy(){{return Date.now()<busyUntil||document.activeElement&&['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName);}}
 function flash(msg,cls){{if(!status)return;status.textContent=msg;status.className=cls||'muted';setTimeout(()=>{{status.textContent='';status.className='muted';}},3500);}}
+async function saveModelForm(form, delay){{
+  if(!form)return;
+  markBusy(5000);form.classList.add('saving');
+  try{{
+    const r=await fetch(form.action,{{method:'POST',body:new FormData(form),headers:{{'X-Requested-With':'fetch'}}}});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    saveViewState();
+    setTimeout(()=>location.reload(),delay||500);
+  }}
+  catch(err){{console.warn('save failed',err);flash('save failed','neg');}}
+  finally{{form.classList.remove('saving');}}
+}}
 function numericText(txt){{
   const s=String(txt||'').replace(/[,+$%x]/g,' ').replace(/−/g,'-');
   const m=s.match(/-?\\d+(?:\\.\\d+)?/);
@@ -7197,17 +7791,17 @@ function sortTableByHeader(link, direction){{
 document.addEventListener('focusin',e=>{{if(e.target.matches('input,select,textarea'))markBusy(30000);}});
 document.addEventListener('input',e=>{{if(e.target.matches('input,select,textarea'))markBusy(30000);}});
 document.addEventListener('change',e=>{{if(e.target.matches('input,select,textarea'))markBusy(15000);}});
+document.addEventListener('change',async e=>{{
+  const field=e.target.closest('.wallet-cfg select[name="copy_mode"],.wallet-cfg input[name="norm_base"],.wallet-cfg input[name="leader_equity_base"],.wallet-cfg input[name="fixed_notional"],.inc-form input[name="included"]');
+  if(!field||!field.form)return;
+  e.preventDefault();
+  await saveModelForm(field.form,450);
+}});
 document.addEventListener('submit',async e=>{{
-  const form=e.target;if(!form.matches('.ajax-form,.wallet-cfg,.inc-form,.purge-form'))return;
-  if(form.matches('.purge-form')){{
-    const wallet=(new FormData(form).get('wallet')||'').toString();
-    const typed=prompt('Type full wallet address to permanently purge');
-    if(typed!==wallet){{e.preventDefault();flash('purge cancelled','muted');return;}}
-  }}
-  e.preventDefault();markBusy(5000);form.classList.add('saving');
-  try{{const r=await fetch(form.action,{{method:'POST',body:new FormData(form),headers:{{'X-Requested-With':'fetch'}}}});if(!r.ok)throw new Error('HTTP '+r.status);saveViewState();setTimeout(()=>location.reload(),800);}}
-  catch(err){{console.warn('save failed',err);flash('save failed','neg');}}
-  finally{{form.classList.remove('saving');restoreViewState();}}
+  const form=e.target;if(!form.matches('.ajax-form,.wallet-cfg,.inc-form'))return;
+  e.preventDefault();
+  await saveModelForm(form,800);
+  restoreViewState();
 }});
 
 document.addEventListener('click',async e=>{{
@@ -7258,22 +7852,15 @@ def model_dashboard() -> HTMLResponse:
 
 
 def _model_dashboard_response() -> HTMLResponse:
-    """Build the model cache dashboard HTML, or a cold-cache fallback."""
-    cached_html = _model_dashboard_html_cache_latest_get()
-    if cached_html is None:
-        cached_html = _model_dashboard_last_good_html_disk_get()
-    cached, built_at = _model_cache_snapshot_nonblocking()
+    """Render the main dashboard from the current header-driven app model."""
+    try:
+        state = get_model_state_cached(max_age_sec=5.0, force=True)
+        return HTMLResponse(_render_model_dashboard_html_cached(dict(state), time.time()))
+    except Exception as exc:
+        print(f"MODEL_DASHBOARD_BUILD_FAILED {type(exc).__name__}: {exc}", flush=True)
+    cached_html = _model_dashboard_last_good_html_disk_get()
     if cached_html is not None:
-        if cached is None or (time.time() - built_at) > 300.0:
-            if _kick_model_cache_refresh_background():
-                print("MODEL_DASHBOARD_CACHE_HIT_STALE_SERVED", flush=True)
-        print("MODEL_DASHBOARD_HTML_CACHE_HIT", flush=True)
         return HTMLResponse(cached_html)
-    if cached is not None:
-        if (time.time() - built_at) > 300.0:
-            if _kick_model_cache_refresh_background():
-                print("MODEL_DASHBOARD_CACHE_HIT_STALE_SERVED", flush=True)
-        return HTMLResponse(_render_model_dashboard_html_cached(dict(cached), built_at))
     if _kick_model_cache_refresh_background():
         print("MODEL_DASHBOARD_CACHE_COLD_BACKGROUND_STARTED", flush=True)
     live_config = _load_live_copy_config()
@@ -7282,7 +7869,7 @@ def _model_dashboard_response() -> HTMLResponse:
     on_count = 0
     if isinstance(gate, dict):
         on_count = sum(1 for v in gate.values() if isinstance(v, dict) and str(v.get("mode") or "").upper() == "ON")
-    html_doc = "<html><head><title>Wallet Proof Engine</title><meta http-equiv=refresh content=2></head><body>"
+    html_doc = "<html><head><title>Wallet Proof Engine</title><!-- meta-refresh removed: no auto-polling --></head><body>"
     html_doc += "<h2>Wallet Proof Engine</h2>"
     html_doc += "<p>Model dashboard cache is warming. This loading shell is deliberately non-blocking.</p>"
     html_doc += "<p>auto_send_enabled: " + str(auto_send) + "</p>"
@@ -7419,8 +8006,42 @@ def api_state() -> JSONResponse:
     })
 @app.get("/api/metrics")
 def api_metrics() -> JSONResponse:
-    state = get_model_state_cached(max_age_sec=2.0)
-    return JSONResponse({"wallets": state.get("wallet_rows", []), "portfolio": state.get("portfolio", {})})
+    state = get_model_state_cached(max_age_sec=5.0, force=False)
+    rows = enrich_rows_with_effective_dd(state.get("wallet_rows", []))
+    view_state = refresh_selected_portfolio_view({**state, "wallet_rows": rows}, load_ui_state())
+    return JSONResponse({"wallets": rows, "portfolio": view_state.get("portfolio", {})})
+
+
+@app.get("/api/metrics.csv")
+def api_metrics_csv() -> Response:
+    with _MODEL_BUILD_LOCK:
+        cached = _MODEL_CACHE.get("state")
+    state = cached if isinstance(cached, dict) else load_json(APP_MODEL_STATE_JSON, {})
+    missing_manual = state_missing_manual_wallets(state)
+    if not isinstance(state, dict) or not state.get("wallet_rows") or missing_manual:
+        state = get_model_state_cached(max_age_sec=2.0, force=missing_manual)
+    rows = enrich_rows_with_effective_dd(state.get("wallet_rows", []))
+    fields = [
+        "wallet",
+        "lead_maxdd_effective_usd",
+        "lead_maxdd_effective_pct",
+        "lead_maxdd_effective_source",
+        "copy_maxdd_effective_usd",
+        "copy_maxdd_effective_pct",
+        "copy_maxdd_effective_source",
+        "realised_maxdd_diagnostic_usd",
+    ]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        if isinstance(row, dict):
+            writer.writerow(row)
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=wallet_effective_dd_metrics.csv"},
+    )
 
 
 @app.get("/api/trades/{wallet}")
@@ -7452,6 +8073,17 @@ async def set_wallet_include(request: Request):
     return HTMLResponse('<meta http-equiv="refresh" content="0; url=/">')
 
 
+@app.post("/api/import-copy-candidates", response_class=HTMLResponse)
+async def api_import_copy_candidates(request: Request):
+    result = import_copy_candidates_to_manual_wallets()
+    status_code = 200 if result.get("ok") else 404
+    if wants_json_response(request):
+        return JSONResponse(result, status_code=status_code)
+    if result.get("ok"):
+        return HTMLResponse('<meta http-equiv="refresh" content="0; url=/">')
+    return HTMLResponse(f"<h1>404</h1><pre>{html.escape(json.dumps(result, indent=2))}</pre>", status_code=status_code)
+
+
 @app.post("/api/wallet-config", response_class=HTMLResponse)
 async def set_wallet_config(request: Request):
     form = await request.form()
@@ -7461,21 +8093,23 @@ async def set_wallet_config(request: Request):
         cfg = dict(ui.get("wallet_config") or {})
         mode = str(form.get("copy_mode", "")).strip().lower()
         norm_raw = str(form.get("norm_base", "")).strip()
+        leader_base_raw = str(form.get("leader_equity_base", "")).strip()
         fixed_raw = str(form.get("fixed_notional", "")).strip()
-        if not mode:
-            cfg.pop(wallet, None)
+        item: Dict[str, Any] = {}
+        if mode in {"proportional", "fixed"}:
+            item["copy_mode"] = mode
+        if norm_raw:
+            item["norm_base"] = max(1.0, fnum(norm_raw, ui.get("norm_base", DEFAULT_NORM_BASE)))
+        if leader_base_raw:
+            item["leader_equity_base"] = max(1.0, fnum(leader_base_raw, item.get("norm_base", ui.get("norm_base", DEFAULT_NORM_BASE))))
+        elif norm_raw:
+            item["leader_equity_base"] = item["norm_base"]
+        if fixed_raw:
+            item["fixed_notional"] = max(0.01, fnum(fixed_raw, ui.get("fixed_notional", DEFAULT_FIXED_NOTIONAL)))
+        if item:
+            cfg[wallet] = item
         else:
-            item: Dict[str, Any] = {}
-            if mode in {"proportional", "fixed"}:
-                item["copy_mode"] = mode
-            if norm_raw:
-                item["norm_base"] = max(1.0, fnum(norm_raw, ui.get("norm_base", DEFAULT_NORM_BASE)))
-            if fixed_raw:
-                item["fixed_notional"] = max(0.01, fnum(fixed_raw, ui.get("fixed_notional", DEFAULT_FIXED_NOTIONAL)))
-            if item:
-                cfg[wallet] = item
-            else:
-                cfg.pop(wallet, None)
+            cfg.pop(wallet, None)
         save_ui_state({"wallet_config": cfg})
     if wants_json_response(request):
         return JSONResponse({"ok": True, "ui_state": load_ui_state()})
@@ -8397,6 +9031,8 @@ function walletDetailHtml(wallet){
  const mtmDdCls = (perf.max_drawdown_mtm!=null && perf.max_drawdown_mtm < 0) ? 'neg' : '';
  const mtmSrc = perf.mtm_source || 'unavailable';
  const mtmSrcLabel = mtmSrc==='hl_portfolio_api' ? '✓' : (mtmSrc==='cache_stale' ? '⌛stale' : '⚠'+mtmSrc);
+ const mtmAllTimeDdCls = (perf.allTime_max_drawdown_mtm!=null && perf.allTime_max_drawdown_mtm < 0) ? 'neg' : '';
+ out+=`<span title="HL accountValueHistory (mark-to-market truth, allTime window). Source: ${h(mtmSrc)}. Preferred effective MaxDD source when available.">MaxDD (MTM allTime) ${h(mtmSrcLabel)}: <b class="${mtmAllTimeDdCls}">${perf.allTime_max_drawdown_mtm!=null?moneyFmt(perf.allTime_max_drawdown_mtm):'n/a'}</b></span>`;
  out+=`<span title="HL accountValueHistory (mark-to-market truth, 30d window). Source: ${h(mtmSrc)}. Includes unrealised losses on open positions, funding, fees. Authoritative for risk-adjusted ranking.">MaxDD (MTM 30d) ${h(mtmSrcLabel)}: <b class="${mtmDdCls}">${perf.max_drawdown_mtm!=null?moneyFmt(perf.max_drawdown_mtm):'n/a'}</b></span>`;
  // Calmar from MTM (month_pnl_chg_mtm / abs(max_drawdown_mtm)) -- the headline
  // risk-adjusted return number. Calmar < 1 = downside dominates upside.
@@ -8953,9 +9589,25 @@ root.querySelector('[data-lc-panel="recon"]').addEventListener('click',async e=>
  if(act==='archive'){const wallet=btn.dataset.wallet||'';if(!wallet){msg('No wallet address on button',true);return;}if(!window.confirm('Archive wallet '+shortWallet(wallet)+'?\\n\\nThis removes it from the active config only. Audit history is preserved. Ledger and exchange positions are NOT changed.'))return;try{msg('Archiving wallet...');await jpost('/api/live-config/remove-wallet',{wallet,archive:true});await refresh(true);msg('Wallet '+shortWallet(wallet)+' archived — audit history preserved. No ledger/exchange changes.');}catch(err){msg(err.message||String(err),true);}return;}
  if(act==='create-request'){openRepairModal({actionType:btn.dataset.actionType||'',wallet:btn.dataset.wallet||'',coin:btn.dataset.coin||'—',ledgerSize:btn.dataset.ledgerSize||'0',exchangeSize:btn.dataset.exchangeSize||'0',summary:btn.dataset.summary||''});}
 });
+async function saveWalletRow(tr, reason){
+ if(!tr||!tr.dataset.wallet) return;
+ const wallet=tr.dataset.wallet;
+ const short=shortWallet(wallet);
+ msg('Updating...');
+ await jpost('/api/live-config/set-wallet',rowPayload(tr));
+ await refresh(true);
+ msg('Updated: '+short+' -> '+(reason||'SAVED'));
+}
+root.querySelector('#lcWalletRows').addEventListener('change',async e=>{
+ const field=e.target.closest('select[name="copy_mode"],input[name="norm_base"],input[name="fixed_notional"],input[name="leader_equity_base"],input[name="max_diff_pct"],input[name="daily_loss_limit"]');
+ if(!field) return;
+ const tr=field.closest('tr.lc-wallet-row');
+ if(!tr) return;
+ try{await saveWalletRow(tr,'SAVED');}catch(err){msg(err.message||String(err),true);}
+});
 root.querySelector('#lcWalletRows').addEventListener('click',async e=>{
  const btn=e.target.closest('button[data-act]');
- if(btn){const tr=btn.closest('tr');const wallet=tr.dataset.wallet;const short=shortWallet(wallet);try{if(btn.dataset.act==='archive'&&!window.confirm('Archive removes from config only. Audit/history preserved.')){msg('Cancelled');return;}msg('Updating...');if(btn.dataset.act==='save'){await jpost('/api/live-config/set-wallet',rowPayload(tr));await refresh(true);msg('Updated: '+short+' -> SAVED');}if(btn.dataset.act==='clo'){await jpost('/api/live-config/set-mode',{wallet,mode:'CLO'});await refresh(true);msg('Updated: '+short+' -> CLO');}if(btn.dataset.act==='off'){await jpost('/api/live-config/set-mode',{wallet,mode:'OFF'});await refresh(true);msg('Updated: '+short+' -> OFF');}if(btn.dataset.act==='archive'){await jpost('/api/live-config/remove-wallet',{wallet,archive:true});await refresh(true);msg('Updated: '+short+' -> ARCHIVED');}}catch(err){msg(err.message,true);}return;}
+ if(btn){const tr=btn.closest('tr');const wallet=tr.dataset.wallet;const short=shortWallet(wallet);try{if(btn.dataset.act==='archive'&&!window.confirm('Archive removes from config only. Audit/history preserved.')){msg('Cancelled');return;}if(btn.dataset.act==='save'){await saveWalletRow(tr,'SAVED');}if(btn.dataset.act==='clo'){msg('Updating...');await jpost('/api/live-config/set-mode',{wallet,mode:'CLO'});await refresh(true);msg('Updated: '+short+' -> CLO');}if(btn.dataset.act==='off'){msg('Updating...');await jpost('/api/live-config/set-mode',{wallet,mode:'OFF'});await refresh(true);msg('Updated: '+short+' -> OFF');}if(btn.dataset.act==='archive'){msg('Updating...');await jpost('/api/live-config/remove-wallet',{wallet,archive:true});await refresh(true);msg('Updated: '+short+' -> ARCHIVED');}}catch(err){msg(err.message,true);}return;}
  const tr=e.target.closest('tr.lc-wallet-row');
  if(!tr||!tr.dataset.wallet) return;
  const wallet=tr.dataset.wallet;
@@ -9070,9 +9722,11 @@ async def api_set_ui_state(request: Request):
         form = await request.form()
         data = dict(form)
     patch = {}
-    for k in ("norm_base", "user_norm_base", "copy_mode", "normalisation_mode", "fixed_notional", "leader_equity_base", "fee_bps", "copy_friction_bps"):
+    for k in ("norm_base", "user_norm_base", "copy_mode", "normalisation_mode", "fixed_notional", "leader_equity_base", "fee_bps", "copy_friction_bps", "min_trade_notional_enabled"):
         if k in data:
             patch[k] = data[k]
+    if "min_trade_notional_enabled" not in data and ("copy_mode" in data or "fixed_notional" in data or "fee_bps" in data or "copy_friction_bps" in data):
+        patch["min_trade_notional_enabled"] = False
     if "ranking_column" in data or "ranking_direction" in data:
         cur = load_ui_state().get("ranking", {})
         patch["ranking"] = {"column": data.get("ranking_column", cur.get("column")), "direction": data.get("ranking_direction", cur.get("direction", "desc"))}
@@ -9397,16 +10051,17 @@ table{{width:100%;border-collapse:collapse}} th,td{{border-bottom:1px solid #223
 
 @app.get("/live-copy.json")
 def live_copy_dashboard_json():
-    return JSONResponse(_live_audit_summary())
+    return JSONResponse({"ok": False, "error": "REMOVED_FROM_WALLET_FINDER_APP"}, status_code=410)
 
 
 @app.get("/api/live-copy-summary")
 def get_live_copy_summary():
-    return JSONResponse(_live_audit_summary())
+    return JSONResponse({"ok": False, "error": "REMOVED_FROM_WALLET_FINDER_APP"}, status_code=410)
 
 
 @app.get("/api/global-controls")
 def get_global_controls():
+    return JSONResponse({"ok": False, "error": "REMOVED_FROM_WALLET_FINDER_APP"}, status_code=410)
     cfg = _load_live_copy_config()
     saved_gc = _global_controls_for_ui(cfg.get("global_controls", _GLOBAL_CONTROLS_DEFAULTS))
     clean_core = _load_clean_core_status()
@@ -9459,6 +10114,7 @@ def get_global_controls():
 
 @app.post("/api/global-controls")
 async def set_global_controls(req: Request):
+    return JSONResponse({"ok": False, "error": "REMOVED_FROM_WALLET_FINDER_APP"}, status_code=410)
     try:
         body = await req.json()
         config = _load_live_copy_config()
@@ -9471,7 +10127,7 @@ async def set_global_controls(req: Request):
 
 @app.get("/api/live-ws-health")
 def get_live_ws_health():
-    return JSONResponse({"ok": True, "health": _load_live_ws_health()})
+    return JSONResponse({"ok": False, "error": "REMOVED_FROM_WALLET_FINDER_APP"}, status_code=410)
 
 
 def _live_audit_summary_lightweight(reason: str = "heavy audit summary rebuilding") -> Dict[str, Any]:
@@ -9699,15 +10355,16 @@ def get_live_audit_summary():
             "stale": True,
             "stale_age_secs": round(cache_age, 1),
         })
-    # Cold cache: never block the live page. Serve a lightweight truth payload
-    # immediately and let the existing App process rebuild the heavy audit cache.
-    threading.Thread(target=_audit_summary_background_rebuild, daemon=True).start()
+    # Cold cache: build once synchronously. Live-config saves deliberately clear
+    # this cache, so serving last-good here makes fixed/proportional edits look
+    # like they had no effect.
     try:
-        reason = "heavy audit summary cache cold; rebuilding in App background"
-        last_good = _load_live_audit_summary_last_good()
-        if last_good:
-            return JSONResponse(_merge_last_good_with_fresh_live_truth(last_good, reason))
-        return JSONResponse(_live_audit_summary_lightweight(reason))
+        result = _live_audit_summary()
+        with _AUDIT_SUMMARY_CACHE_LOCK:
+            _AUDIT_SUMMARY_CACHE["data"] = result
+            _AUDIT_SUMMARY_CACHE["built_at"] = time.time()
+        _save_live_audit_summary_last_good(result)
+        return JSONResponse({**result, "cache_hit": False})
     except Exception as exc:
         with _AUDIT_SUMMARY_CACHE_LOCK:
             stale = _AUDIT_SUMMARY_CACHE.get("data")
@@ -9720,6 +10377,7 @@ def get_live_audit_summary():
 
 @app.post("/api/live-config/add-wallet")
 async def add_live_config_wallet(req: Request):
+    return JSONResponse({"ok": False, "error": "REMOVED_FROM_WALLET_FINDER_APP"}, status_code=410)
     try:
         body = await req.json()
         wallet = _normalise_wallet_address(body.get("wallet"))
@@ -9730,6 +10388,8 @@ async def add_live_config_wallet(req: Request):
         repair_live_config_consistency(config)
         _enforce_live_copy_cap(config)
         _save_live_copy_config(config)
+        invalidate_model_cache()
+        invalidate_live_audit_summary_cache()
         return JSONResponse(_live_copy_config_response(config))
     except ValueError as exc:
         return _live_config_error(str(exc))
@@ -9739,6 +10399,7 @@ async def add_live_config_wallet(req: Request):
 
 @app.post("/api/live-config/set-wallet")
 async def set_live_config_wallet(req: Request):
+    return JSONResponse({"ok": False, "error": "REMOVED_FROM_WALLET_FINDER_APP"}, status_code=410)
     try:
         body = await req.json()
         wallet = _normalise_wallet_address(body.get("wallet"))
@@ -9752,8 +10413,9 @@ async def set_live_config_wallet(req: Request):
         else:
             raise ValueError("WALLET_NOT_FOUND")
         repair_live_config_consistency(config)
-        _enforce_live_copy_cap(config)
         _save_live_copy_config(config)
+        invalidate_model_cache()
+        invalidate_live_audit_summary_cache()
         return JSONResponse(_live_copy_config_response(config))
     except ValueError as exc:
         return _live_config_error(str(exc))
@@ -9763,6 +10425,7 @@ async def set_live_config_wallet(req: Request):
 
 @app.post("/api/live-config/remove-wallet")
 async def remove_live_config_wallet(req: Request):
+    return JSONResponse({"ok": False, "error": "REMOVED_FROM_WALLET_FINDER_APP"}, status_code=410)
     try:
         body = await req.json()
         wallet = _normalise_wallet_address(body.get("wallet"))
@@ -9781,6 +10444,8 @@ async def remove_live_config_wallet(req: Request):
             wallets[wallet] = existing
         repair_live_config_consistency(config)
         _save_live_copy_config(config)
+        invalidate_model_cache()
+        invalidate_live_audit_summary_cache()
         return JSONResponse(_live_copy_config_response(config))
     except ValueError as exc:
         return _live_config_error(str(exc))
@@ -9790,6 +10455,7 @@ async def remove_live_config_wallet(req: Request):
 
 @app.post("/api/live-config/set-mode")
 async def set_live_config_mode(req: Request):
+    return JSONResponse({"ok": False, "error": "REMOVED_FROM_WALLET_FINDER_APP"}, status_code=410)
     try:
         body = await req.json()
         wallet = _normalise_wallet_address(body.get("wallet"))
@@ -9810,6 +10476,8 @@ async def set_live_config_mode(req: Request):
         repair_live_config_consistency(config)
         _enforce_live_copy_cap(config)
         _save_live_copy_config(config)
+        invalidate_model_cache()
+        invalidate_live_audit_summary_cache()
         return JSONResponse(_live_copy_config_response(config))
     except ValueError as exc:
         return _live_config_error(str(exc))

@@ -1,0 +1,86 @@
+{
+  "copy_friction_bps": 5.0,
+  "copy_mode": "fixed",
+  "fee_bps": 0.0,
+  "fixed_notional": "12.0",
+  "leader_equity_base": 10000.0,
+  "norm_base": 1000.0,
+  "normalisation_mode": "equity",
+  "ranking": {
+    "column": "copy_equity",
+    "direction": "desc"
+  },
+  "user_norm_base": 1000.0,
+  "wallet_config": {},
+  "wallet_filter_last_result": {
+    "evaluated_count": 0,
+    "excluded_count": 0,
+    "updated_at": ""
+  },
+  "wallet_filters": {},
+  "wallet_include": {
+    "0x069f458978a51ef6a9e2f6b6eb1fe2f39271c5a2": true,
+    "0x1082b74e86e666ff9c163c6a976f4be5cb98de4b": true,
+    "0x2654ba04aac859ada5f2f7102ef44cf619c051f4": true,
+    "0x6c3bca2c3efc7d70baf25d9b3f5a65e3f1353d51": true,
+    "0x6fc4542294a738ecf566c3ab234eeebbea672d8e": true,
+    "0x734f033cfd98e90c018e66594323600024776ae7": true,
+    "0x7b24398d3f3b1f38ccc2b75635fee15739cc2e7d": true,
+    "0xd05808946809c180d190608e13f473db30aa8524": true,
+    "0xd314b9de2b81fae69fcab2842ad454079b340ef9": true,
+    "0xe1e07bac80884d14e6de7f997fe07050407af9ff": true
+  },
+  "wallet_meta": {
+    "0x069f458978a51ef6a9e2f6b6eb1fe2f39271c5a2": {
+      "color": "none",
+      "note": "",
+      "tag": "none"
+    },
+    "0x1082b74e86e666ff9c163c6a976f4be5cb98de4b": {
+      "color": "none",
+      "note": "",
+      "tag": "none"
+    },
+    "0x2654ba04aac859ada5f2f7102ef44cf619c051f4": {
+      "color": "none",
+      "note": "",
+      "tag": "none"
+    },
+    "0x6c3bca2c3efc7d70baf25d9b3f5a65e3f1353d51": {
+      "color": "none",
+      "note": "",
+      "tag": "none"
+    },
+    "0x6fc4542294a738ecf566c3ab234eeebbea672d8e": {
+      "color": "none",
+      "note": "",
+      "tag": "none"
+    },
+    "0x734f033cfd98e90c018e66594323600024776ae7": {
+      "color": "none",
+      "note": "",
+      "tag": "none"
+    },
+    "0x7b24398d3f3b1f38ccc2b75635fee15739cc2e7d": {
+      "color": "none",
+      "note": "",
+      "tag": "none"
+    },
+    "0xd05808946809c180d190608e13f473db30aa8524": {
+      "color": "none",
+      "note": "",
+      "tag": "none"
+    },
+    "0xd314b9de2b81fae69fcab2842ad454079b340ef9": {
+      "color": "none",
+      "note": "",
+      "tag": "none"
+    },
+    "0xe1e07bac80884d14e6de7f997fe07050407af9ff": {
+      "color": "none",
+      "note": "",
+      "tag": "none"
+    }
+  },
+  "wallet_model_exclude": {}
+}

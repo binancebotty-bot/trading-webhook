@@ -1,0 +1,13 @@
+FIRST 5
+# === HYBRID RECOVERY V1 GRAFT ===
+def load_ui_state() -> Dict[str, Any]:
+    raw = load_json(UI_STATE_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {"norm_base": fnum(raw, DEFAULT_NORM_BASE)}
+
+LAST 5
+def get_live_copy_summary():
+    return JSONResponse(_live_audit_summary())
+
+
+# === END HYBRID RECOVERY V1 GRAFT V3 ===

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wallet Talent Scout</title>
+
+  <script src="https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d1117; color: #c9d1d9; font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; padding-bottom: 40px; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; background: #161b22; border-bottom: 1px solid #30363d; }
+    header h1 { font-size: 16px; font-weight: 600; color: #e6edf3; }
+    .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid #30363d; background: #21262d; color: #c9d1d9; cursor: pointer; font-size: 13px; }
+    .btn:hover { background: #30363d; }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+    .btn-primary { border-color: #1f6feb; background: #1f6feb22; color: #79c0ff; }
+    .btn-primary:hover { background: #1f6feb44; }
+    .btn-active { border-color: #58a6ff; color: #58a6ff; background: #1f6feb33; }
+    main { padding: 20px 24px; }
+    #portfolio-panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px; min-height: 760px; }
+    .portfolio-header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+    .portfolio-kicker { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #58a6ff; font-weight: 700; }
+    .portfolio-title-group { display: flex; flex-direction: column; gap: 4px; }
+    .portfolio-header h2 { font-size: 22px; font-weight: 700; color: #e6edf3; }
+    .portfolio-header .subtitle { font-size: 12px; color: #6e7681; }
+    .chart-wrap { height: 65vh; min-height: 550px; margin-bottom: 14px; transition: height 0.2s ease; }
+    .chart-expanded { height: 85vh !important; }
+    .portfolio-empty { min-height: 550px; display: flex; align-items: center; justify-content: center; border: 1px dashed #30363d; border-radius: 8px; background: #0d1117; color: #8b949e; font-size: 14px; margin-bottom: 14px; text-align: center; padding: 24px; }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .metric-card { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px 14px; }
+    .metric-card .label { font-size: 11px; color: #6e7681; text-transform: uppercase; }
+    .metric-card .value { font-size: 18px; font-weight: 600; }
+    .metric-card .value.pos { color: #3fb950; }
+    .metric-card .value.neg { color: #f85149; }
+    .universe-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .universe-header h2 { font-size: 14px; font-weight: 600; }
+    .universe-header .count { font-size: 12px; color: #6e7681; }
+    .spacer { flex: 1; }
+    #wallet-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead th { padding: 8px 10px; text-transform: uppercase; font-size: 11px; color: #6e7681; border-bottom: 1px solid #30363d; background: #161b22; }
+    tbody tr { border-bottom: 1px solid #21262d; }
+    tbody tr:hover { background: #1c2128; }
+    tbody tr.selected-row { background: #1f2937; }
+    tbody tr.wallet-dormant { opacity: 0.50; }
+    tbody tr.wallet-dormant:hover { opacity: 1.0; }
+    tbody tr.wallet-slow { opacity: 0.86; }
+    tbody tr.wallet-slow:hover { opacity: 1.0; }
+    tbody tr.wallet-stale { opacity: 0.72; }
+    tbody tr.wallet-stale:hover { opacity: 1.0; }
+    td { padding: 7px 10px; white-space: nowrap; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    td.mono { font-family: 'Courier New', monospace; font-size: 12px; }
+    .pos { color: #3fb950; }
+    .neg { color: #f85149; }
+    .warn { color: #d29922; }
+    input[type="checkbox"] { width: 15px; height: 15px; accent-color: #1f6feb; cursor: pointer; }
+    #walletTable { table-layout: fixed; width: auto; min-width: 100%; }
+    #walletTable th, #walletTable td { padding: 6px 8px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+    #walletTable td.mono { max-width: 220px; }
+    #walletTable td.num, #walletTable th.num { width: 90px; text-align: right; font-variant-numeric: tabular-nums; }
+    #walletTable thead th { position: sticky; top: 0; z-index: 2; background: #161b22; }
+    #walletTable tbody tr { height: 38px; }
+    #walletTable tbody td { height: 38px; vertical-align: middle; overflow: hidden; }
+    #walletTable td.spark-cell { width: 164px; min-width: 164px; max-width: 164px; padding: 4px 6px; }
+    #walletTable td.spark-cell svg { display: block; width: 140px; height: 28px; }
+    .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; margin-bottom: 12px; font-size: 12px; }
+    .filter-label { color: #6e7681; font-size: 11px; text-transform: uppercase; font-weight: 600; white-space: nowrap; }
+    .filter-field { display: flex; align-items: center; gap: 4px; color: #8b949e; white-space: nowrap; }
+    .filter-input { width: 80px; padding: 3px 6px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-size: 12px; }
+    .filter-input:focus { outline: none; border-color: #58a6ff; }
+    .filter-active-badge { font-size: 11px; color: #58a6ff; background: #1f6feb22; border: 1px solid #1f6feb55; border-radius: 999px; padding: 3px 9px; font-weight: 600; }
+    .pill { display: inline-block; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 600; }
+    .badge-red { background: rgba(248,81,73,0.15); color: #f85149; border: 1px solid rgba(248,81,73,0.3); }
+    .active-filter { border-color: #58a6ff; background: rgba(88, 166, 255, 0.08); }
+    :root { --portfolio-row-grid: 18px 150px 98px 100px 76px 68px 76px 68px 96px 100px 64px 116px 28px; }
+    .wallet-pill { display: grid; grid-template-columns: var(--portfolio-row-grid); align-items: center; column-gap: 14px; background: #0d1117; border: 1px solid #30363d; padding: 5px 8px; border-radius: 6px; margin-bottom: 4px; font-size: 12px; min-width: 1060px; transition: background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease; }
+    .wallet-pill:hover { background: #1c2128; border-color: #58a6ff; box-shadow: inset 3px 0 0 #58a6ff; }
+    .wallet-pill.drag-over { border-color: #58a6ff; }
+    .drag-handle { cursor: grab; color: #6e7681; user-select: none; text-align: center; }
+    .drag-handle:active { cursor: grabbing; }
+    .wallet-label { font-family: 'Courier New', monospace; font-size: 11px; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wallet-pnl { font-variant-numeric: tabular-nums; font-size: 12px; text-align: right; }
+    .wallet-dd { font-variant-numeric: tabular-nums; font-size: 11px; color: #f85149; text-align: right; }
+    .wallet-contrib { font-variant-numeric: tabular-nums; font-size: 11px; text-align: right; }
+    .wallet-score { font-variant-numeric: tabular-nums; font-size: 11px; color: #8b949e; text-align: right; }
+    .wallet-copy-score { font-variant-numeric: tabular-nums; font-size: 11px; color: #58a6ff; text-align: right; }
+    .wallet-compound-score { font-variant-numeric: tabular-nums; font-size: 11px; text-align: right; }
+    .wallet-slip-deg { font-variant-numeric: tabular-nums; font-size: 11px; text-align: right; }
+    .wallet-risk-pnl { font-variant-numeric: tabular-nums; font-size: 11px; color: #8b949e; text-align: right; }
+    .wallet-mtm-dd { font-variant-numeric: tabular-nums; font-size: 11px; color: #8b949e; text-align: right; }
+    .wallet-trades { font-variant-numeric: tabular-nums; font-size: 11px; color: #8b949e; text-align: right; }
+    .wallet-weight-cell { display: flex; align-items: center; justify-content: center; gap: 4px; }
+    .wallet-weight-label { font-size: 10px; color: #6e7681; text-transform: uppercase; white-space: nowrap; }
+    .wallet-weight { width: 58px; padding: 2px 5px; background: #161b22; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-size: 12px; }
+    .wallet-weight:focus { outline: none; border-color: #58a6ff; }
+    .wallet-pill:hover .remove-wallet { border-color: #f85149; color: #f85149; background: rgba(248,81,73,0.05); }
+    .remove-wallet { padding: 2px 7px; font-size: 11px; line-height: 1; border-color: #6e7681; color: #6e7681; background: transparent; }
+    .remove-wallet:hover { border-color: #f85149; color: #f85149; background: rgba(248,81,73,0.08); }
+    #portfolio-list-wrap { overflow-x: auto; }
+    #portfolio-list-header { display: grid; grid-template-columns: var(--portfolio-row-grid); align-items: center; column-gap: 14px; padding: 4px 8px; margin-bottom: 2px; font-size: 10px; text-transform: uppercase; color: #6e7681; font-weight: 600; min-width: 1060px; }
+    #portfolio-list-header span { white-space: nowrap; }
+    #portfolio-list-header .num-head { text-align: right; }
+    #portfolio-list-header .center-head { text-align: center; }
+    .hdr-sortable { cursor: default; white-space: nowrap; }
+    .hdr-sortable:hover { color: #c9d1d9; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Wallet Talent Scout</h1>
+  <button class="btn btn-primary" hx-post="/refresh" hx-target="#wallet-table" hx-swap="outerHTML">Refresh Data</button>
+</header>
+<main>
+  <div hx-get="/data-status-card" hx-trigger="load, every 60s" hx-swap="outerHTML" id="data-health-card">
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 16px;margin-bottom:12px;font-size:12px;display:flex;gap:24px;align-items:center;">
+      <span style="color:#6e7681;text-transform:uppercase;font-size:10px;">Data Health</span>
+      <span style="color:#8b949e;">Loading...</span>
+    </div>
+  </div>
+  {% include "partials/portfolio.html" %}
+  <div class="universe-header">
+    <h2>Universe</h2>
+    <span class="count">{{ rows | length }} wallets</span>
+    <div class="spacer"></div>
+    <button class="btn btn-sm" hx-post="/select_all" hx-target="#wallet-table" hx-swap="outerHTML">Select Visible</button>
+    <button class="btn btn-sm" hx-post="/clear_all" hx-target="#wallet-table" hx-swap="outerHTML">Clear All</button>
+    <button class="btn btn-primary" hx-post="/export_selected" hx-trigger="click" hx-swap="none">Export → copycandidates.txt</button>
+  </div>
+  <div id="filter-bar-container">
+    <form id="filter-form" class="filter-bar">
+      <span class="filter-label">Filters</span>
+      <label class="filter-field">Min Trades <input type="number" name="min_trades" class="filter-input{% if filters.get('min_trades') is not none %} active-filter{% endif %}" value="{{ filters.get('min_trades', '') }}" placeholder="any" min="0" step="1"></label>
+      <label class="filter-field">Max DD % <input type="number" name="max_dd_pct" class="filter-input{% if filters.get('max_dd_pct') is not none %} active-filter{% endif %}" value="{{ filters.get('max_dd_pct', '') }}" placeholder="e.g. 30" min="0" step="0.1"></label>
+      <label class="filter-field">Max Slip% <input type="number" name="max_slip_deg_03" class="filter-input{% if filters.get('max_slip_deg_03') is not none %} active-filter{% endif %}" value="{{ filters.get('max_slip_deg_03', '') }}" placeholder="any" min="0" step="0.1"></label>
+      <label class="filter-field">Min Score <input type="number" name="min_score" class="filter-input{% if filters.get('min_score') is not none %} active-filter{% endif %}" value="{{ filters.get('min_score', '') }}" placeholder="any" step="0.0001"></label>
+      <label class="filter-field">Min PnL ($) <input type="number" name="min_pnl" class="filter-input{% if filters.get('min_pnl') is not none %} active-filter{% endif %}" value="{{ filters.get('min_pnl', '') }}" placeholder="any"></label>
+      <label class="filter-field">Min PnL/DD <input type="number" name="min_risk_pnl" class="filter-input{% if filters.get('min_risk_pnl') is not none %} active-filter{% endif %}" value="{{ filters.get('min_risk_pnl', '') }}" placeholder="any" step="0.001"></label>
+      <button type="button" class="btn btn-sm btn-primary" hx-post="/filter" hx-include="#filter-form" hx-target="#wallet-table" hx-swap="outerHTML">Apply</button>
+      <button type="button" class="btn btn-sm" hx-post="/filter_clear" hx-target="#wallet-table" hx-swap="outerHTML">Clear</button>
+      {% if active_filter_count %}<span class="filter-active-badge">{{ active_filter_count }} filter{{ "s" if active_filter_count != 1 else "" }} active</span>{% endif %}
+      <button type="button" class="btn btn-sm{% if hide_dormant %} btn-active{% endif %}"
+              hx-get="/toggle_dormant" hx-target="#wallet-table" hx-swap="outerHTML"
+              style="margin-left:8px"
+              title="{% if hide_dormant %}Hiding dormant wallets (last trade &gt;15d ago){% else %}Hide dormant wallets (last trade &gt;15d ago){% endif %}">
+        {% if hide_dormant %}&#9679; Dormant Hidden{% else %}&#9675; Hide Dormant{% endif %}
+      </button>
+      {% if activity_counts.dormant or activity_counts.stale or activity_counts.slow %}<span class="filter-active-badge" style="color:rgba(201,209,217,0.9);background:rgba(22,27,34,0.8);border-color:rgba(48,54,61,0.6);font-size:11px"><span style="color:#3fb950">{{ activity_counts.active }} active</span> &middot; <span style="color:#d29922">{{ activity_counts.slow }} slow</span> &middot; <span style="color:#f0883e">{{ activity_counts.stale }} stale</span> &middot; <span style="color:#f85149">{{ activity_counts.dormant }} dormant</span></span>{% endif %}
+    </form>
+  </div>
+  {% include "partials/table.html" %}
+</main>
+<script>
+  window.equityChart = window.equityChart || null;
+  function initChart() {
+    const dataEl = document.getElementById('chart-data');
+    const canvas = document.getElementById('equity-chart');
+    if (!dataEl || !canvas) { if (window.equityChart) { window.equityChart.destroy(); window.equityChart = null; } return; }
+    let labels = []; let values = []; let mtmDd = []; let mtmMarker = [];
+    let pnlPoints = []; let mtmDdPoints = []; let mtmMarkerPoints = [];
+    try {
+      const d = JSON.parse(dataEl.textContent);
+      labels = d.labels || [];
+      values = d.values || [];
+      mtmDd = d.mtmDd || [];
+      mtmMarker = d.mtmMarker || [];
+      pnlPoints = d.pnlPoints || [];
+      mtmDdPoints = d.mtmDdPoints || [];
+      mtmMarkerPoints = d.mtmMarkerPoints || [];
+    } catch { return; }
+    if (window.equityChart) { window.equityChart.destroy(); window.equityChart = null; }
+    const primary = pnlPoints.length ? pnlPoints : values;
+    if (!primary.length) return;
+    const firstY = pnlPoints.length ? pnlPoints[0].y : values[0];
+    const lastY = pnlPoints.length ? pnlPoints.at(-1).y : values.at(-1);
+    const pos = lastY >= firstY;
+    const lineColor = pos ? '#3fb950' : '#f85149';
+    const fillColor = pos ? 'rgba(63,185,80,0.08)' : 'rgba(248,81,73,0.08)';
+    const usePointData = pnlPoints.length > 0;
+    const datasets = [{ label: 'Portfolio PnL', data: primary, borderColor: lineColor, backgroundColor: fillColor, borderWidth: 2, pointRadius: 0, fill: true, tension: 0.1 }];
+    if (mtmDdPoints.length || mtmDd.some(v => v !== null && v !== undefined)) {
+      datasets.push({ label: 'MTM DD', data: mtmDdPoints.length ? mtmDdPoints : mtmDd, borderColor: '#f85149', borderWidth: 2, borderDash: [6, 4], pointRadius: 0, fill: false, tension: 0.1, spanGaps: true });
+    } else if (mtmMarkerPoints.length || mtmMarker.length) {
+      datasets.push({ label: 'MTM Max DD', data: mtmMarkerPoints.length ? mtmMarkerPoints : mtmMarker, borderColor: '#f85149', borderWidth: 2, borderDash: [6, 4], pointRadius: 0, fill: false, tension: 0, spanGaps: true });
+    }
+    window.equityChart = new Chart(canvas, {
+      type: 'line', data: { labels: usePointData ? undefined : labels, datasets },
+      options: { responsive: true, maintainAspectRatio: false, animation: { duration: 150 },
+        scales: { x: { type: usePointData ? 'linear' : 'category', display: false }, y: { display: true, ticks: { color: '#8b949e', callback: (value) => Number(value).toFixed(2) },
+          title: { display: true, text: 'Portfolio PnL / MTM DD ($)', color: '#8b949e' }, grid: { color: 'rgba(110, 118, 129, 0.18)' } } },
+        plugins: { legend: { display: datasets.length > 1, labels: { color: '#8b949e', boxWidth: 12 } } } }
+    });
+  }
+  if (!window._equityChartBound) { document.addEventListener('DOMContentLoaded', initChart); document.addEventListener('htmx:afterSettle', initChart); window._equityChartBound = true; }
+  function toggleChartExpand(btn) { const wrap = document.querySelector('.chart-wrap') || document.querySelector('.portfolio-empty'); if (!wrap) return; const expanded = wrap.classList.toggle('chart-expanded'); btn.textContent = expanded ? 'Collapse' : 'Expand'; if (window.equityChart) window.equityChart.resize(); }
+</script>
+</body>
+</html>

@@ -5,7 +5,8 @@ Pure Hyperliquid data harvester / truth manager.
 
 Role boundary:
 - Engine owns ONLY factual ingestion, dedupe, ordering, raw position balancing,
-  poll health, atomic persistence, deterministic rebuild, and two-method provenance (WS_CAPTURED or REBUILD).
+  poll health, atomic persistence, deterministic rebuild, and live-capture
+  provenance (poll/WS captured vs REBUILD).
 - Engine does NOT own copy sizing, normalisation, portfolio modelling, ranking,
   or any user-selected presentation model.
 
@@ -52,6 +53,7 @@ except Exception:  # pragma: no cover
 BASE_DIR = Path(__file__).resolve().parent
 MANUAL_WALLETS_FILE = BASE_DIR / "manual_wallets.txt"
 OUTPUT_DIR = BASE_DIR / "hl_copy_output"
+LIVE_CONFIG_FILE = BASE_DIR / "hl_live_copy_audit" / "live_config.json"
 SNAP_DIR = OUTPUT_DIR / "snapshots"
 RAW_FILLS_CSV = OUTPUT_DIR / "raw_live_fills.csv"
 ENGINE_TRUTH_JSON = OUTPUT_DIR / "engine_truth.json"
@@ -113,6 +115,34 @@ def utc_now_iso() -> str:
 
 def utc_now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def iso_to_ms(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return int(datetime.fromisoformat(text).timestamp() * 1000)
+    except Exception:
+        return 0
+
+
+def monitor_start_ms() -> int:
+    env_value = os.getenv("HL_MONITOR_START_MS", "")
+    if str(env_value).strip():
+        return inum(env_value)
+    try:
+        data = json.loads(LIVE_CONFIG_FILE.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    explicit = inum(data.get("monitor_start_ms"))
+    if explicit:
+        return explicit
+    return iso_to_ms(data.get("updated_at"))
 
 
 def ensure_dirs() -> None:
@@ -204,9 +234,10 @@ def raw_get(d: Dict[str, Any], *keys: str, default: Any = None) -> Any:
 
 
 def normalise_recording_method(value: Any, source: str = "", is_snapshot: bool = False) -> str:
-    """Two-method provenance contract: live WS captures vs rebuild accounting.
+    """Provenance contract: post-baseline live captures vs rebuild accounting.
 
-    WS_CAPTURED fills may contribute to measured execution-price delta.
+    In this Wallet Finder deployment the live feeder is poll-only, so successful
+    post-baseline poll fills are live captured evidence too.
     REBUILD fills are accounting/recovery fills only and must not be treated as
     measured execution-delta evidence.
     """
@@ -214,7 +245,7 @@ def normalise_recording_method(value: Any, source: str = "", is_snapshot: bool =
     if v in {RECORDING_WS_CAPTURED, RECORDING_REBUILD}:
         return v
     src = str(source or "").strip().lower()
-    if src == "ws" and not is_snapshot:
+    if src in {"ws", "poll"} and not is_snapshot:
         return RECORDING_WS_CAPTURED
     return RECORDING_REBUILD
 
@@ -431,6 +462,34 @@ class EngineSSOT:
         self._load_ledger_seen_ids()
         if CLEAN_REBUILD:
             self.rebuild_from_ledger()
+
+    def refresh_manual_wallets(self) -> List[str]:
+        """Append newly added manual wallets without dropping active runtime state."""
+        try:
+            current = load_manual_wallets()
+        except SystemExit:
+            return []
+        added: List[str] = []
+        existing = set(self.wallets)
+        for wallet in current:
+            wallet = wallet.lower()
+            if wallet in existing:
+                continue
+            self.wallets.append(wallet)
+            existing.add(wallet)
+            self.wallets_raw.setdefault(wallet, RawWallet(wallet))
+            self.wallet_runtime.setdefault(wallet, {
+                "baseline_set": wallet in self.exchange_baseline_by_wallet,
+                "ready": False,
+                "ws_live": False,
+                "bootstrapped_at_ms": 0,
+                "last_poll_reconcile_ms": 0,
+            })
+            added.append(wallet)
+        if added:
+            self.audit["manual_wallets_reloaded"] += len(added)
+            log("INFO", f"MANUAL_WALLETS_RELOADED added={len(added)} total={len(self.wallets)}")
+        return added
 
     # ------------------------- baseline / bootstrap -------------------------
     def load_exchange_baselines(self) -> Dict[str, Dict[str, Dict[str, float]]]:
@@ -728,11 +787,14 @@ class EngineSSOT:
             return []
         out: List[RawFill] = []
         seen: Set[str] = set()
-        with RAW_FILLS_CSV.open("r", newline="", encoding="utf-8") as f:
+        min_ts = monitor_start_ms()
+        with RAW_FILLS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 try:
                     fill = RawFill.from_csv_row(row)
                 except Exception:
+                    continue
+                if min_ts and fill.timestamp_ms < min_ts:
                     continue
                 if not fill.fill_id or fill.fill_id in seen:
                     continue
@@ -862,8 +924,12 @@ class EngineSSOT:
             return {"ok": False, "parsed": 0, "applied": 0, "deduped": 0, "max_ts": start_ms}
 
         parsed: List[RawFill] = []
+        min_ts = monitor_start_ms()
         for raw in raw_fills:
             fill = self.parse_fill(wallet, raw, source="poll")
+            if fill is not None and min_ts and fill.timestamp_ms < min_ts:
+                self.audit["poll_pre_monitor_skipped"] += 1
+                continue
             if fill is not None:
                 parsed.append(fill)
         parsed.sort(key=lambda f: (f.timestamp_ms, f.wallet, f.coin, f.fill_id))
@@ -1031,6 +1097,7 @@ class EngineSSOT:
 
     def poll_once(self) -> None:
         now = utc_now_ms()
+        self.refresh_manual_wallets()
         for wallet in self.wallets:
             wallet = wallet.lower()
             if not self._is_wallet_ready(wallet):

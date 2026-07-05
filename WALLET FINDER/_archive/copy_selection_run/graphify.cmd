@@ -1,0 +1,1 @@
+@echo off\r\npython "%~dp0graphify_query.py" %*\r\n

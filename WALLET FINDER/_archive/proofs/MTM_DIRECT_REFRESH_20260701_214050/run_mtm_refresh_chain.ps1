@@ -1,0 +1,5 @@
+﻿$ErrorActionPreference='Continue'
+Set-Location -LiteralPath 'C:\Users\wigmore\trading_stack\Hyperliquid scanner\WALLET FINDER'
+$env:PYTHONUNBUFFERED='1'
+python fetch_hl_portfolios.py --input data\summary.csv --col wallet --rate 0.4 *> 'C:\Users\wigmore\trading_stack\Hyperliquid scanner\WALLET FINDER\proofs\MTM_DIRECT_REFRESH_20260701_214050\01_fetch_hl_portfolios_refresh.log'
+python enrich_summary_mtm.py *> 'C:\Users\wigmore\trading_stack\Hyperliquid scanner\WALLET FINDER\proofs\MTM_DIRECT_REFRESH_20260701_214050\02_enrich_summary_mtm.log'

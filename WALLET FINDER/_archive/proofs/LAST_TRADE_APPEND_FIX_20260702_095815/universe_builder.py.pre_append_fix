@@ -1,0 +1,439 @@
+"""
+universe_builder.py — WALLET FINDER EDITION
+
+Continuous universe engine that reads from data/summary.csv and writes
+to data/wallet_universe.csv and data/equity_curves/.
+"""
+import asyncio
+import aiohttp
+import csv
+import math
+import os
+import random
+import socket
+import time
+from collections import defaultdict
+from datetime import datetime, timezone
+
+API_URL = "https://api.hyperliquid.xyz/info"
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+SUMMARY_FILE = os.path.join(DATA_DIR, "summary.csv")
+TRADES_FILE = os.path.join(DATA_DIR, "all_trades.csv")
+OUTPUT_FILE = os.path.join(DATA_DIR, "wallet_universe.csv")
+PURGED_WALLETS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "purged_wallets.txt")
+CURVES_DIR = os.path.join(DATA_DIR, "equity_curves")
+
+FRICTION_BPS = 9.5
+POLL_INTERVAL_S = 60
+OVERLAP_MS = 5 * 60 * 1000
+POLL_WINDOW_MS = 24 * 60 * 60 * 1000
+DEFAULT_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000
+CONCURRENCY = 2
+
+OUTPUT_FIELDS = [
+    "wallet", "realised_pnl", "total_notional", "efficiency",
+    "trades", "trades_7d", "last_trade_time", "score", "status",
+]
+
+MS_7D = 7 * 24 * 3_600_000
+
+
+def safe_float(v, default=0.0):
+    try:
+        if v is None or v == "":
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def safe_int(v, default=0):
+    try:
+        if v is None or v == "":
+            return default
+        return int(float(v))
+    except Exception:
+        return default
+
+
+def ms_to_iso(ms):
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).isoformat()
+    except Exception:
+        return ""
+
+
+def log(wallet, msg):
+    tag = wallet[:10] if wallet else "?"
+    print(f"[{tag}] {msg}", flush=True)
+
+
+def trade_key(fill, wallet=""):
+    """Full 7-field canonical key — prevents any cross-wallet or same-wallet collision."""
+    return (
+        str(wallet).strip().lower(),
+        int(fill["time"]),
+        str(fill.get("coin", "")).strip().upper(),
+        str(fill.get("side", "")).strip().lower(),
+        str(fill.get("px")),
+        str(fill.get("sz")),
+        str(fill.get("closedPnl", 0)),
+    )
+
+
+def is_garbage(row):
+    try:
+        lw = safe_float(row.get("largest_win_ratio"), 1.0)
+        pf = safe_float(row.get("profit_factor"), 0.0)
+        trades = safe_int(row.get("trades"), 0)
+        span = safe_float(row.get("timespan_hours"), 0.0)
+        if lw > 0.8:
+            return True
+        if pf < 1.05 and pf < 999.0:
+            return True
+        if trades < 50:
+            return True
+        if span < 10:
+            return True
+        return False
+    except Exception:
+        return True
+
+
+def load_purged_wallets() -> set:
+    """Return set of purged wallet addresses (lowercase) from purged_wallets.txt."""
+    purged = set()
+    if not os.path.exists(PURGED_WALLETS_FILE):
+        return purged
+    with open(PURGED_WALLETS_FILE, encoding="utf-8") as f:
+        for line in f:
+            w = line.strip().lower()
+            if w and len(w) == 42 and w.startswith("0x"):
+                purged.add(w)
+    return purged
+
+
+CSV_FIELDS = ["wallet", "time", "coin", "side", "px", "sz", "closedPnl"]
+
+
+def dedup_trades_file():
+    """One-pass dedup of all_trades.csv — keeps first occurrence of each full-row key."""
+    if not os.path.exists(TRADES_FILE) or os.path.getsize(TRADES_FILE) == 0:
+        return 0, 0
+    seen = set()
+    rows_out = []
+    total = 0
+    with open(TRADES_FILE, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            total += 1
+            key = (
+                str(row.get("wallet", "")).strip().lower(),
+                str(row.get("time", "")).strip(),
+                str(row.get("coin", "")).strip().upper(),
+                str(row.get("side", "")).strip().lower(),
+                str(row.get("px", "")).strip(),
+                str(row.get("sz", "")).strip(),
+                str(row.get("closedPnl", 0)).strip(),
+            )
+            if key not in seen:
+                seen.add(key)
+                rows_out.append(row)
+    removed = total - len(rows_out)
+    if removed == 0:
+        return total, 0
+    tmp = TRADES_FILE + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows_out)
+    os.replace(tmp, TRADES_FILE)
+    return total, removed
+
+
+def load_valid_wallets():
+    if not os.path.exists(SUMMARY_FILE):
+        print(f"[!] Missing summary file: {SUMMARY_FILE}", flush=True)
+        return set()
+    purged = load_purged_wallets()
+    valid = set()
+    with open(SUMMARY_FILE, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            wallet = str(row.get("wallet", "")).strip().lower()
+            if wallet and wallet in purged:
+                continue
+            # Filter out losing wallets (negative total PnL)
+            try:
+                total_pnl = float(row.get("total_pnl", 0) or 0)
+                if total_pnl <= 0:
+                    continue
+            except Exception:
+                continue
+            if wallet and not is_garbage(row):
+                valid.add(wallet)
+    return valid
+
+
+def load_trades_index(target_wallets):
+    max_ts = {}
+    seen_keys = defaultdict(set)
+    trades = defaultdict(list)
+    if not os.path.exists(TRADES_FILE):
+        return max_ts, seen_keys, trades
+    with open(TRADES_FILE, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            wallet = str(row.get("wallet", "")).strip().lower()
+            if wallet not in target_wallets:
+                continue
+            try:
+                ts = int(row["time"])
+                px = float(row.get("px") or 0)
+                sz = float(row.get("sz") or 0)
+                cpnl = float(row.get("closedPnl") or 0)
+                side = str(row.get("side") or "")
+                coin = str(row.get("coin", "")).strip().upper()
+                cpnl_str = str(row.get("closedPnl", 0))
+                key = (wallet, ts, coin, side.lower(), str(row.get("px")), str(row.get("sz")), cpnl_str)
+                seen_keys[wallet].add(key)
+                if ts > max_ts.get(wallet, 0):
+                    max_ts[wallet] = ts
+                if px > 0 and sz > 0:
+                    trades[wallet].append({
+                        "ts": ts,
+                        "notional": px * sz,
+                        "closed_pnl": cpnl,
+                    })
+            except Exception:
+                continue
+    for wallet in trades:
+        trades[wallet].sort(key=lambda x: x["ts"])
+    return max_ts, seen_keys, trades
+
+
+def append_all_trades(wallet, rows, seen_keys=None):
+    if not rows:
+        return 0
+    file_exists = os.path.exists(TRADES_FILE) and os.path.getsize(TRADES_FILE) > 0
+    appended = 0
+    with open(TRADES_FILE, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["wallet", "time", "coin", "side", "px", "sz", "closedPnl"])
+        for r in rows:
+            key = trade_key(r, wallet)
+            if seen_keys is not None and key in seen_keys:
+                continue
+            writer.writerow([
+                wallet, r.get("time"), r.get("coin"), r.get("side"),
+                r.get("px"), r.get("sz"), r.get("closedPnl", 0),
+            ])
+            if seen_keys is not None:
+                seen_keys.add(key)
+            appended += 1
+    return appended
+
+
+async def post(session, payload, wallet, retries=6):
+    backoff = 1.5
+    for attempt in range(retries):
+        try:
+            async with session.post(
+                API_URL, json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as r:
+                if r.status == 200:
+                    return await r.json()
+                if r.status == 429:
+                    sleep_s = backoff * (2 ** attempt) + random.uniform(0, 1.0)
+                    log(wallet, f"[429] backoff {sleep_s:.1f}s")
+                    await asyncio.sleep(sleep_s)
+                    continue
+                log(wallet, f"[HTTP {r.status}]")
+        except Exception as e:
+            sleep_s = backoff * (2 ** attempt)
+            log(wallet, f"[ERR] {str(e)[:80]} sleep {sleep_s:.1f}s")
+            await asyncio.sleep(sleep_s)
+    return "ERROR"
+
+
+async def poll_wallet_forward(session, wallet, max_ts_ms, wallet_seen_keys):
+    now_ms = int(time.time() * 1000)
+    if max_ts_ms > 0:
+        window_start = max(0, max_ts_ms - OVERLAP_MS)
+    else:
+        window_start = now_ms - DEFAULT_LOOKBACK_MS
+    new_rows = []
+    while window_start < now_ms:
+        window_end = min(window_start + POLL_WINDOW_MS, now_ms)
+        payload = {
+            "type": "userFillsByTime",
+            "user": wallet,
+            "startTime": window_start,
+            "endTime": window_end,
+        }
+        data = await post(session, payload, wallet)
+        if data == "ERROR":
+            log(wallet, "poll error - skipping remainder")
+            break
+        if data:
+            for f in data:
+                try:
+                    key = trade_key(f, wallet)
+                except Exception:
+                    continue
+                if key not in wallet_seen_keys:
+                    wallet_seen_keys.add(key)
+                    new_rows.append(f)
+        window_start = window_end
+        if window_start < now_ms:
+            await asyncio.sleep(0.25)
+    if new_rows:
+        n = append_all_trades(wallet, new_rows, wallet_seen_keys)
+        log(wallet, f"+{n} new fills appended")
+    else:
+        log(wallet, "no new fills")
+    return len(new_rows)
+
+
+def compute_wallet_metrics(wallet, trade_rows):
+    if not trade_rows:
+        return None
+    friction_rate = FRICTION_BPS / 10_000.0
+    max_ts = trade_rows[-1]["ts"]
+    cutoff_7d = max_ts - MS_7D
+    realised_pnl = 0.0
+    total_notional = 0.0
+    close_count = 0
+    trades_7d = 0
+    equity_curve = []
+    for t in trade_rows:
+        notional = t["notional"]
+        raw_pnl = t["closed_pnl"]
+        friction_cost = notional * friction_rate
+        total_notional += notional
+        if raw_pnl != 0.0:
+            adj_pnl = raw_pnl - friction_cost
+            realised_pnl += adj_pnl
+            close_count += 1
+            equity_curve.append((t["ts"], round(realised_pnl, 6)))
+        else:
+            realised_pnl -= friction_cost
+        if t["ts"] >= cutoff_7d:
+            trades_7d += 1
+    if close_count == 0 or total_notional <= 0:
+        return None
+    efficiency = realised_pnl / total_notional
+    activity_ratio = min(trades_7d / max(close_count, 1), 1.0)
+    score = efficiency * activity_ratio * math.log(max(close_count, 2))
+    status = "active" if trades_7d > 0 else "inactive"
+    return {
+        "wallet": wallet,
+        "realised_pnl": round(realised_pnl, 4),
+        "total_notional": round(total_notional, 2),
+        "efficiency": round(efficiency, 8),
+        "trades": close_count,
+        "trades_7d": trades_7d,
+        "last_trade_time": max_ts,
+        "score": round(score, 8),
+        "status": status,
+        "_equity_curve": equity_curve,
+    }
+
+
+def write_equity_curves(results):
+    os.makedirs(CURVES_DIR, exist_ok=True)
+    for r in results:
+        curve = r.get("_equity_curve", [])
+        if not curve:
+            continue
+        path = os.path.join(CURVES_DIR, f"{r['wallet']}.csv")
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["ts", "equity"])
+            writer.writerows(curve)
+
+
+def write_universe(results):
+    tmp = OUTPUT_FILE + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=OUTPUT_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(results)
+    os.replace(tmp, OUTPUT_FILE)
+
+
+async def run_cycle(session, sem):
+    cycle_start = time.time()
+    total, removed = dedup_trades_file()
+    if removed:
+        print(f"[dedup] cleaned {removed} duplicate rows from {total} total", flush=True)
+    valid_wallets = load_valid_wallets()
+    if not valid_wallets:
+        print("[!] No wallets passed prefilter - check summary.csv", flush=True)
+        return
+    print(f"\n[cycle] {len(valid_wallets)} wallets passed prefilter", flush=True)
+    max_ts_map, seen_keys_map, trades_map = load_trades_index(valid_wallets)
+
+    async def poll_one(wallet):
+        async with sem:
+            await poll_wallet_forward(session, wallet, max_ts_map.get(wallet, 0), seen_keys_map[wallet])
+
+    await asyncio.gather(*[poll_one(w) for w in valid_wallets])
+    _, _, trades_map = load_trades_index(valid_wallets)
+    results = []
+    skipped = 0
+    losing_filtered = 0
+    for wallet in valid_wallets:
+        trade_rows = trades_map.get(wallet, [])
+        metrics = compute_wallet_metrics(wallet, trade_rows)
+        if metrics is None:
+            skipped += 1
+            continue
+        # Filter out losing wallets (realised PnL <= 0)
+        if metrics["realised_pnl"] <= 0:
+            losing_filtered += 1
+            continue
+        results.append(metrics)
+    results.sort(key=lambda x: x["score"], reverse=True)
+    if losing_filtered:
+        print(f"[cycle] filtered {losing_filtered} losing wallets (realised_pnl <= 0)", flush=True)
+    write_equity_curves(results)
+    write_universe(results)
+    elapsed = time.time() - cycle_start
+    print(
+        f"[cycle] done - scored={len(results)} skipped={skipped} elapsed={elapsed:.1f}s -> {OUTPUT_FILE}",
+        flush=True,
+    )
+    for i, r in enumerate(results[:5], 1):
+        print(
+            f"  {i}. {r['wallet']} | score={r['score']:.6f} | "
+            f"pnl={r['realised_pnl']:.2f} | eff={r['efficiency']:.6f} | "
+            f"trades={r['trades']} | 7d={r['trades_7d']} | {r['status']}",
+            flush=True,
+        )
+
+
+async def main_loop():
+    print("=== UNIVERSE BUILDER (WALLET FINDER EDITION) ===\n", flush=True)
+    resolver = aiohttp.resolver.ThreadedResolver()
+    connector = aiohttp.TCPConnector(
+        resolver=resolver, limit=CONCURRENCY, limit_per_host=CONCURRENCY,
+        ttl_dns_cache=300, family=socket.AF_INET,
+    )
+    sem = asyncio.Semaphore(CONCURRENCY)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        while True:
+            try:
+                await run_cycle(session, sem)
+            except Exception as e:
+                print(f"[!] Cycle error: {e}", flush=True)
+            print(f"[cycle] sleeping {POLL_INTERVAL_S}s ...\n", flush=True)
+            await asyncio.sleep(POLL_INTERVAL_S)
+
+
+if __name__ == "__main__":
+    asyncio.run(main_loop())

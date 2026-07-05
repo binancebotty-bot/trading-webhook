@@ -1,0 +1,1 @@
+# Project-local Graphify\n\nCommand: graphify.cmd query <term>\n\nExamples:\ngraphify.cmd query reduce_only\ngraphify.cmd query SSOT\ngraphify.cmd query place_order\n\nDo not use npm graphify. This project uses the local graphify.cmd and graphify-out map.
