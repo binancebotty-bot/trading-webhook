@@ -153,8 +153,16 @@ def ensure_dirs() -> None:
 def atomic_write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        # Stream the encoder directly to disk.  Building the complete JSON text
+        # with json.dumps temporarily duplicates the truth snapshot in memory
+        # and can kill both the poll and state-writer threads with MemoryError.
+        with tmp.open("w", encoding="utf-8", newline="\n") as stream:
+            json.dump(payload, stream, indent=2, sort_keys=True)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def log(level: str, message: str) -> None:
@@ -869,7 +877,9 @@ class EngineSSOT:
         while cursor < now_ms:
             window_end = min(cursor + POLL_WINDOW_MS, now_ms)
             page_cursor = cursor
-            while page_cursor < window_end:
+            page_count = 0
+            max_pages_per_window = 200  # safety: 500*200=100k fills per window, ~8 wallets/day max
+            while page_cursor < window_end and page_count < max_pages_per_window:
                 rows = self.fetch_fills_range(wallet, page_cursor, window_end)
                 if rows is None:
                     return None
@@ -886,9 +896,14 @@ class EngineSSOT:
                     if next_cursor <= page_cursor:
                         next_cursor = page_cursor + 1
                     page_cursor = min(next_cursor, window_end)
+                    page_count += 1
                     self.audit["poll_paginated_pages"] += 1
                     continue
                 break
+
+            if page_count >= max_pages_per_window:
+                log("WARNING", f"POLL_PAGINATION_SAFEGUARD wallet={wallet} window_start={cursor} window_end={window_end} pages={page_count} — admitting data gap to prevent infinite loop")
+                self.audit["poll_pagination_safeguard_hit"] += 1
 
             cursor = window_end
 
