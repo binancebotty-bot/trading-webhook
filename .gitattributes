@@ -1,0 +1,7 @@
+# hl_ip_budget.py is a byte-identical vendored copy of hl-prod-base's
+# proof_core/exchange_read/ip_budget.py, and a test asserts that identity so the
+# two cannot silently drift apart. This repo has core.autocrlf=true while
+# hl-prod-base has it false, so without this line a checkout would rewrite one
+# copy to CRLF and leave the other LF -- failing the drift guard for a reason
+# that has nothing to do with drift.
+WALLET FINDER/hl_ip_budget.py -text

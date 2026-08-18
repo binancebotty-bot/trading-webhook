@@ -38,6 +38,24 @@ import threading
 import traceback
 import uuid
 import urllib.request
+
+# This proof engine is an independent product.  It shares no trade state, no
+# cursor, no ownership, no journal and no cached exchange truth with the copy
+# runtime or the SSOT tracker.  It shares exactly one thing with them: the
+# per-IP weight budget the exchange actually meters.  Everything else stays
+# separate by design.
+#
+# It is an operator analysis surface, not a trading loop.  Its reads are
+# therefore paced for a human reading a page, not for an execution deadline,
+# and it never claims the execution reserve.
+PROOF_ENGINE_WEIGHT_PER_MIN = float(os.getenv("HL_8014_WEIGHT_PER_MIN", "100"))
+PROOF_ENGINE_REFRESH_SEC = float(os.getenv("HL_8014_REFRESH_SEC", "300"))
+
+try:
+    from hl_rate_guard import guard as _rate_guard
+    RATE_GUARD = _rate_guard("proof_engine_8014", PROOF_ENGINE_WEIGHT_PER_MIN)
+except Exception:  # pragma: no cover - never let the guard break the UI
+    RATE_GUARD = None
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2950,6 +2968,12 @@ def _account_reconciliation_baseline_timestamp(account: str) -> str:
 
 
 def _fetch_user_fills_by_time(account: str, start_ms: int, end_ms: int, timeout: float = 8.0) -> Optional[List[Dict[str, Any]]]:
+    if RATE_GUARD is not None and not RATE_GUARD.acquire("userFillsByTime", timeout_s=5.0):
+        # None means "not fetched", which every caller already handles as
+        # UNAVAILABLE.  An analysis page showing "not available right now" is
+        # correct; an analysis page that costs another product its execution
+        # headroom to render is not.
+        return None
     payload = {
         "type": "userFillsByTime",
         "user": account,
@@ -3021,7 +3045,41 @@ def _summarize_exchange_closed_pnl_rows(rows: List[Dict[str, Any]], start_ms: in
     }
 
 
+_REALIZED_PNL_CACHE: Dict[str, Dict[str, Any]] = {}
+_REALIZED_PNL_CACHE_LOCK = threading.Lock()
+
+
 def _fetch_user_realized_pnl_snapshot(account: Optional[str] = None, baseline_timestamp: str = "") -> Dict[str, Any]:
+    """Realized PnL over days, cached for the operator refresh interval.
+
+    The uncached body issues a 20-weight userFillsByTime over a multi-day
+    window.  It used to run on every model build, and the model is rebuilt on a
+    0-30 second cache, so simply leaving the dashboard open put a recurring
+    several-hundred-weight-per-minute load on a budget shared with a live
+    execution path.  Realized PnL measured over days does not move meaningfully
+    inside five minutes, so this is freshness the operator was never using.
+    """
+    cache_key = f"{(account or _public_account_address()).lower().strip()}|{baseline_timestamp}"
+    now_ms = int(time.time() * 1000)
+    with _REALIZED_PNL_CACHE_LOCK:
+        entry = _REALIZED_PNL_CACHE.get(cache_key)
+        if (
+            isinstance(entry, dict)
+            and entry.get("ok")
+            and now_ms - inum(entry.get("cached_at_ms")) <= int(PROOF_ENGINE_REFRESH_SEC * 1000)
+        ):
+            return dict(entry)
+    fresh = _fetch_user_realized_pnl_snapshot_uncached(account, baseline_timestamp)
+    if isinstance(fresh, dict) and fresh.get("ok"):
+        stored = dict(fresh)
+        stored["cached_at_ms"] = now_ms
+        with _REALIZED_PNL_CACHE_LOCK:
+            _REALIZED_PNL_CACHE[cache_key] = stored
+        return dict(stored)
+    return fresh
+
+
+def _fetch_user_realized_pnl_snapshot_uncached(account: Optional[str] = None, baseline_timestamp: str = "") -> Dict[str, Any]:
     account = (account or _public_account_address()).lower().strip()
     now_ms = int(time.time() * 1000)
     today_start_ms = _today_start_ms()
@@ -3194,7 +3252,7 @@ def _append_exchange_history(snapshot: Dict[str, Any], manual_summary: Dict[str,
     atomic_write_json(EXCHANGE_ACCOUNT_HISTORY_FILE, history)
 
 
-def _fetch_exchange_account_snapshot(max_age_sec: float = 15.0) -> Dict[str, Any]:
+def _fetch_exchange_account_snapshot(max_age_sec: float = PROOF_ENGINE_REFRESH_SEC) -> Dict[str, Any]:
     cached = load_json(EXCHANGE_ACCOUNT_SNAPSHOT_APP_FILE, {})
     now_ms = int(time.time() * 1000)
     if (
@@ -3219,6 +3277,19 @@ def _fetch_exchange_account_snapshot(max_age_sec: float = 15.0) -> Dict[str, Any
         except Exception:
             pass
         return unavailable
+    if RATE_GUARD is not None and not RATE_GUARD.acquire("clearinghouseState", timeout_s=5.0):
+        # Prefer stale truth to no truth, but say which it is.  The dashboard
+        # renders an age against this timestamp, so a reader can see for
+        # themselves how old the number in front of them actually is.
+        if isinstance(cached, dict) and cached.get("ok"):
+            stale = dict(cached)
+            stale["rate_budget_deferred"] = True
+            return stale
+        return {
+            "ok": False, "available": False, "status": "UNAVAILABLE",
+            "reason": "RATE_BUDGET_DEFERRED",
+            "updated_at": utc_now_iso(), "fetched_at_ms": now_ms,
+        }
     try:
         payload = json.dumps({"type": "clearinghouseState", "user": account}).encode("utf-8")
         req = urllib.request.Request(
@@ -3232,6 +3303,12 @@ def _fetch_exchange_account_snapshot(max_age_sec: float = 15.0) -> Dict[str, Any
         spot_raw: Dict[str, Any] = {}
         spot_parse_status = "NOT_FETCHED"
         try:
+            if RATE_GUARD is not None and not RATE_GUARD.acquire(
+                "spotClearinghouseState", timeout_s=5.0
+            ):
+                # Handled by this block's own except, which records the reason
+                # in spot_parse_status rather than failing the whole snapshot.
+                raise RuntimeError("RATE_BUDGET_DEFERRED")
             spot_payload = json.dumps({"type": "spotClearinghouseState", "user": account}).encode("utf-8")
             spot_req = urllib.request.Request(
                 "https://api.hyperliquid.xyz/info",

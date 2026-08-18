@@ -69,7 +69,7 @@ MAX_WALLETS = int(os.getenv("HL_MAX_WALLETS", "0"))  # 0 = unlimited; poll-only 
 WALLETS_PER_SHARD = int(os.getenv("HL_WALLETS_PER_SHARD", "5"))
 EVENT_QUEUE_MAXSIZE = int(os.getenv("HL_EVENT_QUEUE_MAXSIZE", "50000"))
 SEEN_FILL_IDS_MAX = int(os.getenv("HL_SEEN_FILL_IDS_MAX", "250000"))
-POLL_SECONDS = float(os.getenv("HL_POLL_SECONDS", "30"))
+POLL_SECONDS = float(os.getenv("HL_POLL_SECONDS", "120"))
 STATE_WRITE_INTERVAL_SEC = float(os.getenv("HL_STATE_WRITE_INTERVAL_SEC", "5"))
 # userFills can be application-message quiet for long periods. websocket-client
 # handles protocol ping/pong; do not churn healthy idle sockets by default.
@@ -82,6 +82,42 @@ POLL_WINDOW_MS = int(os.getenv("HL_POLL_WINDOW_MS", str(24 * 60 * 60 * 1000)))
 POLL_MAX_PAGE_ROWS = int(os.getenv("HL_POLL_MAX_PAGE_ROWS", "500"))
 POSITION_EPSILON = float(os.getenv("HL_POSITION_EPSILON", "1e-9"))
 RECONNECT_BACKOFF_CAP_SEC = float(os.getenv("HL_RECONNECT_BACKOFF_CAP_SEC", "30"))
+
+# Drift recovery must not become a polling loop.
+#
+# A drift the fill history cannot explain -- a pre-baseline transfer, a
+# manual move, a liquidation, dust below the exchange's own reporting -- stays
+# unexplained no matter how many times the same window is re-fetched.  This
+# engine's own audit counters recorded the consequence: 20,800 recovery
+# attempts, 220 recoveries, and 11,020,509 duplicate fill rows fetched and
+# discarded.  Every one of those rows cost 20 weight against a 1200/min IP
+# allowance shared with two other products.
+#
+# So a recovery attempt that changes nothing quiesces.  The drift is still
+# reported -- truthfully, and with the reason it stopped re-fetching -- but the
+# same barren window is not requested again until either new fills actually
+# arrive for that wallet or this interval elapses.
+DRIFT_RECOVERY_RETRY_SEC = float(os.getenv("HL_DRIFT_RECOVERY_RETRY_SEC", "900"))
+
+# This tracker is an independent product.  It shares no state, no cursor and
+# no business logic with the copy runtime or the :8014 proof engine -- only
+# the IP-level weight budget, because the exchange meters the IP and not the
+# process.  This ceiling binds even with the shared coordinator switched off.
+SSOT_WEIGHT_PER_MIN = float(os.getenv("HL_SSOT_WEIGHT_PER_MIN", "150"))
+
+# How long a background read may wait for budget before giving up on this
+# cycle.  Waiting is what turns a fixed ceiling into pacing: without it the
+# sweep would sprint through the wallet list, be refused for most of it, and
+# serve only whichever wallets happen to sit at the front.  This wait happens
+# on the tracker's own poll thread and blocks nothing else -- least of all
+# another process's execution path, whose reserve this product never claims.
+SSOT_ACQUIRE_TIMEOUT_SEC = float(os.getenv("HL_SSOT_ACQUIRE_TIMEOUT_SEC", "30"))
+
+try:
+    from hl_rate_guard import guard as _rate_guard
+    RATE_GUARD = _rate_guard("ssot", SSOT_WEIGHT_PER_MIN)
+except Exception:  # pragma: no cover - never let the guard break the tracker
+    RATE_GUARD = None
 CLEAN_REBUILD = os.getenv("HL_CLEAN_REBUILD", "0") == "1"
 USER_WALLET = os.getenv("HL_USER_WALLET", "").lower()
 ENABLE_WS = False
@@ -456,6 +492,11 @@ class EngineSSOT:
         startup_fills = self.load_fills_from_ledger()
         self._startup_fill_wallets: Set[str] = {f.wallet for f in startup_fills}
         self.last_ledger_ts_by_wallet: Dict[str, int] = defaultdict(int)
+        # Per-wallet memory of the last drift-recovery attempt, so a barren
+        # recovery is not repeated every cycle.  Deliberately in-memory only:
+        # a restart is new evidence and should re-attempt once.
+        self.drift_recovery_gate_by_wallet: Dict[str, Dict[str, Any]] = {}
+        self._poll_rotation_offset: int = 0
         for f in startup_fills:
             self.last_ledger_ts_by_wallet[f.wallet] = max(self.last_ledger_ts_by_wallet[f.wallet], f.timestamp_ms)
         for w in self.wallets:
@@ -611,6 +652,15 @@ class EngineSSOT:
 
     def fetch_exchange_positions(self, wallet: str) -> Optional[Dict[str, Dict[str, float]]]:
         if requests is None:
+            return None
+        if RATE_GUARD is not None and not RATE_GUARD.acquire(
+            "clearinghouseState", timeout_s=SSOT_ACQUIRE_TIMEOUT_SEC
+        ):
+            # Background analysis yields rather than queues.  A skipped snapshot
+            # costs one cycle of freshness; a queued one costs the execution
+            # path in another process its headroom.
+            self.audit["rate_budget_skipped_snapshots"] += 1
+            log("INFO", f"RATE_BUDGET_SKIP wallet={wallet} request=clearinghouseState")
             return None
         try:
             r = requests.post(
@@ -831,6 +881,14 @@ class EngineSSOT:
         Returns [] on a successful empty range.
         """
         if requests is None:
+            return None
+        if RATE_GUARD is not None and not RATE_GUARD.acquire(
+            "userFillsByTime", timeout_s=SSOT_ACQUIRE_TIMEOUT_SEC
+        ):
+            # None (not []) so the caller does NOT advance its cursor: a skipped
+            # fetch must never be mistaken for a proven-empty window.
+            self.audit["rate_budget_skipped_fill_fetches"] += 1
+            log("INFO", f"RATE_BUDGET_SKIP wallet={wallet} request=userFillsByTime")
             return None
         try:
             payload: Dict[str, Any] = {
@@ -1066,8 +1124,43 @@ class EngineSSOT:
         candidates.extend(baseline_ts_values)
         recovery_start = max(0, min(candidates))
 
+        # Has anything changed since the last barren attempt over this window?
+        # New fills advance last_ledger_ts; an earlier recovery_start would cover
+        # ground the previous attempt did not.  Absent both, re-fetching asks the
+        # exchange a question it has already answered.
+        gate = self.drift_recovery_gate_by_wallet.get(wallet) or {}
+        no_new_evidence = (
+            bool(gate.get("barren"))
+            and int(gate.get("ledger_ts", -1)) == last_ledger_ts
+            and int(gate.get("recovery_start", -1)) <= recovery_start
+        )
+        if no_new_evidence and (time.time() - float(gate.get("at", 0.0))) < DRIFT_RECOVERY_RETRY_SEC:
+            self.audit["drift_recovery_quiesced"] += 1
+            for row in drift_rows:
+                self._set_drift_state(wallet, str(row["coin"]).upper(), "DRIFT_UNRESOLVED", {
+                    **row,
+                    "recovery": "QUIESCED",
+                    "recovery_quiesced_reason": "no_new_fills_since_last_barren_recovery",
+                    "recovery_retry_after_sec": DRIFT_RECOVERY_RETRY_SEC,
+                    "recovery_last_attempt_epoch": float(gate.get("at", 0.0)),
+                })
+            log(
+                "WARNING",
+                f"DRIFT_UNRESOLVED_QUIESCED wallet={wallet} coins={len(drift_rows)} "
+                f"ledger_ts={last_ledger_ts} recovery_start={recovery_start} "
+                f"retry_after_sec={DRIFT_RECOVERY_RETRY_SEC} "
+                "reason=no_new_fills_since_last_barren_recovery"
+            )
+            return len(drift_rows)
+
         self.audit["drift_recovery_attempts"] += 1
         ingest = self.ingest_real_fills_window(wallet, recovery_start, now_ms, "drift_recovery", advance_cursor=False)
+        self.drift_recovery_gate_by_wallet[wallet] = {
+            "at": time.time(),
+            "ledger_ts": last_ledger_ts,
+            "recovery_start": recovery_start,
+            "barren": not int(ingest.get("applied", 0) or 0),
+        }
         if ingest.get("applied", 0):
             # Replay ensures in-memory truth exactly matches the append-only ledger.
             self.rebuild_from_ledger()
@@ -1113,7 +1206,17 @@ class EngineSSOT:
     def poll_once(self) -> None:
         now = utc_now_ms()
         self.refresh_manual_wallets()
-        for wallet in self.wallets:
+        # Start each sweep where the last one stopped.  Under a weight ceiling a
+        # sweep may not reach every wallet, and a sweep that always starts at
+        # index 0 would poll the front of the list forever and never once look
+        # at the back of it.  Rotating makes the shortfall show up as latency
+        # spread evenly across wallets instead of a permanently blind tail.
+        order = list(self.wallets)
+        if order:
+            offset = self._poll_rotation_offset % len(order)
+            order = order[offset:] + order[:offset]
+            self._poll_rotation_offset = (offset + 1) % len(order)
+        for wallet in order:
             wallet = wallet.lower()
             if not self._is_wallet_ready(wallet):
                 log("INFO", f"POLL_BOOTSTRAP wallet={wallet}")
