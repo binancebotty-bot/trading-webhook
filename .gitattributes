@@ -4,4 +4,4 @@
 # hl-prod-base has it false, so without this line a checkout would rewrite one
 # copy to CRLF and leave the other LF -- failing the drift guard for a reason
 # that has nothing to do with drift.
-WALLET FINDER/hl_ip_budget.py -text
+"WALLET FINDER/hl_ip_budget.py" -text
