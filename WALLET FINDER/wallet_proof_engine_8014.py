@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import itertools
+from collections import Counter
 import io
 import json
 import math
@@ -166,7 +167,6 @@ APP_DISPLAY_NAME = "Wallet Proof Engine"
 APP_SOURCE_FILE = Path(__file__).name
 APP_PORT = 8014
 
-
 def _startup_warm_audit_cache() -> None:
     """Pre-build live audit summary at startup so first page load hits cache."""
     last_good = _load_live_audit_summary_last_good()
@@ -259,6 +259,7 @@ def age_ms_label(timestamp_ms: Any) -> Tuple[str, str, str]:
 
 _FILE_WRITE_LOCK = threading.RLock()
 _MODEL_BUILD_LOCK = threading.RLock()
+_COHORT_REBUILD_LOCK = threading.Lock()
 _MODEL_CACHE: Dict[str, Any] = {"state": None, "built_at": 0.0}
 _MODEL_REFRESH_LOCK = threading.Lock()
 _MODEL_REFRESH_IN_PROGRESS = False
@@ -771,6 +772,109 @@ def load_engine_truth() -> Dict[str, Any]:
     return truth
 
 
+def _proof_status_fields() -> Dict[str, Any]:
+    """Read the authoritative proof-status fields from engine truth.
+
+    Every value is returned as-is (None stays None).  Missing/unreadable proof
+    data is reported as UNKNOWN and is NEVER converted into a healthy default.
+    """
+    truth = load_engine_truth() or {}
+    cn = truth.get("currentness")
+    cn = cn if isinstance(cn, dict) else {}
+    epochs = truth.get("proof_epochs")
+    epochs = epochs if isinstance(epochs, dict) else {}
+    statuses = Counter(str((v or {}).get("epoch_status", "")).upper() for v in epochs.values() if isinstance(v, dict))
+    return {
+        "readable": bool(cn),
+        "inputs_current": cn.get("inputs_current"),
+        "state_trustworthy": cn.get("state_trustworthy"),
+        "open_wallets": statuses.get("OPEN"),
+        "pending_wallets": statuses.get("PENDING"),
+        "wallets_without_proven_epoch": cn.get("wallets_without_proven_epoch"),
+        "unresolved_pairs": cn.get("unresolved_pairs"),
+        "escalated_pairs": cn.get("escalated_pairs"),
+        "global_trusted_through_ms": cn.get("global_trusted_through_ms"),
+        "global_trusted_through_iso": cn.get("global_trusted_through_iso"),
+        "current_lag_ms": cn.get("current_lag_ms"),
+        "wallets_with_consecutive_failures": cn.get("wallets_with_consecutive_failures"),
+        "required_wallets": cn.get("required_wallets"),
+        "truth_updated_at": truth.get("updated_at"),
+    }
+
+
+def _proof_status_classification(f: Dict[str, Any]) -> Tuple[str, str, str]:
+    """Return (code, label, css_class).  Missing data is UNKNOWN, never healthy."""
+    if not f.get("readable"):
+        return "UNKNOWN", "UNKNOWN / NOT PROVEN", "unknown"
+    if f.get("inputs_current") is None or f.get("state_trustworthy") is None:
+        return "UNKNOWN", "UNKNOWN / NOT PROVEN", "unknown"
+    unresolved = inum(f.get("unresolved_pairs"))
+    escalated = inum(f.get("escalated_pairs"))
+    if unresolved > 0 or escalated > 0:
+        return "UNRESOLVED", "UNRESOLVED", "unresolved"
+    if bool(f.get("inputs_current")) and bool(f.get("state_trustworthy")):
+        return "TRUSTED", "TRUSTED", "trusted"
+    return "CONVERGING", "CONVERGING", "converging"
+
+
+def build_proof_status_block() -> str:
+    """Prominent proof-status banner driven ONLY by authoritative engine output.
+
+    TRUSTED = inputs_current AND state_trustworthy.
+    CONVERGING = engine healthy but wallets remain PENDING / lack a current
+    proven watermark.  UNRESOLVED = unresolved/escalated drift or an otherwise
+    untrustworthy state.  UNKNOWN = required proof data missing/unreadable.
+    """
+    f = _proof_status_fields()
+    code, label, cls = _proof_status_classification(f)
+
+    def b(value: Any) -> str:
+        if value is None:
+            return '<b class="unknown">UNKNOWN</b>'
+        return f'<b class="{"pos" if value else "warn"}">{str(bool(value)).lower()}</b>'
+
+    def n(value: Any) -> str:
+        return f'<b class="unknown">UNKNOWN</b>' if value is None else f"<b>{inum(value)}</b>"
+
+    lag_ms = f.get("current_lag_ms")
+    tt_ms = inum(f.get("global_trusted_through_ms"))
+    if lag_ms is None:
+        if tt_ms > 0:
+            lag_ms = max(0, int(time.time() * 1000) - tt_ms)
+        else:
+            lag_ms = None
+    tt_iso = f.get("global_trusted_through_iso") or ""
+    tt_display = "UNKNOWN"
+    if tt_ms > 0:
+        tt_display = html.escape(tt_iso or datetime.fromtimestamp(tt_ms / 1000, tz=timezone.utc).isoformat())
+    lag_display = "UNKNOWN" if lag_ms is None else f"{lag_ms / 1000.0:.0f}s"
+    detail = "" if f.get("readable") else "engine_truth.currentness missing or unreadable — proof state cannot be established"
+    if code == "UNRESOLVED" and not detail:
+        detail = "modelled state does not agree with exchange truth (drift unresolved/escalated)"
+
+    items = [
+        ("inputs_current", b(f.get("inputs_current"))),
+        ("state_trustworthy", b(f.get("state_trustworthy"))),
+        ("OPEN wallets", n(f.get("open_wallets"))),
+        ("PENDING wallets", n(f.get("pending_wallets"))),
+        ("wallets without proven epoch", n(f.get("wallets_without_proven_epoch"))),
+        ("unresolved pairs", n(f.get("unresolved_pairs"))),
+        ("escalated pairs", n(f.get("escalated_pairs"))),
+        ("global trusted-through", f"<b>{tt_display}</b>"),
+        ("trusted-through lag", f"<b>{lag_display}</b>"),
+        ("wallets with poll failures", n(f.get("wallets_with_consecutive_failures"))),
+    ]
+    grid = "".join(f'<div class="proof-item"><span>{html.escape(k)}</span>{v}</div>' for k, v in items)
+    truth_updated = html.escape(str(f.get("truth_updated_at") or ""), quote=True)
+    return (
+        f'<div class="proof-status proof-{cls}" data-proof-source="engine_truth.json" data-truth-updated="{truth_updated}">'
+        f'<div class="proof-head"><b>PROOF STATUS</b> <span class="proof-pill">{html.escape(label)}</span>'
+        f'<span class="muted">{html.escape(detail)}</span></div>'
+        f'<div class="proof-grid">{grid}</div>'
+        f'</div>'
+    )
+
+
 _PORTFOLIO_PERIODS_CACHE: Dict[Tuple[str, int], Dict[str, Any]] = {}
 _ACCOUNT_VALUE_CURVE_CACHE: Dict[Tuple[str, str, int], List[Dict[str, Any]]] = {}
 _COMPUTED_EQUITY_CURVE_CACHE: Dict[Tuple[str, int, int, int], List[Dict[str, Any]]] = {}
@@ -855,11 +959,57 @@ def _account_value_curve(wallet: str, period: str = "allTime") -> List[Dict[str,
     return points
 
 
+def _latest_sane_account_equity(curve: List[Dict[str, Any]]) -> Tuple[Optional[float], Optional[Dict[str, Any]], bool]:
+    """Last cached account equity, skipping a terminal near-zero collapse.
+
+    A wallet whose account was emptied (funds withdrawn) ends its
+    accountValueHistory at ~0.  That is a factual value, but it is not a valid
+    sizing denominator and is the exact input that drives the scale explosion.
+    When the tail is a near-zero collapse relative to the wallet's own peak we
+    return the most recent non-collapsed point and flag it, so the model re-bases
+    cleanly and the cache self-heals once the source is refreshed.
+    """
+    if not curve:
+        return None, None, False
+    peak = max((fnum(p.get("equity_usd")) for p in curve), default=0.0)
+    threshold = 0.01 * peak
+    for point in reversed(curve):
+        equity = fnum(point.get("equity_usd"))
+        if peak > 0 and equity < threshold:
+            continue
+        return round(equity, 4), point, point is not curve[-1]
+    return round(fnum(curve[-1].get("equity_usd")), 4), curve[-1], False
+
+
 def _current_leader_equity_from_cache(wallet: str) -> Optional[float]:
     curve = _account_value_curve(wallet)
     if not curve:
         return None
-    return round(fnum(curve[-1].get("equity_usd")), 4)
+    value, _point, _collapsed = _latest_sane_account_equity(curve)
+    return value
+
+
+def _leader_equity_source_snapshot(wallet: str) -> Dict[str, Any]:
+    """Describe the exact cached account-value point used for unlocked sizing."""
+    curve = _account_value_curve(wallet)
+    if not curve:
+        return {
+            "value": None,
+            "timestamp_ms": 0,
+            "age_seconds": None,
+            "stale": True,
+            "source": "missing:data/wallet_portfolios/accountValueHistory",
+        }
+    point = curve[-1]
+    timestamp_ms = int(point.get("timestamp_ms") or 0)
+    age_seconds = max(0.0, (time.time() * 1000.0 - timestamp_ms) / 1000.0) if timestamp_ms else None
+    return {
+        "value": round(fnum(point.get("equity_usd")), 4),
+        "timestamp_ms": timestamp_ms,
+        "age_seconds": age_seconds,
+        "stale": age_seconds is None or age_seconds > 24 * 3600,
+        "source": "Hyperliquid portfolio allTime.accountValueHistory",
+    }
 
 
 def _leader_equity_source_mtimes(wallets: Iterable[str]) -> Dict[str, int]:
@@ -883,7 +1033,15 @@ def _leader_equity_sources_changed(state: Any) -> bool:
     saved = state.get("leader_equity_source_mtimes")
     if not isinstance(saved, dict) or not saved:
         return False
-    return _leader_equity_source_mtimes(saved.keys()) != {str(k): inum(v) for k, v in saved.items()}
+    def exact_mtime(value: Any) -> int:
+        # st_mtime_ns is currently ~1e18. Passing it through float (as in
+        # inum()) discards low bits and makes unchanged files look modified.
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        text = str(value or "").strip()
+        return int(text) if re.fullmatch(r"-?\d+", text) else 0
+
+    return _leader_equity_source_mtimes(saved.keys()) != {str(k): exact_mtime(v) for k, v in saved.items()}
 
 
 def _true_ts_drawdown_summary(wallet: str) -> Dict[str, Any]:
@@ -1015,11 +1173,41 @@ def _normalised_true_drawdown_points(points: List[Dict[str, Any]], scale: float)
     return out
 
 
+def _bounded_proof_scale(alloc: float, leader_equity_base: float, curve: List[Dict[str, Any]]) -> Tuple[float, float, bool]:
+    """Return (scale, magnitude_floor, floored) for a wallet's proof curve.
+
+    Follower notional is sized from the leader's *current* account equity.  When
+    a leader's live account has collapsed to ~zero (funds withdrawn) that current
+    equity is not a valid denominator: ``max(1.0, base)`` becomes 1.0 and the
+    scale explodes to ``alloc`` (e.g. 2000x), turning a genuine few-hundred-dollar
+    curve drawdown into millions and flattening EVERY chart series plus the
+    aggregate/portfolio header.  A wallet's own proving curve is always available
+    and is the correct magnitude reference, so we floor the denominator at a
+    small fraction of the curve's peak.  No historical point is rewritten or
+    fabricated -- only the display scale is bounded.
+    """
+    base = max(1.0, fnum(leader_equity_base))
+    magnitudes = [abs(fnum(p.get("equity"))) for p in curve if isinstance(p, dict) and math.isfinite(fnum(p.get("equity")))]
+    if not magnitudes:
+        return alloc / base, 0.0, False
+    peak = max(magnitudes)
+    # Bind ONLY when the denominator has collapsed to a small fraction of the
+    # wallet's own curve (withdrawn account).  Healthy wallets (base within the
+    # curve's magnitude band) keep their existing scale unchanged.
+    collapsed = peak > 0 and base < 0.05 * peak
+    denom = peak if collapsed else base
+    return alloc / denom, peak, collapsed
+
+
 def _computed_true_drawdown_summary(wallet: str, alloc: float, leader_equity_base: float, proof_window_start_ms: int = 0, proof_window_end_ms: int = 0) -> Dict[str, Any]:
     window_start = inum(proof_window_start_ms)
     window_end = inum(proof_window_end_ms)
     curve = _computed_equity_curve(wallet, window_start, window_end)
-    scale = fnum(alloc, DEFAULT_NORM_BASE) / max(1.0, fnum(leader_equity_base, fnum(alloc, DEFAULT_NORM_BASE)))
+    scale, _scale_floor, _scale_floored = _bounded_proof_scale(
+        fnum(alloc, DEFAULT_NORM_BASE),
+        fnum(leader_equity_base, fnum(alloc, DEFAULT_NORM_BASE)),
+        curve,
+    )
     base = max(1.0, fnum(alloc, DEFAULT_NORM_BASE))
     if not curve:
         return {
@@ -1204,14 +1392,15 @@ def build_computed_true_drawdown_history(rows: List[Dict[str, Any]], ui: Optiona
             continue
         alloc = fnum(row.get("alloc"), wallet_alloc(wallet, ui))
         leader_base = fnum(row.get("effective_leader_equity_base"), alloc)
-        scale = alloc / max(1.0, leader_base)
         window_start, window_end = _row_proof_window(row)
+        _scale_curve = _computed_equity_curve(wallet, window_start, window_end)
+        scale, _scale_floor, _scale_floored = _bounded_proof_scale(alloc, leader_base, _scale_curve)
         summary = _computed_true_drawdown_summary(wallet, alloc, leader_base, window_start, window_end)
         row.update(summary)
         if summary.get("true_ts_status") != "ok":
             continue
         window_curve, _source_points, _forward_filled, _source_latest_ms = _windowed_true_curve_points(
-            _computed_equity_curve(wallet, window_start, window_end),
+            _scale_curve,
             window_start,
             window_end,
         )
@@ -1322,7 +1511,7 @@ def _clean_wallet_config(raw_cfg: Any) -> Dict[str, Dict[str, Any]]:
 
     Empty/missing wallet config means: inherit the global header settings.
     Supported per-wallet keys: copy_mode, norm_base, fixed_notional,
-    leader_equity_base.
+    leader_equity_base, leader_equity_base_locked.
     """
     if not isinstance(raw_cfg, dict):
         return {}
@@ -1341,6 +1530,8 @@ def _clean_wallet_config(raw_cfg: Any) -> Dict[str, Dict[str, Any]]:
             item["fixed_notional"] = max(0.01, fnum(cfg.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL))
         if "leader_equity_base" in cfg and str(cfg.get("leader_equity_base", "")).strip() != "":
             item["leader_equity_base"] = max(1.0, fnum(cfg.get("leader_equity_base"), item.get("norm_base", DEFAULT_NORM_BASE)))
+        if parse_bool(cfg.get("leader_equity_base_locked", False)) and "leader_equity_base" in item:
+            item["leader_equity_base_locked"] = True
         if item:
             out[w] = item
     return out
@@ -2381,6 +2572,8 @@ def _live_audit_summary() -> Dict[str, Any]:
     if not isinstance(portfolio_history, list):
         portfolio_history = []
     exchange_history = load_json(EXCHANGE_ACCOUNT_HISTORY_FILE, [])
+    if not isinstance(exchange_history, list):
+        exchange_history = []
     fills_recent = exchange_snapshot.get("actual_user_fills_graph")
     if not isinstance(fills_recent, list) or not fills_recent:
         fills_recent = exchange_snapshot.get("actual_user_fills_recent", [])
@@ -3250,8 +3443,6 @@ def _append_exchange_history(snapshot: Dict[str, Any], manual_summary: Dict[str,
     if len(history) > 2000:
         history = history[-2000:]
     atomic_write_json(EXCHANGE_ACCOUNT_HISTORY_FILE, history)
-
-
 def _fetch_exchange_account_snapshot(max_age_sec: float = PROOF_ENGINE_REFRESH_SEC) -> Dict[str, Any]:
     cached = load_json(EXCHANGE_ACCOUNT_SNAPSHOT_APP_FILE, {})
     now_ms = int(time.time() * 1000)
@@ -6578,6 +6769,8 @@ def build_model_state(
             and m.open_position_count == 0
         )
         _eff_cfg = effective_wallet_ui(wallet, ui)
+        leader_equity_source = _leader_equity_source_snapshot(wallet)
+        leader_equity_locked = parse_bool(((ui.get("wallet_config") or {}).get(wallet, {}) or {}).get("leader_equity_base_locked", False))
         _proof_start_ms, _proof_end_ms = _row_proof_window(m.curve)
         true_ts_dd = _computed_true_drawdown_summary(
             wallet,
@@ -6643,6 +6836,11 @@ def build_model_state(
             "effective_norm_base": _eff_cfg.get("norm_base"),
             "effective_fixed_notional": _eff_cfg.get("fixed_notional"),
             "effective_leader_equity_base": _eff_cfg.get("leader_equity_base"),
+            "effective_leader_equity_base_locked": leader_equity_locked,
+            "effective_leader_equity_base_source": "manual locked override" if leader_equity_locked else leader_equity_source.get("source"),
+            "effective_leader_equity_base_source_timestamp_ms": None if leader_equity_locked else leader_equity_source.get("timestamp_ms"),
+            "effective_leader_equity_base_source_age_seconds": None if leader_equity_locked else leader_equity_source.get("age_seconds"),
+            "effective_leader_equity_base_source_stale": False if leader_equity_locked else bool(leader_equity_source.get("stale", True)),
             "true_ts_dd_now_usd": true_ts_dd.get("true_ts_dd_now_usd"),
             "true_ts_dd_now_pct": true_ts_dd.get("true_ts_dd_now_pct"),
             "true_ts_max_dd_usd": true_ts_dd.get("true_ts_max_dd_usd"),
@@ -7437,63 +7635,64 @@ def _kick_model_cache_refresh_background() -> bool:
 
     def _refresh() -> None:
         global _MODEL_REFRESH_IN_PROGRESS
-        started = time.time()
-        with _MODEL_REFRESH_LOCK:
-            _MODEL_REFRESH_STATUS.update({
-                "in_progress": True,
-                "started_at": utc_now_iso(),
-                "finished_at": "",
-                "ok": False,
-                "error": "",
-                "traceback": "",
-                "state_present": bool(_MODEL_CACHE.get("state")),
-                "html_present": bool(_MODEL_DASHBOARD_HTML_CACHE.get("html")),
-                "last_marker": "MODEL_DASHBOARD_BACKGROUND_REBUILD_STARTED",
-            })
-        try:
-            APP_HEALTH["last_build_started_at"] = utc_now_iso()
-            # Publish the calculated state before spending several seconds on
-            # derived JSON/CSV persistence. Dashboard requests remain served
-            # from the previous complete cache throughout this rebuild.
-            refreshed = build_model_state(persist=False)
-            refreshed_built_at = time.time()
-            with _MODEL_BUILD_LOCK:
-                _MODEL_CACHE["state"] = refreshed
-                _MODEL_CACHE["built_at"] = refreshed_built_at
-            APP_HEALTH["last_build_finished_at"] = utc_now_iso()
-            APP_HEALTH["last_build_seconds"] = round(time.time() - started, 4)
-            APP_HEALTH["last_error"] = ""
-            APP_HEALTH["build_count"] = int(APP_HEALTH.get("build_count", 0)) + 1
-            _render_model_dashboard_html_cached(refreshed, refreshed_built_at)
-            persist_model_state(refreshed)
+        with _COHORT_REBUILD_LOCK:
+            started = time.time()
             with _MODEL_REFRESH_LOCK:
                 _MODEL_REFRESH_STATUS.update({
-                    "ok": True,
-                    "state_present": True,
-                    "html_present": bool(_MODEL_DASHBOARD_HTML_CACHE.get("html")),
-                    "last_marker": "MODEL_DASHBOARD_HTML_BACKGROUND_PRERENDER_DONE",
-                })
-            print("MODEL_DASHBOARD_HTML_BACKGROUND_PRERENDER_DONE", flush=True)
-            print("MODEL_DASHBOARD_BACKGROUND_REBUILD_DONE", flush=True)
-        except Exception as exc:
-            err = f"{type(exc).__name__}: {exc}"
-            tb = traceback.format_exc()
-            APP_HEALTH["last_error"] = err
-            APP_HEALTH["last_build_seconds"] = round(time.time() - started, 4)
-            with _MODEL_REFRESH_LOCK:
-                _MODEL_REFRESH_STATUS.update({
+                    "in_progress": True,
+                    "started_at": utc_now_iso(),
+                    "finished_at": "",
                     "ok": False,
-                    "error": err,
-                    "traceback": tb,
+                    "error": "",
+                    "traceback": "",
                     "state_present": bool(_MODEL_CACHE.get("state")),
                     "html_present": bool(_MODEL_DASHBOARD_HTML_CACHE.get("html")),
-                    "last_marker": "MODEL_DASHBOARD_BACKGROUND_REBUILD_FAILED",
+                    "last_marker": "MODEL_DASHBOARD_BACKGROUND_REBUILD_STARTED",
                 })
-        finally:
-            with _MODEL_REFRESH_LOCK:
-                _MODEL_REFRESH_IN_PROGRESS = False
-                _MODEL_REFRESH_STATUS["in_progress"] = False
-                _MODEL_REFRESH_STATUS["finished_at"] = utc_now_iso()
+            try:
+                APP_HEALTH["last_build_started_at"] = utc_now_iso()
+                # Publish the calculated state before spending several seconds on
+                # derived JSON/CSV persistence. Dashboard requests remain served
+                # from the previous complete cache throughout this rebuild.
+                refreshed = build_model_state(persist=False)
+                refreshed_built_at = time.time()
+                with _MODEL_BUILD_LOCK:
+                    _MODEL_CACHE["state"] = refreshed
+                    _MODEL_CACHE["built_at"] = refreshed_built_at
+                APP_HEALTH["last_build_finished_at"] = utc_now_iso()
+                APP_HEALTH["last_build_seconds"] = round(time.time() - started, 4)
+                APP_HEALTH["last_error"] = ""
+                APP_HEALTH["build_count"] = int(APP_HEALTH.get("build_count", 0)) + 1
+                _render_model_dashboard_html_cached(refreshed, refreshed_built_at)
+                persist_model_state(refreshed)
+                with _MODEL_REFRESH_LOCK:
+                    _MODEL_REFRESH_STATUS.update({
+                        "ok": True,
+                        "state_present": True,
+                        "html_present": bool(_MODEL_DASHBOARD_HTML_CACHE.get("html")),
+                        "last_marker": "MODEL_DASHBOARD_HTML_BACKGROUND_PRERENDER_DONE",
+                    })
+                print("MODEL_DASHBOARD_HTML_BACKGROUND_PRERENDER_DONE", flush=True)
+                print("MODEL_DASHBOARD_BACKGROUND_REBUILD_DONE", flush=True)
+            except Exception as exc:
+                err = f"{type(exc).__name__}: {exc}"
+                tb = traceback.format_exc()
+                APP_HEALTH["last_error"] = err
+                APP_HEALTH["last_build_seconds"] = round(time.time() - started, 4)
+                with _MODEL_REFRESH_LOCK:
+                    _MODEL_REFRESH_STATUS.update({
+                        "ok": False,
+                        "error": err,
+                        "traceback": tb,
+                        "state_present": bool(_MODEL_CACHE.get("state")),
+                        "html_present": bool(_MODEL_DASHBOARD_HTML_CACHE.get("html")),
+                        "last_marker": "MODEL_DASHBOARD_BACKGROUND_REBUILD_FAILED",
+                    })
+            finally:
+                with _MODEL_REFRESH_LOCK:
+                    _MODEL_REFRESH_IN_PROGRESS = False
+                    _MODEL_REFRESH_STATUS["in_progress"] = False
+                    _MODEL_REFRESH_STATUS["finished_at"] = utc_now_iso()
 
     threading.Thread(target=_refresh, name="hl-model-cache-refresh", daemon=True).start()
     return True
@@ -7884,8 +8083,7 @@ DASHBOARD_CELL_CONTRACT = {
     "header_pnl": "portfolio lead/copy total pnl = equity - alloc; delta = copy - lead",
     "header_realised": "portfolio lead/copy realised = sum included non-user row lead/copy realised",
     "header_unrealised": "portfolio lead/copy unrealised = sum included non-user row lead/copy unrealised",
-    "header_drawdown": "portfolio current DD = current peak - current equity; copy max = max history/current",
-    "header_maxdd": "portfolio maxDD = max historical drawdown/current DD",
+    "header_model_drawdown": "lead/copy current DD = current peak - current equity; lead/copy max DD = max historical drawdown/current DD",
     "header_exposure": "open = sum included current_position_usd; max = max portfolio history open_notional_usd; base = open/norm_base",
     "header_copyability": "avg_trade_pct from included copy_trades.return_pct; avg_trade_usd = included copy realised/exits; avg_pos from included avg_position_usd; req_lev = max required leverage",
     "header_activity": "fills/exits/open_pos/win from included non-user rows only",
@@ -8193,7 +8391,7 @@ def validate_render_contract(state: Dict[str, Any]) -> List[str]:
 
 
 def render_chart(history: List[Dict[str, Any]], true_drawdown_history: Optional[List[Dict[str, Any]]] = None, true_curve_counts: Optional[Dict[str, Any]] = None) -> str:
-    """Render copy PnL, realised PnL, model DD and dense computed true DD."""
+    """Render copy PnL, realised PnL, model DD and reconstructed realised DD."""
     if not history:
         return '<div class="chart-empty">Awaiting data…</div>'
     counts = true_curve_counts or {}
@@ -8202,7 +8400,7 @@ def render_chart(history: List[Dict[str, Any]], true_drawdown_history: Optional[
     missing_count = inum(counts.get("missing"))
     total_count = inum(counts.get("total"))
     true_dd_blocked = bool(stale_count or missing_count)
-    blocked_msg = f"TRUE DD BLOCKED: {valid_count} valid, {stale_count} stale, {missing_count} missing" if true_dd_blocked else ""
+    blocked_msg = f"RECONSTRUCTED DD UNAVAILABLE: {valid_count} valid, {stale_count} stale, {missing_count} missing" if true_dd_blocked else ""
 
     raw_points: List[Dict[str, Any]] = []
     for p in history:
@@ -8365,9 +8563,6 @@ def render_chart(history: List[Dict[str, Any]], true_drawdown_history: Optional[
     model_range_end = max((fnum(p.get("t")) for p in pts_data), default=0.0)
     true_range_start = min((fnum(p.get("t")) for p in true_pts_data), default=0.0)
     true_range_end = max((fnum(p.get("t")) for p in true_pts_data), default=0.0)
-    true_curve_pts_data = [p for p in true_pts_data if model_range_start <= fnum(p.get("t")) <= model_range_end]
-    true_curve_dd_poly = poly_points(true_curve_pts_data, "dd") if true_curve_pts_data else ""
-
     hit_bits: List[str] = []
     xs = [x_at(i) for i in range(len(pts_data))]
     for i, point in enumerate(pts_data):
@@ -8381,15 +8576,14 @@ def render_chart(history: List[Dict[str, Any]], true_drawdown_history: Optional[
     zero_y = y_at(0.0)
 
     true_polyline = f'<polyline points="{true_dd_poly}" class="true-dd-line"/>' if true_pts_data else ""
-    true_curve_polyline = f'<polyline points="{true_curve_dd_poly}" class="true-curve-dd-line"/>' if true_curve_pts_data else ""
     blocked_overlay = (
-        f'<div class="chart-blocked-overlay"><b>{html.escape(blocked_msg)}</b><span>Portfolio TRUE DD refused until every included wallet has a valid reconstructed equity_curves CSV. Model/proof lines remain visible.</span></div>'
+        f'<div class="chart-blocked-overlay"><b>{html.escape(blocked_msg)}</b><span>Reconstructed realised drawdown is unavailable until every included wallet has a valid equity_curves CSV. Model lines remain visible.</span></div>'
         if true_dd_blocked
         else ""
     )
     true_source_attr = "blocked:data/equity_curves:proof_window" if true_dd_blocked else "data/equity_curves:proof_window"
     true_status_attr = "BLOCKED" if true_dd_blocked else "VALID"
-    true_legend = "True DD blocked" if true_dd_blocked else "True DD (equity_curves window)"
+    true_legend = "Reconstructed realised DD unavailable" if true_dd_blocked else "Reconstructed realised DD"
 
     return f"""
     <div class="chart-wrap{' true-dd-blocked' if true_dd_blocked else ''}" data-true-dd-source="{true_source_attr}" data-true-dd-status="{true_status_attr}" data-true-valid="{valid_count}" data-true-stale="{stale_count}" data-true-missing="{missing_count}" data-true-total="{total_count}" data-true-dd-final="{true_dd_final:.12f}" data-true-dd-min="{true_dd_min:.12f}" data-true-dd-points="{len(true_pts_data)}" data-model-points="{len(pts_data)}" data-true-range-start="{model_range_start if not true_pts_data else true_range_start:.3f}" data-true-range-end="{model_range_end if not true_pts_data else true_range_end:.3f}" data-model-range-start="{model_range_start:.3f}" data-model-range-end="{model_range_end:.3f}">
@@ -8401,12 +8595,11 @@ def render_chart(history: List[Dict[str, Any]], true_drawdown_history: Optional[
         <polyline points="{poly(realized_vals)}" class="realized-line"/>
         <polyline points="{poly(dd_vals)}" class="dd-line"/>
         {true_polyline}
-        {true_curve_polyline}
         <line id="chartCrossX" x1="{pad_l}" y1="{pad_t}" x2="{pad_l}" y2="{h-pad_b}" class="crosshair" style="display:none"/>
         <circle id="chartDot" cx="{pad_l}" cy="{zero_y:.1f}" r="4" class="chart-dot" style="display:none"/>
         {hits}
       </svg>
-      <div class="chart-legend"><span class="legend-pnl">Copy PnL</span><span class="legend-realized">Realised</span><span class="legend-dd">Model DD</span><span class="legend-true-dd">{html.escape(true_legend)}</span><span class="legend-true-curve-dd">True Curve DD</span><span class="muted">Hover for values · click chart to expand</span></div>
+      <div class="chart-legend"><span class="legend-pnl">Copy PnL</span><span class="legend-realized">Realised</span><span class="legend-dd">Copy model DD</span><span class="legend-true-dd">{html.escape(true_legend)}</span><span class="muted">Hover for values · click chart to expand</span></div>
       <div id="chartTip" class="chart-tip" style="display:none"></div>
     </div>"""
 
@@ -8490,6 +8683,15 @@ def sorted_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def render_home(state: Dict[str, Any]) -> str:
     state = dict(state)
+    equity_refresh = state.get("cohort_equity_refresh") or {}
+    equity_refresh_notice = ""
+    if equity_refresh:
+        equity_refresh_notice = html.escape(
+            f"Equity refreshed: {equity_refresh['refreshed']}/{equity_refresh['selected']} selected; "
+            f"{equity_refresh['locked']} locked; {equity_refresh['failed']} failed"
+            + (f"; {equity_refresh['skipped']} deselected/excluded" if equity_refresh.get('skipped') else "")
+            + (" (previous equity retained)" if equity_refresh['failed'] else "")
+        )
     ui = load_ui_state()
     state["ui_state"] = ui
     state["wallet_rows"] = enrich_rows_with_effective_dd(state.get("wallet_rows", []))
@@ -8512,20 +8714,7 @@ def render_home(state: Dict[str, Any]) -> str:
     copy_dd = get_current_dd(copy, hist, "copy")
     lead_maxdd = get_max_dd(lead, hist, "lead")
     copy_maxdd = get_max_dd(copy, hist, "copy")
-    true_hist = state.get("true_drawdown_history", []) if isinstance(state.get("true_drawdown_history", []), list) else []
-    user_display_row = next((r for r in rows if r.get("is_user_wallet")), {})
-    true_dd_now = user_display_row.get("true_ts_dd_now_usd")
-    true_max_dd = user_display_row.get("true_ts_max_dd_usd")
     true_counts = state.get("true_curve_status_counts") if isinstance(state.get("true_curve_status_counts"), dict) else {}
-    true_valid = inum(true_counts.get("valid"))
-    true_stale = inum(true_counts.get("stale"))
-    true_missing = inum(true_counts.get("missing"))
-    true_total = inum(true_counts.get("total"))
-    true_blocked = bool(true_stale or true_missing)
-    true_status_label = "BLOCKED" if true_blocked else "VALID"
-    if true_blocked:
-        true_dd_now = None
-        true_max_dd = None
     open_notional = fnum(port.get("open_notional_usd"), sum(fnum(r.get("current_position_usd")) for r in included_rows))
     max_open_notional = fnum(port.get("max_open_notional_usd"), open_notional)
     notional_x = open_notional / user_base if user_base else 0.0
@@ -8549,8 +8738,7 @@ def render_home(state: Dict[str, Any]) -> str:
         group_card("PNL", [small_metric("LEAD", dual(lead_total, user_base), lead_total), small_metric("COPY", dual(copy_total, user_base), copy_total), small_metric("Δ", dual(delta_total, user_base), delta_total)]),
         group_card("REALISED", [small_metric("LEAD", dual(fnum(lead.get("realized")), user_base), fnum(lead.get("realized"))), small_metric("COPY", dual(fnum(copy.get("realized")), user_base), fnum(copy.get("realized")))]),
         group_card("UNREALISED", [small_metric("LEAD", dual(fnum(lead.get("unrealized")), user_base), fnum(lead.get("unrealized"))), small_metric("COPY", dual(fnum(copy.get("unrealized")), user_base), fnum(copy.get("unrealized")))]),
-        group_card("DRAWDOWN", [small_metric("TRUE DD STATUS", true_status_label, -1 if true_blocked else 0), small_metric("TRUE DD NOW", "BLOCKED" if true_blocked else format_dd(abs(fnum(true_dd_now)), user_base), -1 if true_blocked else true_dd_now), small_metric("MODEL DD", format_dd(copy_dd, user_base), -copy_dd), small_metric("TRUE MAX DD", "BLOCKED" if true_blocked else format_dd(abs(fnum(true_max_dd)), user_base), -1 if true_blocked else true_max_dd)]),
-        group_card("MAX DD", [small_metric("TRUE MAX DD", "BLOCKED" if true_blocked else format_dd(abs(fnum(true_max_dd)), user_base), -1 if true_blocked else true_max_dd), small_metric("MODEL DD", format_dd(copy_maxdd, user_base), -copy_maxdd), small_metric("TRUE CURVES", f"{true_valid}/{true_total} valid · {true_stale} stale · {true_missing} missing", -1 if (true_stale or true_missing) else 0)]),
+        group_card("MODEL DRAWDOWN", [small_metric("LEAD CURRENT", format_dd(lead_dd, user_base), -lead_dd), small_metric("COPY CURRENT", format_dd(copy_dd, user_base), -copy_dd), small_metric("LEAD MAX", format_dd(lead_maxdd, user_base), -lead_maxdd), small_metric("COPY MAX", format_dd(copy_maxdd, user_base), -copy_maxdd)]),
         group_card("EXPOSURE", [small_metric("OPEN", money(open_notional), open_notional), small_metric("MAX", money(max_open_notional), max_open_notional), small_metric("BASE", f"{notional_x:.2f}x / {max_notional_x:.2f}x", notional_x)]),
         group_card("COPYABILITY", [small_metric("AVG TRADE %", pct(avg_trade_pct, 3), avg_trade_pct), small_metric("AVG TRADE $", money(avg_trade), avg_trade), small_metric("AVG POS", money(avg_pos_size), avg_pos_size), small_metric("REQ LEV", f"{max_req_lev:.2f}x", max_req_lev)]),
         group_card("ACTIVITY", [small_metric("FILLS", str(fill_count), fill_count), small_metric("EXITS", str(exit_count), exit_count), small_metric("OPEN POS", str(open_positions), open_positions), small_metric("WIN", pct(win_avg), win_avg)]),
@@ -8562,20 +8750,15 @@ def render_home(state: Dict[str, Any]) -> str:
         active = col == active_col; arrow = " ▲" if active and active_dir == "asc" else " ▼" if active else ""
         return f'<th class="{cls} {"sort-active" if active else ""}"><a href="/sort/{col}">{label}{arrow}</a></th>'
     table_head = """<tr><th class="sticky-wallet">WALLET</th>""" + "".join([
-        th("lead_equity", "LEAD EQ", "pair-lead"), th("copy_equity", "COPY EQ", "pair-copy group-divider"),
+        th("lead_equity", "LEAD MODEL EQ", "pair-lead"), th("copy_equity", "COPY MODEL EQ", "pair-copy group-divider"),
         th("lead_real", "LEAD REAL", "pair-lead"), th("copy_real", "COPY REAL", "pair-copy group-divider"),
         th("lead_unreal", "LEAD UNREAL", "pair-lead"), th("copy_unreal", "COPY UNREAL", "pair-copy group-divider"),
-        th("lead_dd", "LEAD DD", "pair-lead"), th("copy_dd", "COPY DD", "pair-copy group-divider"),
-        th("lead_maxdd", "LEAD MAXDD", "pair-lead"), th("copy_maxdd", "COPY MAXDD", "pair-copy group-divider"),
-        th("true_dd_status", "TRUE DD STATUS", "true-ts-dd"),
-        th("true_curve_dd_usd", "TRUE CURVE DD", "true-ts-dd"),
-        th("true_ts_dd_now_usd", "TRUE DD NOW $", "true-ts-dd"), th("true_ts_dd_now_pct", "TRUE DD NOW %", "true-ts-dd"),
-        th("true_ts_max_dd_usd", "TRUE MAX DD $", "true-ts-dd"), th("true_ts_max_dd_pct", "TRUE MAX DD %", "true-ts-dd group-divider"),
-        th("all_time_true_max_dd_usd", "ALL-TIME TRUE MAX DD $", "true-ts-dd"), th("all_time_true_max_dd_pct", "ALL-TIME TRUE MAX DD %", "true-ts-dd group-divider"),
+        th("lead_dd", "LEAD DD NOW", "pair-lead"), th("copy_dd", "COPY DD NOW", "pair-copy group-divider"),
+        th("lead_maxdd", "LEAD MAX DD", "pair-lead"), th("copy_maxdd", "COPY MAX DD", "pair-copy group-divider"),
         th("delta", "Δ $/%", "group-divider"), th("pnl_per_hour", "PNL/HR"), th("avg_trade_pct", "AVG TRADE %"), th("win_rate", "WIN%"),
         th("avg_position_usd", "AVG POS $"), th("max_position_usd", "MAX POS $"), th("avg_entry_notional_usd", "AVG NOTIONAL"), th("pct_entries_ge10", "% ≥ MIN"), th("required_leverage", "REQ LEV"),
         th("last_trade_timestamp_ms", "LAST TRADE", "ops-group"), th("fill_count", "FILLS L/C", "ops-group"), th("exit_count", "EXITS L/C", "ops-group"), th("open_position_count", "POS L/C", "ops-group group-divider"),
-    ]) + "<th>INC / MODEL</th></tr>"
+    ]) + "<th>SETTINGS</th></tr>"
     # Split rows into modelled (shown in main table) and app-model-excluded (shown separately)
     # FILTER_FIX_V3_ACTIVE
     ui_excl = ui.get("wallet_model_exclude", {})
@@ -8616,12 +8799,8 @@ def render_home(state: Dict[str, Any]) -> str:
                 ("lead_equity","LEAD EQ"), ("copy_equity","COPY EQ"),
                 ("lead_real","LEAD REAL"), ("copy_real","COPY REAL"),
                 ("lead_unreal","LEAD UNREAL"), ("copy_unreal","COPY UNREAL"),
-                ("lead_dd","LEAD DD"), ("copy_dd","COPY DD"),
-                ("lead_maxdd","LEAD MAXDD"), ("copy_maxdd","COPY MAXDD"),
-                ("true_dd_status","TRUE DD STATUS"),
-                ("true_ts_dd_now_usd","TRUE DD NOW $"), ("true_ts_dd_now_pct","TRUE DD NOW %"),
-                ("true_ts_max_dd_usd","TRUE MAX DD $"), ("true_ts_max_dd_pct","TRUE MAX DD %"),
-                ("all_time_true_max_dd_usd","ALL-TIME TRUE MAX DD $"), ("all_time_true_max_dd_pct","ALL-TIME TRUE MAX DD %"),
+                ("lead_dd","LEAD DD NOW"), ("copy_dd","COPY DD NOW"),
+                ("lead_maxdd","LEAD MAX DD"), ("copy_maxdd","COPY MAX DD"),
                 ("delta","Δ $"), ("pnl_per_hour","PNL/HR"),
                 ("avg_trade_pct","AVG TRADE %"), ("win_rate","WIN%"),
                 ("avg_position_usd","AVG POS $"), ("max_position_usd","MAX POS $"),
@@ -8684,7 +8863,7 @@ def render_home(state: Dict[str, Any]) -> str:
     prop_selected = "selected" if _saved_mode == "proportional" else ""
     fixed_selected = "selected" if _saved_mode == "fixed" else ""
     min_checked = "checked" if parse_bool(ui.get("min_trade_notional_enabled", False)) else ""
-    return banner + HTML_TEMPLATE.format(updated=state.get("updated_at", ""), source_file=APP_SOURCE_FILE, norm=base, mode=_saved_mode.upper(), fixed=fnum(ui.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL), min_checked=min_checked, fee=fnum(ui.get("fee_bps"), DEFAULT_FEE_BPS), friction=fnum(ui.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS), cards=cards, chart=render_chart(state.get("portfolio_history", []), state.get("true_drawdown_history", []), true_counts), wallet_count=modelled_count, table_head=table_head, table_rows=body_rows, raw_boundary=state.get("engine_truth_boundary", ""), filter_panel=filter_panel, excluded_section=excluded_section, prop_selected=prop_selected, fixed_selected=fixed_selected, LAST_TRADE_SSE_SCRIPT=LAST_TRADE_SSE_SCRIPT)
+    return banner + HTML_TEMPLATE.format(updated=state.get("updated_at", ""), source_file=APP_SOURCE_FILE, norm=base, mode=_saved_mode.upper(), fixed=fnum(ui.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL), min_checked=min_checked, fee=fnum(ui.get("fee_bps"), DEFAULT_FEE_BPS), friction=fnum(ui.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS), cards=cards, proof_status=build_proof_status_block(), chart=render_chart(state.get("portfolio_history", []), state.get("true_drawdown_history", []), true_counts), wallet_count=modelled_count, table_head=table_head, table_rows=body_rows, raw_boundary=state.get("engine_truth_boundary", ""), filter_panel=filter_panel, excluded_section=excluded_section, equity_refresh_notice=equity_refresh_notice, prop_selected=prop_selected, fixed_selected=fixed_selected, LAST_TRADE_SSE_SCRIPT=LAST_TRADE_SSE_SCRIPT)
 
 
 def extract_num(s: str) -> float:
@@ -8755,30 +8934,16 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
     copy_maxdd_label = str(r.get("copy_maxdd_effective_source_key") or "BLOCKED")
     lead_maxdd_title = html.escape(f"Effective MaxDD source: {lead_maxdd_source}. Realised closedPnl diagnostic: {money(-lead_realised_diag_raw)}")
     copy_maxdd_title = html.escape(f"Effective MaxDD source: {copy_maxdd_source}. Realised closedPnl diagnostic: {money(-copy_realised_diag_raw)}")
-    true_ts_now_usd = r.get("true_ts_dd_now_usd")
-    true_ts_now_pct = r.get("true_ts_dd_now_pct")
-    true_ts_usd = r.get("true_ts_max_dd_usd")
-    true_ts_pct = r.get("true_ts_max_dd_pct")
-    all_time_true_usd = r.get("all_time_true_max_dd_usd")
-    all_time_true_pct = r.get("all_time_true_max_dd_pct")
-    true_ts_points = inum(r.get("true_ts_points"), 0)
-    true_ts_window_points = inum(r.get("true_ts_window_points"), 0)
-    true_ts_source_raw = str(r.get("true_ts_source") or "missing:data/equity_curves")
-    true_ts_status = str(r.get("true_ts_status") or "missing_window_true_curve")
-    true_warning_label = _true_dd_status_label(true_ts_status)
-    true_ts_title = html.escape(
-        f"TRUE DD source: {true_ts_source_raw}; status={true_ts_status}; "
-        f"curve_points={true_ts_window_points}; loaded_points={true_ts_points}; "
-        f"window_start_ms={r.get('true_ts_window_start_ms')}; window_end_ms={r.get('true_ts_window_end_ms')}; "
-        f"latest_true_ms={r.get('true_ts_latest_ms')}; freshness_tolerance_ms={TRUE_CURVE_FRESHNESS_TOLERANCE_MS}"
-    )
     last_trade_age, last_trade_cls, last_trade_title = age_ms_label(r.get("last_trade_timestamp_ms"))
     eff_mode = str(r.get("effective_copy_mode") or ui.get("copy_mode", "proportional"))
     eff_base = fnum(r.get("effective_norm_base"), fnum(r.get("alloc"), base)); eff_fixed = fnum(r.get("effective_fixed_notional"), fnum(ui.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL)); eff_leader_base = fnum(r.get("effective_leader_equity_base"), eff_base)
-    # Do not re-open and normalise the full source curve while rendering.  The
-    # row summary above is already proof-windowed and is the sole DD contract.
-    true_curve_dd_usd = true_ts_now_usd if true_ts_status == "ok" else None
-    true_curve_title = html.escape(f"TRUE CURVE DD from the 8014 proof window for {wallet}; pre-baseline history excluded")
+    eff_leader_text = f"{eff_leader_base:.4f}".rstrip("0").rstrip(".")
+    if abs(eff_leader_base) >= 1_000_000:
+        eff_leader_short = f"${eff_leader_base / 1_000_000:.2f}m"
+    elif abs(eff_leader_base) >= 1_000:
+        eff_leader_short = f"${eff_leader_base / 1_000:.1f}k"
+    else:
+        eff_leader_short = f"${eff_leader_base:,.2f}"
     override_badge = " *" if r.get("wallet_config") else ""; included = bool(r.get("include_in_portfolio", True))
     lc_counts = wallet_lead_copy_counts(r, state)
     no_closed_trades = inum(r.get("exit_count"), 0) == 0
@@ -8794,17 +8959,10 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
         _delta_cell = f'<td class="group-divider zero muted" data-sort="0" data-field="delta.equity" title="Copy tracks leader model exactly — no execution drag modeled. Set copy friction bps &gt; 0 to model slippage.">—</td>'
     else:
         _delta_cell = core_td(r, _delta_data, _delta_eq_raw, dual(fnum(_delta_eq_raw), alloc), f"group-divider {css_class(_delta_eq_raw)}", "delta.equity")
-    status_text = "VALID" if true_ts_status == "ok" else "STALE" if true_ts_status == "stale_true_curve" else "MISSING WINDOW"
-    status_sort = 1 if true_ts_status == "ok" else -1
-    promotion_text = "PROMOTION READY" if true_ts_status == "ok" else "NOT PROMOTION READY"
-    true_status_cell = f'<td class="true-ts-dd {"pos" if true_ts_status == "ok" else "neg"}" data-sort="{status_sort}" data-field="true_dd_status" data-promotion-status="{html.escape(promotion_text)}" title="{true_ts_title}; {html.escape(promotion_text)}">{html.escape(status_text)}</td>'
-    def true_window_td(field: str, value: Any, content: str, cls: str = "") -> str:
-        if true_ts_status == "ok" and value is not None:
-            return core_td(r, True, value, f'<span title="{true_ts_title}">{content}</span>', f"true-ts-dd {cls} {css_class(value)}", field)
-        return f'<td class="true-ts-dd {cls} neg" data-sort="-999999999" data-field="{html.escape(field)}" title="{true_ts_title}">BLOCKED</td>'
     inc_cell = ""
     cfg_cell = ""
     purge_cell = ""
+    equity_refresh_cell = ""
     meta_link = ""
     meta_badge = ""
     wallet_color_cls = ""
@@ -8827,47 +8985,58 @@ def render_row(r: Dict[str, Any], base: float, ui: Dict[str, Any], state: Option
         wallet_cfg = r.get("wallet_config") if isinstance(r.get("wallet_config"), dict) else {}
         cfg_mode = str(wallet_cfg.get("copy_mode") or "").lower()
         leader_base_locked = parse_bool(wallet_cfg.get("leader_equity_base_locked", False))
-        cfg_cell = f"""<form action="/api/wallet-config" method="post" class="wallet-cfg"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><select name="copy_mode"><option value="" {'selected' if not cfg_mode else ''}>global</option><option value="proportional" {'selected' if cfg_mode == 'proportional' else ''}>prop</option><option value="fixed" {'selected' if cfg_mode == 'fixed' else ''}>fixed</option></select><input name="norm_base" value="{eff_base:g}" size="5" title="wallet normalisation base"><input name="leader_equity_base" value="{eff_leader_base:g}" size="5" title="current leader equity; used automatically at each fill unless LOCK is checked"><label class="small" title="Lock proportional sizing to this fixed leader equity instead of timestamp-aligned account equity"><input type="checkbox" name="leader_equity_base_locked" value="1" {'checked' if leader_base_locked else ''}>LOCK</label><input name="fixed_notional" value="{eff_fixed:g}" size="4" title="wallet fixed/min $"><button title="save wallet override">Set</button></form>"""
+        source_age_seconds = r.get("effective_leader_equity_base_source_age_seconds")
+        source_age_text = "unknown age"
+        if isinstance(source_age_seconds, (int, float)):
+            source_age_text = f"{source_age_seconds / 86400:.1f}d old" if source_age_seconds >= 86400 else f"{source_age_seconds / 3600:.1f}h old"
+        source_ts_ms = inum(r.get("effective_leader_equity_base_source_timestamp_ms"), 0)
+        source_when = datetime.fromtimestamp(source_ts_ms / 1000, tz=timezone.utc).isoformat() if source_ts_ms else "no source timestamp"
+        source_name = str(r.get("effective_leader_equity_base_source") or "cached account history")
+        source_stale = bool(r.get("effective_leader_equity_base_source_stale", False))
+        equity_state = "LOCKED" if leader_base_locked else ("STALE" if source_stale else "AUTO")
+        equity_title = html.escape(f"{source_name}; {source_when}; {source_age_text}; full value ${eff_leader_base:,.4f}")
+        cfg_cell = f"""<form action="/api/wallet-config" method="post" class="wallet-cfg"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><label>Mode<select name="copy_mode"><option value="" {'selected' if not cfg_mode else ''}>global</option><option value="proportional" {'selected' if cfg_mode == 'proportional' else ''}>prop</option><option value="fixed" {'selected' if cfg_mode == 'fixed' else ''}>fixed</option></select></label><label>Norm $<input name="norm_base" type="number" step="any" value="{eff_base:g}" title="wallet normalisation base"></label><label>Leader equity $<input name="leader_equity_base" type="number" step="any" value="{eff_leader_text}" {'readonly' if not leader_base_locked else ''} title="{equity_title}"></label><label class="lock-label" title="Lock proportional sizing to this fixed leader equity instead of timestamp-aligned account equity"><input type="checkbox" name="leader_equity_base_locked" value="1" {'checked' if leader_base_locked else ''}>LOCK</label><label>Fixed/min $<input name="fixed_notional" type="number" step="any" value="{eff_fixed:g}" title="wallet fixed/min $"></label><button title="save wallet override">Save</button></form>"""
+        equity_refresh_cell = f"""<form action="/api/wallet-equity-refresh" method="post" class="equity-refresh-form"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><button title="Fetch this wallet's latest Hyperliquid portfolio history, then rebuild the model" {'disabled' if leader_base_locked else ''}>Refresh equity</button></form>"""
         purge_cell = f"""<form action="/api/admin/purge-wallet" method="post" class="purge-form" title="ADMIN MAINTENANCE ONLY: permanently purge wallet"><input type="hidden" name="wallet" value="{html.escape(wallet)}"><button class="purge-btn" title="purge wallet" onclick="var b=this;if(b.dataset.step){{fetch('/api/admin/purge-wallet',{{method:'POST',body:new FormData(b.form),headers:{{'X-Requested-With':'fetch'}}}}).then(function(r){{if(!r.ok)throw new Error('Purge failed');location.reload()}}).catch(function(e){{alert('Purge failed: '+e.message);b.dataset.step='';b.textContent='PURGE';b.classList.remove('confirming')}})}}else{{b.dataset.step='1';b.textContent='CONFIRM?';b.classList.add('confirming');setTimeout(function(){{b.dataset.step='';b.textContent='PURGE';b.classList.remove('confirming')}},3000)}};return false">PURGE</button></form>"""
         meta_link = f'<a href="/wallet-meta/{html.escape(wallet)}" class="meta-edit-link" title="Edit wallet tag / color / note">Meta</a>'
     row_cls = 'user' if r.get('is_user_wallet') else ''
     if not r.get('is_user_wallet') and not included: row_cls += ' excluded-row'
     if r.get('app_model_excluded'): row_cls += ' model-excluded-row'
     wallet_sort = html.escape(wallet)
+    if r.get("is_user_wallet"):
+        controls_content = f'<details class="wallet-settings"><summary>⚙ Base</summary><div class="wallet-settings-panel">{cfg_cell}</div></details>'
+    else:
+        controls_content = f'<details class="wallet-settings"><summary title="{equity_title}">⚙ {equity_state} {eff_leader_short}</summary><div class="wallet-settings-panel">{cfg_cell}<div class="wallet-settings-actions">{equity_refresh_cell}{meta_link}{purge_cell}</div></div></details>'
     return f"""
     <tr class="{row_cls}">
-      <td class="sticky-wallet{wallet_color_cls}" data-sort="{wallet_sort}"{wallet_title}><a href="/wallet/{wallet}">{wallet[:8]}…{wallet[-6:]}</a>{badge}{meta_badge}</td>
+      <td class="sticky-wallet{wallet_color_cls}" data-sort="{wallet_sort}"{wallet_title}><a href="/wallet/{wallet}">{wallet[:8]}…{wallet[-6:]}</a>{badge}{meta_badge}{inc_cell}</td>
       {core_td(r, isinstance(lead, dict) and 'equity' in lead, lead_pnl, money(lead.get('equity')), f"pair-lead {css_class(lead_pnl)}", "lead.equity")}{core_td(r, isinstance(copy, dict) and 'equity' in copy, copy_pnl, money(copy.get('equity')), f"pair-copy group-divider {css_class(copy_pnl)}", "copy.equity")}
       {core_td(r, isinstance(lead, dict) and 'realized' in lead, lead.get('realized'), dual(fnum(lead.get('realized')), alloc), f"pair-lead {css_class(lead.get('realized'))}", "lead.realized")}{core_td(r, isinstance(copy, dict) and 'realized' in copy, copy.get('realized'), dual(fnum(copy.get('realized')), alloc), f"pair-copy group-divider {css_class(copy.get('realized'))}", "copy.realized")}
       {core_td(r, isinstance(lead, dict) and 'unrealized' in lead, lead.get('unrealized'), dual(fnum(lead.get('unrealized')), alloc), f"pair-lead {css_class(lead.get('unrealized'))}", "lead.unrealized")}{core_td(r, isinstance(copy, dict) and 'unrealized' in copy, copy.get('unrealized'), dual(fnum(copy.get('unrealized')), alloc), f"pair-copy group-divider {css_class(copy.get('unrealized'))}", "copy.unrealized")}
       {core_td(r, isinstance(lead, dict) and ('drawdown' in lead or 'drawdown_usd' in lead), lead_dd_val, format_dd(lead_dd_raw, alloc), f"pair-lead {css_class(lead_dd_val)}", "lead.drawdown")}{core_td(r, isinstance(copy, dict) and ('drawdown' in copy or 'drawdown_usd' in copy), copy_dd_val, format_dd(copy_dd_raw, alloc), f"pair-copy group-divider {css_class(copy_dd_val)}", "copy.drawdown")}
       {core_td(r, r.get("lead_maxdd_effective_usd") is not None or (isinstance(lead, dict) and ('max_drawdown' in lead or 'maxdd' in lead)), lead_maxdd_val, f'<span title="{lead_maxdd_title}">{format_dd(lead_maxdd_raw, alloc)}</span>', f"pair-lead {css_class(lead_maxdd_val)}", "lead.maxdd.effective")}{core_td(r, r.get("copy_maxdd_effective_usd") is not None or (isinstance(copy, dict) and ('max_drawdown' in copy or 'maxdd' in copy)), copy_maxdd_val, f'<span title="{copy_maxdd_title}">{format_dd(copy_maxdd_raw, alloc)}</span>', f"pair-copy group-divider {css_class(copy_maxdd_val)}", "copy.maxdd.effective")}
-      {true_status_cell}
-      {core_td(r, true_curve_dd_usd is not None, true_curve_dd_usd, f'<span title="{true_curve_title}">{money(true_curve_dd_usd)}</span>', f"true-ts-dd {css_class(true_curve_dd_usd)}", "true_curve_dd_usd")}
-      {true_window_td("true_ts_dd_now_usd", true_ts_now_usd, money(true_ts_now_usd))}{true_window_td("true_ts_dd_now_pct", true_ts_now_pct, pct(true_ts_now_pct, 2))}
-      {true_window_td("true_ts_max_dd_usd", true_ts_usd, money(true_ts_usd))}{true_window_td("true_ts_max_dd_pct", true_ts_pct, pct(true_ts_pct, 2), "group-divider")}
-      {true_window_td("all_time_true_max_dd_usd", all_time_true_usd, f'<span title="ALL-TIME TRUE MAX DD within the 8014 proof baseline; pre-baseline history excluded">{money(all_time_true_usd)}</span>')}{true_window_td("all_time_true_max_dd_pct", all_time_true_pct, f'<span title="ALL-TIME TRUE MAX DD within the 8014 proof baseline; pre-baseline history excluded">{pct(all_time_true_pct, 2)}</span>', "group-divider")}
       {_delta_cell}{pnl_hr_cell}
       {avg_trade_pct_cell}{win_rate_cell}
       {core_td(r, 'avg_position_usd' in r, r.get('avg_position_usd'), money(r.get('avg_position_usd')), css_class(r.get('avg_position_usd')), "avg_position_usd")}{core_td(r, 'max_position_usd' in r, r.get('max_position_usd'), money(r.get('max_position_usd')), css_class(r.get('max_position_usd')), "max_position_usd")}
       {core_td(r, 'avg_entry_notional_usd' in r, r.get('avg_entry_notional_usd'), money(r.get('avg_entry_notional_usd')), css_class(r.get('avg_entry_notional_usd')), "avg_entry_notional_usd")}{core_td(r, 'pct_entries_ge10' in r, r.get('pct_entries_ge10'), pct(r.get('pct_entries_ge10')), css_class(r.get('pct_entries_ge10')), "pct_entries_ge10")}{core_td(r, 'required_leverage' in r, r.get('required_leverage'), f"{fnum(r.get('required_leverage')):.2f}x", css_class(r.get('required_leverage')), "required_leverage")}
       <td class="ops-group {last_trade_cls}" data-sort="{fnum(r.get('last_trade_timestamp_ms'))}" data-field="last_trade_timestamp_ms" data-lt-wallet="{html.escape(str(r.get('wallet', '')))}" title="{html.escape(last_trade_title)}">{html.escape(last_trade_age)}</td>
       {lc_cell(r, lc_counts['fills'], "ops-group")}{lc_cell(r, lc_counts['exits'], "ops-group")}{lc_cell(r, lc_counts['pos'], "ops-group group-divider")}
-      <td class="controls-cell {'inc-off' if (not r.get('is_user_wallet') and not included) else ''}">{inc_cell}{cfg_cell}{purge_cell}{meta_link}</td>
+      <td class="controls-cell {'inc-off' if (not r.get('is_user_wallet') and not included) else ''}">{controls_content}</td>
     </tr>"""
 
 HTML_TEMPLATE = """
 <!doctype html><html><head><meta charset="utf-8"><title>Wallet Proof Engine</title>
 <style>
-body{{margin:0;background:#0d1117;color:#c9d1d9;font:12px Arial,Helvetica,sans-serif}} a{{color:#58a6ff;text-decoration:none}} .top{{display:flex;align-items:center;gap:12px;padding:8px 14px;border-bottom:1px solid #222;background:#090d12;position:sticky;top:0;z-index:4;box-shadow:0 2px 8px rgba(0,0,0,.25)}} .live{{background:#003d1f;color:#2ea043;border:1px solid #2ea043;border-radius:12px;padding:2px 8px;font-size:10px}} .muted{{color:#8b949e}} input,select,button{{background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:3px 8px}} button{{cursor:pointer}}
-.cards{{display:grid;grid-template-columns:repeat(9,minmax(130px,1fr));gap:8px;padding:10px 14px}} .card{{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:9px;min-height:72px}} .group-card .label{{font-size:10px;color:#8b949e;margin-bottom:6px;border-bottom:1px solid #21262d;padding-bottom:4px}} .metric-line{{display:flex;justify-content:space-between;gap:8px;line-height:1.55}} .metric-line span{{color:#8b949e}} .metric-line b{{font-weight:700}} .pos{{color:#2ea043}} .warn{{color:#d29922}} .neg{{color:#ff4d4f}} .zero{{color:#c9d1d9}}
-.section{{padding:0 14px 10px}} .panel{{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:10px;margin-bottom:12px}} .chart-wrap{{position:relative;cursor:zoom-in}} .chart-wrap.expanded{{position:relative;z-index:20}} .chart-wrap.expanded .chart{{height:76vh}} .chart{{width:100%;height:260px;background:#151a21}} .chart *{{vector-effect:non-scaling-stroke}} .pnl-line{{fill:none;stroke:#2ea043;stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}} .realized-line{{fill:none;stroke:#58a6ff;stroke-width:1.4;stroke-linejoin:round;stroke-linecap:round}} .dd-line{{fill:none;stroke:#ff4d4f;stroke-width:1.4;stroke-linejoin:round;stroke-linecap:round}} .true-dd-line{{fill:none;stroke:#d2a8ff;stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round;stroke-dasharray:5 4}} .true-curve-dd-line{{fill:none;stroke:#f2cc60;stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}} .true-dd-blocked .legend-true-dd{{color:#f85149}} .chart-blocked-overlay{{position:absolute;z-index:2;top:10px;left:76px;right:18px;display:flex;gap:8px;align-items:center;padding:7px 9px;border:1px solid rgba(248,81,73,.55);background:rgba(13,17,23,.88);color:#f85149;font-size:12px;pointer-events:none}} .chart-blocked-overlay span{{color:#c9d1d9}} .zero-line{{stroke:#8b949e;stroke-width:1}} .grid-line,.grid-vert{{stroke:#21262d;stroke-width:1}} .axis-label{{fill:#8b949e;font-size:10px}} .hit{{fill:transparent;stroke:none;pointer-events:all}} .crosshair{{stroke:#8b949e;stroke-width:1;stroke-dasharray:3 3;pointer-events:none}} .chart-dot{{fill:#c9d1d9;stroke:#0d1117;stroke-width:1.2;pointer-events:none}} .chart-tip{{position:absolute;left:10px;top:10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:5px 7px;color:#c9d1d9;font-size:11px;pointer-events:none;box-shadow:0 4px 12px rgba(0,0,0,.35)}} .chart-legend{{display:flex;gap:10px;align-items:center;margin-top:6px}} .legend-pnl{{color:#2ea043}} .legend-realized{{color:#58a6ff}} .legend-dd{{color:#ff4d4f}} .legend-true-dd{{color:#d2a8ff}} .legend-true-curve-dd{{color:#f2cc60}}
-.table-wrap{{border:1px solid #21262d;border-radius:6px;background:#0d1117}} table{{width:100%;border-collapse:separate;border-spacing:0;font-size:11px}} th{{position:sticky;top:0;background:#21262d;color:#8b949e;text-align:right;padding:7px;border-bottom:1px solid #30363d;z-index:2}} th:first-child,td:first-child{{text-align:left}} th.sort-active{{background:#303a49;color:#fff;box-shadow:inset 0 -2px 0 #58a6ff}} th.sort-active a{{color:#fff}} th a{{display:block;color:#8b949e}} td{{padding:6px;border-bottom:1px solid #21262d;text-align:right;white-space:nowrap}} tr:nth-child(even){{background:#111820}} tr.user{{background:#071527}} tr:hover{{background:#1b2330}} tr.excluded-row{{}}
-.sticky-wallet{{position:sticky;left:0;z-index:3;background:inherit;min-width:132px;border-right:1px solid #30363d}} th.sticky-wallet{{z-index:4;background:#21262d}} .sticky-wallet.wallet-color-blue{{background:linear-gradient(90deg,rgba(88,166,255,.34),rgba(13,17,23,.96))!important;border-left:4px solid #58a6ff}} .sticky-wallet.wallet-color-green{{background:linear-gradient(90deg,rgba(46,160,67,.34),rgba(13,17,23,.96))!important;border-left:4px solid #2ea043}} .sticky-wallet.wallet-color-yellow{{background:linear-gradient(90deg,rgba(210,153,34,.36),rgba(13,17,23,.96))!important;border-left:4px solid #d29922}} .sticky-wallet.wallet-color-red{{background:linear-gradient(90deg,rgba(255,77,79,.34),rgba(13,17,23,.96))!important;border-left:4px solid #ff4d4f}} .sticky-wallet.wallet-color-purple{{background:linear-gradient(90deg,rgba(163,113,247,.34),rgba(13,17,23,.96))!important;border-left:4px solid #a371f7}} .pair-lead{{background:rgba(88,166,255,.045)}} .pair-copy{{background:rgba(46,160,67,.045)}} .ops-group{{background:rgba(210,153,34,.05)}} .group-divider{{border-right:2px solid #30363d!important}} .badge{{background:#0d419d;color:#fff;border-radius:3px;padding:1px 4px;font-size:9px}} .wallet-tag{{background:#30363d;color:#c9d1d9;border-radius:3px;padding:1px 4px;font-size:9px}} .mode{{background:#063d1f;color:#2ea043;border-radius:3px;padding:2px 6px}} .wallet-cfg{{display:inline-flex;gap:3px;margin-left:4px;align-items:center}} .wallet-cfg input{{width:48px;padding:1px 3px}} .wallet-cfg select{{width:70px;padding:1px 3px}} .wallet-cfg button{{padding:1px 4px}} .inc-form{{display:inline-flex;align-items:center;gap:2px;margin-right:6px}} .inc-form input{{padding:0;width:14px;height:14px}} .purge-form{{display:inline-flex;margin-left:4px;align-items:center}} .purge-btn{{border-color:#8b1d1d;background:#3a1111;color:#ff7b72;padding:1px 5px;font-size:10px}} .excl-form{{display:inline-flex;margin-left:4px;align-items:center}} .excl-btn{{border-color:#665500;background:#332900;color:#d29922;padding:1px 5px;font-size:10px}} .restore-btn{{border-color:#005566;background:#002a33;color:#58a6ff;padding:1px 5px;font-size:10px}} .inc-off{{opacity:1}} .controls-cell{{min-width:340px;text-align:left}} .small{{font-size:11px;color:#8b949e}} .missing{{color:#6e7681!important}} .selected-divider td{{background:#0d1117;border-top:2px solid #58a6ff;border-bottom:1px solid #30363d;color:#8b949e;text-align:left;font-size:10px;letter-spacing:.04em;text-transform:uppercase;padding:6px 8px}} .saving{{opacity:.65}} .saved-flash{{color:#2ea043}} .chart-empty{{height:230px;display:flex;align-items:center;justify-content:center;color:#8b949e}}
+body{{margin:0;background:#0d1117;color:#c9d1d9;font:12px Arial,Helvetica,sans-serif}} a{{color:#58a6ff;text-decoration:none}} .top{{display:flex;align-items:center;gap:9px;padding:7px 12px;border-bottom:1px solid #222;background:#090d12;position:sticky;top:0;z-index:4;box-shadow:0 2px 8px rgba(0,0,0,.25);flex-wrap:wrap}} .live{{background:#003d1f;color:#2ea043;border:1px solid #2ea043;border-radius:12px;padding:2px 8px;font-size:10px}} .muted{{color:#8b949e}} input,select,button{{background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:3px 8px}} button{{cursor:pointer}}
+.cards{{display:grid;grid-template-columns:repeat(8,minmax(130px,1fr));gap:8px;padding:10px 14px}} .card{{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:9px;min-height:72px}} .group-card .label{{font-size:10px;color:#8b949e;margin-bottom:6px;border-bottom:1px solid #21262d;padding-bottom:4px}} .metric-line{{display:flex;justify-content:space-between;gap:8px;line-height:1.55}} .metric-line span{{color:#8b949e}} .metric-line b{{font-weight:700}} .pos{{color:#2ea043}} .warn{{color:#d29922}} .neg{{color:#ff4d4f}} .zero{{color:#c9d1d9}}
+.section{{padding:0 14px 10px}} .panel{{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:10px;margin-bottom:12px}} .chart-wrap{{position:relative;cursor:zoom-in}} .chart-wrap.expanded{{position:relative;z-index:20}} .chart-wrap.expanded .chart{{height:76vh}} .chart{{width:100%;height:260px;background:#151a21}} .chart *{{vector-effect:non-scaling-stroke}} .pnl-line{{fill:none;stroke:#2ea043;stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}} .realized-line{{fill:none;stroke:#58a6ff;stroke-width:1.4;stroke-linejoin:round;stroke-linecap:round}} .dd-line{{fill:none;stroke:#ff4d4f;stroke-width:1.4;stroke-linejoin:round;stroke-linecap:round}} .true-dd-line{{fill:none;stroke:#d2a8ff;stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round;stroke-dasharray:5 4}} .true-dd-blocked .legend-true-dd{{color:#f85149}} .chart-blocked-overlay{{position:absolute;z-index:2;top:10px;left:76px;right:18px;display:flex;gap:8px;align-items:center;padding:7px 9px;border:1px solid rgba(248,81,73,.55);background:rgba(13,17,23,.88);color:#f85149;font-size:12px;pointer-events:none}} .chart-blocked-overlay span{{color:#c9d1d9}} .zero-line{{stroke:#8b949e;stroke-width:1}} .grid-line,.grid-vert{{stroke:#21262d;stroke-width:1}} .axis-label{{fill:#8b949e;font-size:10px}} .hit{{fill:transparent;stroke:none;pointer-events:all}} .crosshair{{stroke:#8b949e;stroke-width:1;stroke-dasharray:3 3;pointer-events:none}} .chart-dot{{fill:#c9d1d9;stroke:#0d1117;stroke-width:1.2;pointer-events:none}} .chart-tip{{position:absolute;left:10px;top:10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:5px 7px;color:#c9d1d9;font-size:11px;pointer-events:none;box-shadow:0 4px 12px rgba(0,0,0,.35)}} .chart-legend{{display:flex;gap:10px;align-items:center;margin-top:6px}} .legend-pnl{{color:#2ea043}} .legend-realized{{color:#58a6ff}} .legend-dd{{color:#ff4d4f}} .legend-true-dd{{color:#d2a8ff}}
+.table-wrap{{border:1px solid #21262d;border-radius:6px;background:#0d1117;overflow-x:auto;max-width:100%}} table{{width:100%;border-collapse:separate;border-spacing:0;font-size:10px}} th{{position:sticky;top:0;background:#21262d;color:#8b949e;text-align:right;padding:4px 3px;border-bottom:1px solid #30363d;z-index:2;line-height:1.05}} th:first-child,td:first-child{{text-align:left}} th.sort-active{{background:#303a49;color:#fff;box-shadow:inset 0 -2px 0 #58a6ff}} th.sort-active a{{display:block;color:#fff}} th a{{display:block;color:#8b949e;white-space:normal}} td{{padding:3px;border-bottom:1px solid #21262d;text-align:right;white-space:nowrap}} tr:nth-child(even){{background:#111820}} tr.user{{background:#071527}} tr:hover{{background:#1b2330}} tr.excluded-row{{}}
+.sticky-wallet{{position:sticky;left:0;z-index:3;background:inherit;min-width:118px;border-right:1px solid #30363d}} th.sticky-wallet{{z-index:4;background:#21262d}} .sticky-wallet.wallet-color-blue{{background:linear-gradient(90deg,rgba(88,166,255,.34),rgba(13,17,23,.96))!important;border-left:4px solid #58a6ff}} .sticky-wallet.wallet-color-green{{background:linear-gradient(90deg,rgba(46,160,67,.34),rgba(13,17,23,.96))!important;border-left:4px solid #2ea043}} .sticky-wallet.wallet-color-yellow{{background:linear-gradient(90deg,rgba(210,153,34,.36),rgba(13,17,23,.96))!important;border-left:4px solid #d29922}} .sticky-wallet.wallet-color-red{{background:linear-gradient(90deg,rgba(255,77,79,.34),rgba(13,17,23,.96))!important;border-left:4px solid #ff4d4f}} .sticky-wallet.wallet-color-purple{{background:linear-gradient(90deg,rgba(163,113,247,.34),rgba(13,17,23,.96))!important;border-left:4px solid #a371f7}} .pair-lead{{background:rgba(88,166,255,.045)}} .pair-copy{{background:rgba(46,160,67,.045)}} .ops-group{{background:rgba(210,153,34,.05)}} .group-divider{{border-right:2px solid #30363d!important}} .badge{{background:#0d419d;color:#fff;border-radius:3px;padding:1px 4px;font-size:9px}} .wallet-tag{{background:#30363d;color:#c9d1d9;border-radius:3px;padding:1px 4px;font-size:9px}} .mode{{background:#063d1f;color:#2ea043;border-radius:3px;padding:2px 6px}} .wallet-cfg{{display:grid;grid-template-columns:repeat(2,minmax(120px,1fr));gap:6px;align-items:end}} .wallet-cfg label{{display:grid;gap:2px;color:#8b949e;font-size:10px}} .wallet-cfg input[type="number"]{{width:128px;padding:3px 5px}} .wallet-cfg input[readonly]{{color:#d29922;background:#111820}} .wallet-cfg select{{width:128px;padding:3px 5px}} .wallet-cfg button{{padding:3px 8px}} .lock-label{{display:flex!important;align-items:center;gap:4px}} .inc-form{{display:inline-flex;align-items:center;gap:1px;margin-left:5px}} .inc-form input{{padding:0;width:13px;height:13px}} .purge-form,.equity-refresh-form{{display:inline-flex;align-items:center}} .purge-btn{{border-color:#8b1d1d;background:#3a1111;color:#ff7b72;padding:1px 5px;font-size:10px}} .excl-form{{display:inline-flex;margin-left:4px;align-items:center}} .excl-btn{{border-color:#665500;background:#332900;color:#d29922;padding:1px 5px;font-size:10px}} .restore-btn{{border-color:#005566;background:#002a33;color:#58a6ff;padding:1px 5px;font-size:10px}} .inc-off{{opacity:1}} .controls-cell{{min-width:112px;text-align:left;vertical-align:top}} .wallet-settings summary,.global-settings summary{{cursor:pointer;list-style:none;color:#58a6ff;white-space:nowrap}} .wallet-settings summary::-webkit-details-marker,.global-settings summary::-webkit-details-marker{{display:none}} .wallet-settings[open]{{min-width:300px}} .wallet-settings-panel{{margin-top:6px;padding:7px;background:#111820;border:1px solid #30363d;border-radius:5px}} .wallet-settings-actions{{display:flex;gap:8px;align-items:center;margin-top:7px;border-top:1px solid #30363d;padding-top:6px}} .global-settings{{position:relative}} .global-settings[open]{{flex-basis:100%}} .global-settings form{{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:6px 0}} .table-toolbar{{display:flex;justify-content:flex-end;margin:0 0 5px}} .table-toolbar button{{font-size:10px;padding:2px 7px}} .small{{font-size:11px;color:#8b949e}} .missing{{color:#6e7681!important}} .selected-divider td{{background:#0d1117;border-top:2px solid #58a6ff;border-bottom:1px solid #30363d;color:#8b949e;text-align:left;font-size:10px;letter-spacing:.04em;text-transform:uppercase;padding:6px 8px}} .saving{{opacity:.65}} .saved-flash{{color:#2ea043}} .chart-empty{{height:230px;display:flex;align-items:center;justify-content:center;color:#8b949e}}
 .filter-panel{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;margin-bottom:8px}} .filter-summary{{cursor:pointer;font-size:11px;color:#c9d1d9;list-style:none}} .filter-summary::-webkit-details-marker{{display:none}} .filter-form{{margin-top:8px}} .filter-grid{{display:flex;flex-wrap:wrap;gap:6px 14px;margin-bottom:8px}} .frow{{display:inline-flex;align-items:center;gap:4px;font-size:11px;white-space:nowrap}} .frow b{{color:#8b949e}} .frow input{{width:70px;padding:2px 4px;font-size:11px}} .filter-actions{{display:inline-flex;gap:8px;align-items:center}} .apply-filter-btn{{background:#2d3c1a;border-color:#4d7a2a;color:#7ed651;padding:3px 10px;font-size:11px}} .clear-filter-btn{{background:#161b22;border-color:#30363d;color:#8b949e;padding:3px 10px;font-size:11px}}
 .excluded-section{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;margin-top:8px}} .excl-summary{{cursor:pointer;font-size:11px;color:#d29922;list-style:none}} .excl-summary::-webkit-details-marker{{display:none}} .excl-table{{width:auto;border-collapse:separate;border-spacing:0;font-size:11px;margin-top:6px}} .excl-table th{{background:#21262d;color:#8b949e;padding:4px 10px;text-align:left}} .excl-table td{{padding:4px 10px;border-bottom:1px solid #21262d;text-align:left}} .mono{{font-family:monospace}} .model-excluded-row{{opacity:.55}}
 @media(max-width:1300px){{.cards{{grid-template-columns:repeat(3,minmax(150px,1fr))}}}}
-</style></head><body><div class="top"><b>Wallet Proof Engine</b> <span class="muted">App: Wallet Proof Engine</span><span class="muted">Source: {source_file}</span><span class="muted">Port: 8014</span> <a href="/refresh" class="refresh-btn" title="Rebuild from the latest wallet poll data and refresh the dashboard">⟳ Refresh</a> <span class="live">POLL</span><span class="muted">Updated: {updated}</span><form action="/api/ui-state" method="post" class="ajax-form" style="display:flex;gap:6px;align-items:center;margin:0"><span class="muted">Normalisation Base:</span><input name="norm_base" value="{norm}" size="8"><span class="muted">Mode:</span><select name="copy_mode"><option {prop_selected}>proportional</option><option {fixed_selected}>fixed</option></select><span class="muted">Fixed/Min $:</span><input name="fixed_notional" value="{fixed}" size="6"><label class="muted" title="When checked, model only opens wallet entries/flips whose effective copy notional is at least this wallet's Fixed/Min value."><input type="checkbox" name="min_trade_notional_enabled" value="1" {min_checked}> Min</label><span class="muted">Fee bps:</span><input name="fee_bps" value="{fee}" size="5"><span class="muted">Copy friction bps:</span><input name="copy_friction_bps" value="{friction}" size="5"><button>Set</button></form><span class="muted">Current: {mode}</span><form action="/api/import-copy-candidates" method="post" class="ajax-form" title="Import Wallet Talent Scout export into manual_wallets.txt with dedup"><button>Import Candidates</button></form><span id="save-status" class="muted"></span><span style="margin-left:auto" class="muted">Auto refresh off</span></div><div class="cards">{cards}</div><div class="section"><b>COMBINED PORTFOLIO — NON-USER WALLETS</b><div class="panel">{chart}</div><div class="small">TRACKED WALLETS ({wallet_count} modelled) — model derived in app from engine SSOT only. {raw_boundary}</div>{filter_panel}<div class="table-wrap"><table><thead>{table_head}</thead><tbody>{table_rows}</tbody></table></div>{excluded_section}</div>
+.proof-status{{margin:8px 14px 0;border:1px solid #30363d;border-left:5px solid #8b949e;border-radius:8px;padding:8px 12px;background:#11161d}} .proof-head{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}} .proof-head b{{letter-spacing:.5px}} .proof-pill{{border-radius:12px;padding:2px 10px;font-size:11px;font-weight:700;border:1px solid}} .proof-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:3px 14px}} .proof-item{{display:flex;justify-content:space-between;gap:8px;line-height:1.55}} .proof-item span{{color:#8b949e}} .proof-trusted{{border-left-color:#2ea043}} .proof-trusted .proof-pill{{background:#003d1f;color:#2ea043;border-color:#2ea043}} .proof-converging{{border-left-color:#d29922}} .proof-converging .proof-pill{{background:#3d2f00;color:#d29922;border-color:#d29922}} .proof-unresolved{{border-left-color:#ff4d4f}} .proof-unresolved .proof-pill{{background:#3d0d0f;color:#ff4d4f;border-color:#ff4d4f}} .proof-unknown{{border-left-color:#8b949e}} .proof-unknown .proof-pill{{background:#21262d;color:#c9d1d9;border-color:#8b949e}} b.unknown{{color:#8b949e;font-weight:700}}
+</style></head><body><div class="top"><b>Wallet Proof Engine</b> <span class="muted">App: Wallet Proof Engine</span><span class="muted">Port: 8014</span> <a href="/refresh" class="refresh-btn" title="Refresh equity for selected cohort wallets (except LOCK), then rebuild the model">⟳ Rebuild model</a> <span class="live">POLL</span><span class="muted">Updated: {updated}</span><details class="global-settings"><summary>⚙ Model settings · {mode}</summary><form action="/api/ui-state" method="post" class="ajax-form"><span class="muted">Normalisation Base:</span><input name="norm_base" value="{norm}" size="8"><span class="muted">Mode:</span><select name="copy_mode"><option {prop_selected}>proportional</option><option {fixed_selected}>fixed</option></select><span class="muted">Fixed/Min $:</span><input name="fixed_notional" value="{fixed}" size="6"><label class="muted" title="When checked, model only opens wallet entries/flips whose effective copy notional is at least this wallet's Fixed/Min value."><input type="checkbox" name="min_trade_notional_enabled" value="1" {min_checked}> Min</label><span class="muted">Fee bps:</span><input name="fee_bps" value="{fee}" size="5"><span class="muted">Copy friction bps:</span><input name="copy_friction_bps" value="{friction}" size="5"><button>Set</button></form></details><form action="/api/import-copy-candidates" method="post" class="ajax-form" title="Import Wallet Talent Scout export into manual_wallets.txt with dedup"><button>Import Candidates</button></form><span id="save-status" class="muted">{equity_refresh_notice}</span><span style="margin-left:auto" class="muted">Auto refresh off</span></div>{proof_status}<div class="cards">{cards}</div><div class="section"><b>COMBINED PORTFOLIO — NON-USER WALLETS</b><div class="panel">{chart}</div><div class="small">TRACKED WALLETS ({wallet_count} modelled) — model derived in app from engine SSOT only. {raw_boundary}</div>{filter_panel}<div class="table-wrap"><table id="wallet-table"><thead>{table_head}</thead><tbody>{table_rows}</tbody></table></div>{excluded_section}</div>
 <script>(function(){{
 let busyUntil=0;
 const status=document.getElementById('save-status');
@@ -8888,22 +9057,24 @@ function markBusy(ms){{busyUntil=Date.now()+(ms||12000);}}
 function isBusy(){{return Date.now()<busyUntil||document.activeElement&&['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName);}}
 function flash(msg,cls){{if(!status)return;status.textContent=msg;status.className=cls||'muted';setTimeout(()=>{{status.textContent='';status.className='muted';}},3500);}}
 async function saveModelForm(form, delay){{
-  if(!form)return;
+  if(!form||form.classList.contains('saving'))return;
   markBusy(5000);form.classList.add('saving');
   try{{
     const r=await fetch(form.action,{{method:'POST',body:new FormData(form),headers:{{'X-Requested-With':'fetch'}}}});
-    if(!r.ok)throw new Error('HTTP '+r.status);
     const payload=await r.json().catch(()=>({{}}));
+    if(!r.ok||payload.ok===false)throw new Error(payload.error||('HTTP '+r.status));
     if(payload.model_refresh_required){{
       flash('rebuilding model…','muted');
-      const deadline=Date.now()+20000;
+      const deadline=Date.now()+120000;
+      let ready=false;
       while(Date.now()<deadline){{
         const h=await fetch('/api/cache-health',{{cache:'no-store'}}).then(x=>x.json());
         const rs=h.refresh_status||{{}};
         if(rs.error)throw new Error(rs.error);
-        if(!rs.in_progress&&rs.ok&&h.model_state_present)break;
+        if(!rs.in_progress&&rs.ok&&h.model_state_present){{ready=true;break;}}
         await new Promise(resolve=>setTimeout(resolve,250));
       }}
+      if(!ready){{flash('model rebuild is still running; reload when ready','warn');return;}}
     }}
     saveViewState();
     setTimeout(()=>location.reload(),payload.model_refresh_required?50:(delay||500));
@@ -8948,19 +9119,39 @@ document.addEventListener('focusin',e=>{{if(e.target.matches('input,select,texta
 document.addEventListener('input',e=>{{if(e.target.matches('input,select,textarea'))markBusy(30000);}});
 document.addEventListener('change',e=>{{if(e.target.matches('input,select,textarea'))markBusy(15000);}});
 document.addEventListener('change',async e=>{{
-  const field=e.target.closest('.wallet-cfg select[name="copy_mode"],.wallet-cfg input[name="norm_base"],.wallet-cfg input[name="leader_equity_base"],.wallet-cfg input[name="leader_equity_base_locked"],.wallet-cfg input[name="fixed_notional"],.inc-form input[name="included"]');
+  const lock=e.target.closest('.wallet-cfg input[name="leader_equity_base_locked"]');
+  if(lock&&lock.form){{const equity=lock.form.querySelector('input[name="leader_equity_base"]');if(equity)equity.readOnly=!lock.checked;await saveModelForm(lock.form,450);return;}}
+  const field=e.target.closest('.wallet-cfg select[name="copy_mode"],.wallet-cfg input[name="norm_base"],.wallet-cfg input[name="fixed_notional"],.inc-form input[name="included"]');
   if(!field||!field.form)return;
   e.preventDefault();
   await saveModelForm(field.form,450);
 }});
 document.addEventListener('submit',async e=>{{
-  const form=e.target;if(!form.matches('.ajax-form,.wallet-cfg,.inc-form'))return;
+  const form=e.target;if(!form.matches('.ajax-form,.wallet-cfg,.inc-form,.equity-refresh-form'))return;
   e.preventDefault();
   await saveModelForm(form,800);
   restoreViewState();
 }});
 
+let cohortRebuildPending=false;
 document.addEventListener('click',async e=>{{
+  const rebuild=e.target.closest('a.refresh-btn');
+  if(rebuild){{
+    e.preventDefault();
+    if(cohortRebuildPending)return;
+    if(document.querySelector('.wallet-cfg.saving,.inc-form.saving')){{flash('Settings are saving; rebuild once saved','warn');return;}}
+    cohortRebuildPending=true;rebuild.setAttribute('aria-disabled','true');rebuild.classList.add('saving');
+    saveViewState();
+    if(status)status.textContent='Refreshing selected equity, then rebuilding model…';
+    try{{
+      const r=await fetch(rebuild.href,{{headers:{{'X-Requested-With':'fetch'}}}});
+      const result=await r.json();
+      if(!r.ok||result.ok===false)throw new Error(result.error||('HTTP '+r.status));
+      location.reload();
+    }}catch(err){{flash('Rebuild failed: '+err.message,'neg');}}
+    finally{{cohortRebuildPending=false;rebuild.removeAttribute('aria-disabled');rebuild.classList.remove('saving');}}
+    return;
+  }}
   const sortLink=e.target.closest('th a[href^="/sort/"]');
   if(sortLink){{
     e.preventDefault(); markBusy(2500);
@@ -9000,13 +9191,58 @@ def home() -> HTMLResponse:
     return _model_dashboard_response()
 
 
+def refresh_selected_leader_equities(state: Dict[str, Any], ui: Dict[str, Any]) -> Dict[str, Any]:
+    """Refresh the displayed graph cohort, respecting current INC and LOCK settings."""
+    wallets = sorted({
+        str(row.get("wallet", "")).strip().lower()
+        for row in state.get("wallet_rows", [])
+        if isinstance(row, dict)
+        and not row.get("is_user_wallet")
+        and str(row.get("wallet", "")).strip().lower() != USER_WALLET.lower()
+        and not row.get("app_model_excluded")
+        and not (ui.get("wallet_model_exclude") or {}).get(str(row.get("wallet", "")).lower())
+        and wallet_included(str(row.get("wallet", "")), ui)
+    })
+    summary = {"selected": len(wallets), "refreshed": 0, "locked": 0, "failed": 0, "skipped": 0, "errors": []}
+    for wallet in wallets:
+        # Re-read before each fetch so a freeze or deselection during a long
+        # rate-budget wait also protects wallets that have not been fetched yet.
+        current_ui = load_ui_state()
+        if not wallet_included(wallet, current_ui) or (current_ui.get("wallet_model_exclude") or {}).get(wallet):
+            summary["skipped"] += 1
+            continue
+        if parse_bool(((current_ui.get("wallet_config") or {}).get(wallet) or {}).get("leader_equity_base_locked", False)):
+            summary["locked"] += 1
+            continue
+        result = refresh_wallet_leader_equity_source(wallet, budget_timeout_s=65.0, invalidate_cache=False, selected_only=True)
+        if result.get("skipped") == "locked":
+            summary["locked"] += 1
+        elif result.get("skipped"):
+            summary["skipped"] += 1
+        elif result.get("ok"):
+            summary["refreshed"] += 1
+        else:
+            summary["failed"] += 1
+            summary["errors"].append({"wallet": wallet, "error": result.get("error", "Equity refresh failed")})
+    return summary
+
+
 @app.get("/refresh", response_class=HTMLResponse)
-def refresh_model_dashboard() -> HTMLResponse:
-    """Explicit refresh: rebuild from the latest polled sizing equity."""
-    fresh = get_model_state_cached(max_age_sec=0.0, force=True)
-    with _MODEL_BUILD_LOCK:
-        fresh_built_at = fnum(_MODEL_CACHE.get("built_at"), time.time())
-    return HTMLResponse(_render_model_dashboard_html_cached(fresh, fresh_built_at))
+def refresh_model_dashboard(request: Request):
+    """Fetch selected, unlocked leader equity, then publish one complete rebuild."""
+    with _COHORT_REBUILD_LOCK:
+        state, _ = _model_cache_snapshot_nonblocking()
+        if state is None:
+            state = get_model_state_cached(max_age_sec=300.0)
+        equity_refresh = refresh_selected_leader_equities(state, load_ui_state())
+        fresh = get_model_state_cached(max_age_sec=0.0, force=True)
+        fresh["cohort_equity_refresh"] = equity_refresh
+        with _MODEL_BUILD_LOCK:
+            fresh_built_at = fnum(_MODEL_CACHE.get("built_at"), time.time())
+        dashboard_html = _render_model_dashboard_html_cached(fresh, fresh_built_at)
+    if wants_json_response(request):
+        return JSONResponse({"ok": True, "model_refreshed": True, "equity_refresh": equity_refresh})
+    return HTMLResponse(dashboard_html)
 
 
 @app.get("/model", response_class=HTMLResponse)
@@ -9487,6 +9723,69 @@ def api_wallet_equity_curve(wallet: str) -> JSONResponse:
     })
 
 
+def refresh_wallet_leader_equity_source(wallet: str, *, budget_timeout_s: float = 5.0, invalidate_cache: bool = True, selected_only: bool = False) -> Dict[str, Any]:
+    """Fetch one wallet's portfolio history within the proof-engine rate budget."""
+    wallet = str(wallet or "").strip().lower()
+    if not re.fullmatch(r"0x[0-9a-f]{40}", wallet):
+        return {"ok": False, "error": "invalid wallet address"}
+    def skip_reason() -> str:
+        ui = load_ui_state()
+        if parse_bool(((ui.get("wallet_config") or {}).get(wallet) or {}).get("leader_equity_base_locked", False)):
+            return "locked"
+        if selected_only and (not wallet_included(wallet, ui) or (ui.get("wallet_model_exclude") or {}).get(wallet)):
+            return "unselected"
+        return ""
+
+    skipped = skip_reason()
+    if skipped:
+        return {"ok": False, "skipped": skipped, "error": f"Equity refresh skipped: wallet is {skipped}"}
+    if RATE_GUARD is not None and not RATE_GUARD.acquire("portfolio", timeout_s=budget_timeout_s):
+        return {"ok": False, "error": "portfolio refresh deferred: proof-engine API budget is busy"}
+    # A wallet may be frozen/deselected while waiting for API capacity.
+    skipped = skip_reason()
+    if skipped:
+        return {"ok": False, "skipped": skipped, "error": f"Equity refresh skipped: wallet is {skipped}"}
+    before = _leader_equity_source_snapshot(wallet)
+    try:
+        stats = _get_mtm_stats(wallet, force_refresh=True, network_timeout=10.0)
+    except Exception as exc:
+        return {"ok": False, "error": f"portfolio refresh failed: {type(exc).__name__}: {exc}"}
+    if str((stats or {}).get("mtm_source", "")) != "hl_portfolio_api":
+        return {"ok": False, "error": "Hyperliquid portfolio refresh failed; the previous cached value was retained"}
+    after = _leader_equity_source_snapshot(wallet)
+    if after.get("value") is None:
+        return {"ok": False, "error": "Hyperliquid returned no usable account-value history"}
+    if invalidate_cache:
+        invalidate_model_cache()
+    return {
+        "ok": True,
+        "wallet": wallet,
+        "before": before,
+        "after": after,
+        "model_refresh_required": True,
+    }
+
+
+@app.post("/api/wallet-equity-refresh", response_class=HTMLResponse)
+async def api_wallet_equity_refresh(request: Request):
+    form = await request.form()
+    result = await asyncio.to_thread(refresh_wallet_leader_equity_source, form.get("wallet", ""))
+    if result.get("ok"):
+        # This is a deliberate, one-wallet operator action. Complete the model
+        # rebuild off the event loop before telling the browser to reload so a
+        # concurrent older build can never put the pre-fetch value back on screen.
+        fresh = await asyncio.to_thread(get_model_state_cached, max_age_sec=0.0, force=True)
+        with _MODEL_BUILD_LOCK:
+            fresh_built_at = fnum(_MODEL_CACHE.get("built_at"), time.time())
+        await asyncio.to_thread(_render_model_dashboard_html_cached, fresh, fresh_built_at)
+        result["model_refresh_required"] = False
+        result["model_refresh_started"] = False
+        result["model_refreshed"] = True
+    if wants_json_response(request):
+        return JSONResponse(result, status_code=200 if result.get("ok") else 429)
+    return HTMLResponse('<meta http-equiv="refresh" content="0; url=/">', status_code=200 if result.get("ok") else 429)
+
+
 @app.post("/api/wallet-include", response_class=HTMLResponse)
 async def set_wallet_include(request: Request):
     form = await request.form()
@@ -9516,9 +9815,11 @@ async def api_import_copy_candidates(request: Request):
 async def set_wallet_config(request: Request):
     form = await request.form()
     wallet = str(form.get("wallet", "")).strip().lower()
+    before_item: Dict[str, Any] = {}
     if wallet:
         ui = load_ui_state()
         cfg = dict(ui.get("wallet_config") or {})
+        before_item = dict(cfg.get(wallet) or {})
         mode = str(form.get("copy_mode", "")).strip().lower()
         norm_raw = str(form.get("norm_base", "")).strip()
         leader_base_raw = str(form.get("leader_equity_base", "")).strip()
@@ -9539,8 +9840,17 @@ async def set_wallet_config(request: Request):
         else:
             cfg.pop(wallet, None)
         save_ui_state({"wallet_config": cfg})
+    after = load_ui_state()
+    after_item = dict((after.get("wallet_config") or {}).get(wallet) or {}) if wallet else {}
+    model_refresh_required = before_item != after_item
+    model_refresh_started = _kick_model_cache_refresh_background() if model_refresh_required else False
     if wants_json_response(request):
-        return JSONResponse({"ok": True, "ui_state": load_ui_state()})
+        return JSONResponse({
+            "ok": True,
+            "ui_state": after,
+            "model_refresh_required": model_refresh_required,
+            "model_refresh_started": model_refresh_started,
+        })
     return HTMLResponse('<meta http-equiv="refresh" content="0; url=/">')
 
 
