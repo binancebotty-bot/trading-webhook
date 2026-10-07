@@ -1,0 +1,937 @@
+diff --git a/WALLET FINDER/HL_Copy_Engine_SSOT.py b/WALLET FINDER/HL_Copy_Engine_SSOT.py
+index 9243b10a..59476585 100644
+--- a/WALLET FINDER/HL_Copy_Engine_SSOT.py	
++++ b/WALLET FINDER/HL_Copy_Engine_SSOT.py	
+@@ -62,6 +62,9 @@ LIVE_METRICS_CSV = OUTPUT_DIR / "live_wallet_metrics.csv"
+ LOG_FILE = OUTPUT_DIR / "hl_copy_engine_ssot.log"
+ LOCK_FILE = BASE_DIR / "engine_ssot.lock"
+ BASELINE_JSON = OUTPUT_DIR / "exchange_baselines.json"  # baseline offsets; not trades/PnL
++PROOF_EPOCH_JSON = OUTPUT_DIR / "proof_epoch.json"      # measured proof epochs (authoritative)
++RECOVERY_GATE_JSON = OUTPUT_DIR / "recovery_gate.json"  # durable barren-recovery gate + attempt counts
++PROOF_WATERMARK_JSON = OUTPUT_DIR / "proof_watermark.json"  # durable trusted-through watermarks
+ WALLET_GATE_FILE = BASE_DIR / "wallet_gate.json"  # visibility only; not modelling
+ 
+ WS_URL = "wss://api.hyperliquid.xyz/ws"
+@@ -79,7 +82,13 @@ WS_WATCHDOG_INTERVAL_SEC = float(os.getenv("HL_WS_WATCHDOG_INTERVAL_SEC", "5"))
+ WS_RESTART_COOLDOWN_SEC = float(os.getenv("HL_WS_RESTART_COOLDOWN_SEC", "15"))
+ POLL_OVERLAP_MS = int(os.getenv("HL_POLL_OVERLAP_MS", "300000"))  # 5m overlap, matching proven universe_builder pattern
+ POLL_WINDOW_MS = int(os.getenv("HL_POLL_WINDOW_MS", str(24 * 60 * 60 * 1000)))
+-POLL_MAX_PAGE_ROWS = int(os.getenv("HL_POLL_MAX_PAGE_ROWS", "500"))
++# Hyperliquid userFillsByTime hard row cap, proven by live probe (2026-10-07):
++# a wide window returns exactly 2000 rows, oldest-first, inclusive boundaries.
++# A page is only PROVEN COMPLETE when it returns strictly fewer than this cap.
++API_FILLS_PAGE_CAP = int(os.getenv("HL_API_FILLS_PAGE_CAP", "2000"))
++# Hard ceiling on pages per poll window.  Reaching it is a FAIL-CLOSED condition
++# (completeness unknown), never a licence to admit a data gap.
++POLL_MAX_PAGES_PER_WINDOW = int(os.getenv("HL_POLL_MAX_PAGES_PER_WINDOW", "500"))
+ POSITION_EPSILON = float(os.getenv("HL_POSITION_EPSILON", "1e-9"))
+ RECONNECT_BACKOFF_CAP_SEC = float(os.getenv("HL_RECONNECT_BACKOFF_CAP_SEC", "30"))
+ 
+@@ -98,6 +107,10 @@ RECONNECT_BACKOFF_CAP_SEC = float(os.getenv("HL_RECONNECT_BACKOFF_CAP_SEC", "30"
+ # same barren window is not requested again until either new fills actually
+ # arrive for that wallet or this interval elapses.
+ DRIFT_RECOVERY_RETRY_SEC = float(os.getenv("HL_DRIFT_RECOVERY_RETRY_SEC", "900"))
++# After this many barren recovery attempts a still-unresolved pair is marked
++# UNRESOLVED_ESCALATED.  It stays visibly unresolved -- escalation is a louder
++# signal, never a quiet acceptance of a known-wrong state.
++DRIFT_ESCALATE_AFTER_ATTEMPTS = int(os.getenv("HL_DRIFT_ESCALATE_AFTER_ATTEMPTS", "3"))
+ 
+ # This tracker is an independent product.  It shares no state, no cursor and
+ # no business logic with the copy runtime or the :8014 proof engine -- only
+@@ -122,8 +135,9 @@ CLEAN_REBUILD = os.getenv("HL_CLEAN_REBUILD", "0") == "1"
+ USER_WALLET = os.getenv("HL_USER_WALLET", "").lower()
+ ENABLE_WS = False
+ 
+-RECORDING_WS_CAPTURED = "WS_CAPTURED"
+-RECORDING_REBUILD = "REBUILD"
++RECORDING_WS_CAPTURED = "WS_CAPTURED"   # genuine websocket capture only
++RECORDING_POLL = "POLL"                 # REST/userFillsByTime polling
++RECORDING_REBUILD = "REBUILD"           # accounting/recovery backfill
+ 
+ RAW_FILL_FIELDS = [
+     "fill_id", "wallet", "coin", "side", "price", "size", "signed_size_delta",
+@@ -278,25 +292,33 @@ def raw_get(d: Dict[str, Any], *keys: str, default: Any = None) -> Any:
+ 
+ 
+ def normalise_recording_method(value: Any, source: str = "", is_snapshot: bool = False) -> str:
+-    """Provenance contract: post-baseline live captures vs rebuild accounting.
++    """Provenance contract: factual recording method, never inferred upward.
+ 
+-    In this Wallet Finder deployment the live feeder is poll-only, so successful
+-    post-baseline poll fills are live captured evidence too.
+-    REBUILD fills are accounting/recovery fills only and must not be treated as
+-    measured execution-delta evidence.
++    This is proof infrastructure, so provenance must be truthful:
++      - genuine websocket capture  -> WS_CAPTURED
++      - REST/userFillsByTime poll  -> POLL
++      - rebuild/recovery backfill  -> REBUILD
++
++    A poll-sourced fill must NEVER be labelled WS_CAPTURED.  Snapshots never
++    create rows, so an is_snapshot row can only be REBUILD.
+     """
+     v = str(value or "").strip().upper()
+-    if v in {RECORDING_WS_CAPTURED, RECORDING_REBUILD}:
++    if v in {RECORDING_WS_CAPTURED, RECORDING_POLL, RECORDING_REBUILD}:
+         return v
+     src = str(source or "").strip().lower()
+-    if src in {"ws", "poll"} and not is_snapshot:
++    if is_snapshot:
++        return RECORDING_REBUILD
++    if src == "ws":
+         return RECORDING_WS_CAPTURED
++    if src == "poll":
++        return RECORDING_POLL
+     return RECORDING_REBUILD
+ 
+ 
+ def recording_contributes_to_execution_delta(recording_method: str) -> bool:
+-    # Absolute safety rail: REBUILD can never contribute measured execution delta.
+-    return str(recording_method or "").strip().upper() == RECORDING_WS_CAPTURED
++    # Absolute safety rail: only genuine measured live capture (WS or POLL) may
++    # contribute measured execution delta; REBUILD can never contribute it.
++    return str(recording_method or "").strip().upper() in {RECORDING_WS_CAPTURED, RECORDING_POLL}
+ 
+ 
+ def normalise_execution_delta_flag(value: Any, recording_method: str) -> bool:
+@@ -489,13 +511,29 @@ class EngineSSOT:
+         self.threads: List[threading.Thread] = []
+         self.engine_start_ms = utc_now_ms()
+ 
++        # ---- proof epoch model ----------------------------------------------
++        # A proof EPOCH fixes a measured exchange baseline at a boundary time T0.
++        # internal position is the sum of accepted signed fill deltas with
++        # timestamp STRICTLY AFTER T0.  A fresh measured epoch must begin with
++        # internal_delta = 0 and MUST NOT inherit pre-T0 position accumulation.
++        # Historical epochs that could not be proven complete are closed as
++        # UNRESOLVED and retained permanently as evidence -- a fresh snapshot
++        # never makes an unresolved old epoch CLEAN.
++        self.epoch_by_wallet: Dict[str, Dict[str, Any]] = self.load_epochs()
++        # per-wallet trusted-through: the END timestamp of an interval whose
++        # ingestion completeness was PROVEN (not the last fill's timestamp).
++        # Durable across restart so a completed interval is not re-fetched.
++        self.trusted_through_ms_by_wallet: Dict[str, int] = self.load_watermarks()
++        self.consecutive_poll_failures: Dict[str, int] = defaultdict(int)
++        self._last_currentness: Dict[str, Any] = {}
++
+         startup_fills = self.load_fills_from_ledger()
+         self._startup_fill_wallets: Set[str] = {f.wallet for f in startup_fills}
+         self.last_ledger_ts_by_wallet: Dict[str, int] = defaultdict(int)
+         # Per-wallet memory of the last drift-recovery attempt, so a barren
+-        # recovery is not repeated every cycle.  Deliberately in-memory only:
+-        # a restart is new evidence and should re-attempt once.
+-        self.drift_recovery_gate_by_wallet: Dict[str, Dict[str, Any]] = {}
++        # recovery is not repeated every cycle.  Persisted so a restart does not
++        # reset escalation progress (a restart is NOT new evidence by itself).
++        self.drift_recovery_gate_by_wallet, self.drift_recovery_attempt_count = self._load_recovery_gate_state()
+         self._poll_rotation_offset: int = 0
+         for f in startup_fills:
+             self.last_ledger_ts_by_wallet[f.wallet] = max(self.last_ledger_ts_by_wallet[f.wallet], f.timestamp_ms)
+@@ -541,6 +579,224 @@ class EngineSSOT:
+         return added
+ 
+     # ------------------------- baseline / bootstrap -------------------------
++    # ---- proof epoch persistence -------------------------------------------
++    def load_epochs(self) -> Dict[str, Dict[str, Any]]:
++        """Load measured proof epochs. Fail closed: a corrupt/unreadable file is
++        treated as 'no epochs', which forces fresh measured epochs rather than
++        silently trusting unreadable state."""
++        if not PROOF_EPOCH_JSON.exists():
++            return {}
++        try:
++            data = json.loads(PROOF_EPOCH_JSON.read_text(encoding="utf-8"))
++            wallets = data.get("wallets", {}) if isinstance(data, dict) else {}
++            if not isinstance(wallets, dict):
++                raise ValueError("wallets not a dict")
++            out: Dict[str, Dict[str, Any]] = {}
++            for w, ep in wallets.items():
++                if not isinstance(ep, dict):
++                    continue
++                if ep.get("baseline_position") is None or ep.get("baseline_ts_ms") in (None, 0):
++                    # Incomplete epoch record: do not trust it.
++                    continue
++                out[str(w).lower()] = ep
++            return out
++        except Exception as e:
++            log("WARNING", f"EPOCH_LOAD_FAILED err={e} action=fresh_epochs_required")
++            return {}
++
++    def save_epochs(self) -> None:
++        atomic_write_json(PROOF_EPOCH_JSON, {
++            "schema": "proof_epoch.v1",
++            "updated_at": utc_now_iso(),
++            "important_boundary": (
++                "baseline_position is a MEASURED exchange position at baseline_ts_ms. "
++                "internal_delta accrues ONLY from fills strictly after baseline_ts_ms. "
++                "epoch_status=UNRESOLVED epochs are permanent historical evidence and "
++                "must never be presented as CLEAN."
++            ),
++            "wallets": self.epoch_by_wallet,
++        })
++
++    def _open_epoch(self, wallet: str, snapshot: Dict[str, Dict[str, float]],
++                    ts_ms: Optional[int] = None, reason: str = "measured_snapshot") -> Dict[str, Any]:
++        """Create a NEW measured epoch: baseline = current exchange position,
++        internal_delta = 0, consume only fills strictly after baseline_ts."""
++        wallet = wallet.lower()
++        ts = int(ts_ms or utc_now_ms())
++        prior = self.epoch_by_wallet.get(wallet)
++        history = list((prior or {}).get("epoch_history") or [])
++        if prior:
++            # Close the previous epoch.  If it was not proven complete/unresolved,
++            # it stays permanently visible as UNRESOLVED -- never rewritten CLEAN.
++            closed = dict(prior)
++            closed.pop("epoch_history", None)
++            if closed.get("epoch_status") not in {"UNRESOLVED", "INCOMPLETE"}:
++                closed["epoch_status"] = "SUPERSEDED"
++            closed["closed_at_ms"] = ts
++            history.append(closed)
++        base = {str(c).upper(): {"signed_size": fnum(s.get("signed_size")),
++                                 "entry_price": fnum(s.get("entry_price"))}
++                for c, s in snapshot.items() if abs(fnum(s.get("signed_size"))) > POSITION_EPSILON}
++        epoch = {
++            "epoch_id": f"{wallet[:10]}-{ts}",
++            "baseline_ts_ms": ts,
++            "baseline_position": base,
++            "baseline_provenance": reason,
++            "epoch_status": "OPEN",
++            "opened_at_ms": ts,
++            "epoch_history": history,
++        }
++        self.epoch_by_wallet[wallet] = epoch
++        self.save_epochs()
++        self.audit["epochs_opened"] += 1
++        log("INFO", f"EPOCH_OPENED wallet={wallet} epoch_id={epoch['epoch_id']} "
++                    f"positions={len(base)} provenance={reason} "
++                    f"closed_prior={bool(prior)}")
++        return epoch
++
++    def _close_epoch_unresolved(self, wallet: str, reason: str) -> None:
++        wallet = wallet.lower()
++        ep = self.epoch_by_wallet.get(wallet)
++        if not ep:
++            return
++        ep["epoch_status"] = "UNRESOLVED"
++        ep["unresolved_reason"] = reason
++        ep["closed_at_ms"] = utc_now_ms()
++        self.save_epochs()
++        self.audit["epochs_closed_unresolved"] += 1
++        log("WARNING", f"EPOCH_CLOSED_UNRESOLVED wallet={wallet} "
++                       f"epoch_id={ep.get('epoch_id')} reason={reason}")
++
++    def epoch_baseline(self, wallet: str, coin: str) -> float:
++        ep = self.epoch_by_wallet.get(wallet.lower()) or {}
++        return fnum(((ep.get("baseline_position") or {}).get(str(coin).upper()) or {}).get("signed_size"))
++
++    def epoch_baseline_ts(self, wallet: str) -> int:
++        return inum((self.epoch_by_wallet.get(wallet.lower()) or {}).get("baseline_ts_ms"))
++
++    def epoch_is_usable(self, wallet: str) -> bool:
++        ep = self.epoch_by_wallet.get(wallet.lower())
++        return bool(ep) and ep.get("epoch_status") == "OPEN"
++
++    # ---- recovery gate persistence ----------------------------------------
++    def _load_recovery_gate_state(self) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, int]]:
++        if not RECOVERY_GATE_JSON.exists():
++            return {}, {}
++        try:
++            data = json.loads(RECOVERY_GATE_JSON.read_text(encoding="utf-8"))
++            gates = {str(k).lower(): v for k, v in (data.get("wallets", {}) or {}).items() if isinstance(v, dict)}
++            attempts = {str(k).lower(): int(v) for k, v in (data.get("attempt_counts", {}) or {}).items()}
++            return gates, attempts
++        except Exception as e:
++            log("WARNING", f"RECOVERY_GATE_LOAD_FAILED err={e}")
++            return {}, {}
++
++    def load_recovery_gates(self) -> Dict[str, Dict[str, Any]]:
++        return self._load_recovery_gate_state()[0]
++
++    def save_recovery_gates(self) -> None:
++        atomic_write_json(RECOVERY_GATE_JSON, {
++            "schema": "recovery_gate.v1",
++            "updated_at": utc_now_iso(),
++            "wallets": self.drift_recovery_gate_by_wallet,
++            "attempt_counts": dict(self.drift_recovery_attempt_count),
++        })
++
++    # ---- trusted-through watermark ----------------------------------------
++    def _advance_trusted_through(self, wallet: str, end_ms: int) -> None:
++        """Advance a wallet's trusted-through watermark.
++
++        Trusted-through is the END timestamp of an interval whose ingestion
++        completeness was PROVEN -- NOT the timestamp of the last fill.  A quiet
++        wallet therefore still advances when a complete empty interval succeeds.
++        """
++        wallet = wallet.lower()
++        prev = int(self.trusted_through_ms_by_wallet.get(wallet, 0) or 0)
++        if int(end_ms) > prev:
++            self.trusted_through_ms_by_wallet[wallet] = int(end_ms)
++            self.save_watermarks()
++
++    def save_watermarks(self) -> None:
++        atomic_write_json(PROOF_WATERMARK_JSON, {
++            "schema": "proof_watermark.v1",
++            "updated_at": utc_now_iso(),
++            "wallets": self.trusted_through_ms_by_wallet,
++        })
++
++    def load_watermarks(self) -> Dict[str, int]:
++        if not PROOF_WATERMARK_JSON.exists():
++            return {}
++        try:
++            data = json.loads(PROOF_WATERMARK_JSON.read_text(encoding="utf-8"))
++            return {str(k).lower(): int(v) for k, v in (data.get("wallets", {}) or {}).items()}
++        except Exception as e:
++            log("WARNING", f"WATERMARK_LOAD_FAILED err={e}")
++            return {}
++
++    def build_currentness(self) -> Dict[str, Any]:
++        """Smallest explicit currentness contract.
++
++        INPUTS_CURRENT answers 'have we consumed complete input through T?'.
++        STATE_TRUSTWORTHY answers 'does modelled state agree with exchange truth?'.
++        They are reported SEPARATELY and must never be conflated: a system can
++        have current input while still containing unresolved accounting drift.
++        """
++        required = sorted(set(self.wallets))
++        per_wallet: Dict[str, int] = {}
++        behind: List[str] = []
++        never: List[str] = []
++        for w in required:
++            tt = int(self.trusted_through_ms_by_wallet.get(w, 0) or 0)
++            per_wallet[w] = tt
++            if tt <= 0:
++                never.append(w)
++        # Global trusted-through is the MINIMUM across required wallets: a fast
++        # wallet must never make a lagging wallet appear current.
++        live = [per_wallet[w] for w in required if per_wallet[w] > 0]
++        global_tt = min(live) if live else 0
++        now_ms = utc_now_ms()
++        lag_ms = (now_ms - global_tt) if global_tt else None
++        failed = [w for w in required if int(self.consecutive_poll_failures.get(w, 0)) > 0]
++        inputs_current = bool(
++            required
++            and not never
++            and not failed
++            and global_tt > 0
++            and (now_ms - global_tt) <= int(POLL_SECONDS * 2 * 1000)
++        )
++
++        # State trustworthiness: any pair not CLEAN/RECOVERED is not trustworthy.
++        unresolved = 0
++        escalated = 0
++        total = 0
++        for w, coins in self.drift_state_by_wallet.items():
++            for c, info in coins.items():
++                total += 1
++                st = info.get("status")
++                if st == "UNRESOLVED_ESCALATED":
++                    escalated += 1
++                    unresolved += 1
++                elif st in {"DRIFT_UNRESOLVED", "DRIFT_DETECTED"}:
++                    unresolved += 1
++        state_trustworthy = bool(total > 0 and unresolved == 0)
++
++        return {
++            "per_wallet_trusted_through_ms": per_wallet,
++            "global_trusted_through_ms": global_tt,
++            "global_trusted_through_iso": (
++                datetime.fromtimestamp(global_tt / 1000, tz=timezone.utc).isoformat() if global_tt else ""),
++            "current_lag_ms": lag_ms,
++            "required_wallets": len(required),
++            "wallets_never_current": len(never),
++            "wallets_with_consecutive_failures": len(failed),
++            "inputs_current": inputs_current,
++            "state_trustworthy": state_trustworthy,
++            "unresolved_pairs": unresolved,
++            "escalated_pairs": escalated,
++            "audited_pairs": total,
++            "note": "inputs_current = complete input consumed through global_trusted_through_ms; state_trustworthy = modelled state agrees with exchange truth. Independent.",
++        }
++
+     def load_exchange_baselines(self) -> Dict[str, Dict[str, Dict[str, float]]]:
+         if not BASELINE_JSON.exists():
+             return {}
+@@ -619,33 +875,36 @@ class EngineSSOT:
+                 self.mark_prices[c] = entry
+         self.exchange_baseline_by_wallet[wallet] = base
+         self.save_exchange_baselines()
++        # NOTE: this is the legacy baseline mirror only.  The authoritative proof
++        # epoch is opened by bootstrap_wallet_from_exchange()/_open_epoch(), which
++        # records a measured baseline and resets internal_delta to zero.
+         self.audit["baseline_wallets"] += 1
+         self.audit["baseline_positions"] += len(base)
+         log("INFO", f"BASELINE_SET wallet={wallet} positions={len(base)}")
+ 
+     def derive_exchange_baseline_from_current_state(self, wallet: str, snapshot: Dict[str, Dict[str, float]], ts_ms: Optional[int] = None) -> None:
++        """Open a fresh MEASURED epoch.  This never masks drift.
++
++        The old implementation set baseline = exchange - internal, which forces
++        expected == internal by construction and makes any discrepancy disappear
++        (baseline absorption).  That is forbidden.  A baseline is a MEASURED
++        exchange position at T0, so here baseline = exchange, internal_delta
++        restarts at 0, and the internal (legacy) position is retained ONLY as a
++        visible historical marker -- it is not used to fake a CLEAN state.
++        """
+         wallet = wallet.lower()
+         ts = int(ts_ms or utc_now_ms())
+-        base: Dict[str, Dict[str, float]] = {}
+-        coins = set(snapshot.keys()) | {coin for (w, coin) in self.positions.keys() if w == wallet}
+-        for coin in sorted(coins):
+-            exch_size = fnum((snapshot.get(coin) or {}).get("signed_size"))
+-            exch_entry = fnum((snapshot.get(coin) or {}).get("entry_price"))
+-            current = self.positions.get((wallet, coin))
+-            internal_size = current.signed_size if current else 0.0
+-            baseline_size = exch_size - internal_size
+-            if abs(baseline_size) <= POSITION_EPSILON:
+-                continue
+-            base[str(coin).upper()] = {
+-                "signed_size": baseline_size,
+-                "entry_price": exch_entry or (current.avg_entry_price if current else 0.0),
+-                "baseline_ts_ms": ts,
+-            }
+-        self.exchange_baseline_by_wallet[wallet] = base
+-        self.save_exchange_baselines()
+-        self.audit["baseline_derived_wallets"] += 1
+-        self.audit["baseline_derived_positions"] += len(base)
+-        log("WARNING", f"BASELINE_DERIVED wallet={wallet} positions={len(base)} reason=ledger_without_saved_baseline")
++        legacy_internal = {c: round(p.signed_size, 12)
++                           for (w, c), p in self.positions.items()
++                           if w == wallet and abs(p.signed_size) > POSITION_EPSILON}
++        epoch = self._open_epoch(wallet, snapshot, ts_ms=ts, reason="measured_ledger_without_saved_baseline")
++        epoch["legacy_internal_at_open"] = legacy_internal
++        epoch["epoch_status"] = "OPEN_UNVERIFIED_LEGACY"
++        self.save_epochs()
++        self.audit["epochs_opened_unverified_legacy"] += 1
++        log("WARNING", f"EPOCH_OPEN_UNVERIFIED_LEGACY wallet={wallet} "
++                       f"legacy_internal_pairs={len(legacy_internal)} "
++                       f"reason=ledger_existed_without_measured_baseline")
+ 
+     def baseline_size(self, wallet: str, coin: str) -> float:
+         return fnum((self.exchange_baseline_by_wallet.get(wallet.lower(), {}).get(str(coin).upper(), {}) or {}).get("signed_size"))
+@@ -701,20 +960,32 @@ class EngineSSOT:
+             snapshot = {}
+         self.last_exchange_snapshot_by_wallet[wallet] = {k: dict(v) for k, v in snapshot.items()}
+ 
+-        if wallet not in self._startup_fill_wallets:
+-            self.set_exchange_baseline(wallet, snapshot, ts_ms=now)
+-            self.last_poll_ts_by_wallet[wallet] = now
+-            self._mark_wallet_ready(wallet, "cold_start_baseline", now)
+-            return
+-
+-        if wallet not in self.exchange_baseline_by_wallet:
+-            self.derive_exchange_baseline_from_current_state(wallet, snapshot, ts_ms=now)
++        # Maintain the legacy baseline mirror for any downstream readers, but the
++        # authoritative model is the measured proof epoch below.
++        self.set_exchange_baseline(wallet, snapshot, ts_ms=now)
++
++        if not self.epoch_is_usable(wallet):
++            # No OPEN epoch yet -> establish a fresh MEASURED epoch.  baseline =
++            # current exchange position, internal_delta = 0, consume only fills
++            # strictly after T0.  Any legacy ledger position is retained only as
++            # a visible historical marker, never as accumulated internal truth.
++            had_ledger = wallet in self._startup_fill_wallets
++            reason = "measured_restart_existing_ledger" if had_ledger else "measured_cold_start"
++            ep = self._open_epoch(wallet, snapshot, ts_ms=now, reason=reason)
++            if had_ledger:
++                ep["epoch_status"] = "OPEN_UNVERIFIED_LEGACY"
++                ep["legacy_internal_at_open"] = {
++                    c: round(p.signed_size, 12)
++                    for (w, c), p in self.positions.items()
++                    if w == wallet and abs(p.signed_size) > POSITION_EPSILON
++                }
++                self.save_epochs()
+ 
+         last_ledger_ts = int(self.last_ledger_ts_by_wallet.get(wallet, 0) or 0)
+         # Poll-only DB hard rule: after restart, resume from the last ledger fill.
+         # Never jump to near-now, or downtime fills can be missed.
+         self.last_poll_ts_by_wallet[wallet] = max(0, last_ledger_ts)
+-        self._mark_wallet_ready(wallet, "ledger_rebuild_ready", now)
++        self._mark_wallet_ready(wallet, "epoch_ready", now)
+ 
+     def bootstrap_all_wallets(self) -> None:
+         log("INFO", f"BOOTSTRAP_START wallets={len(self.wallets)}")
+@@ -806,18 +1077,21 @@ class EngineSSOT:
+ 
+     def _apply_fill_unlocked(self, fill: RawFill) -> None:
+         self.audit["fills_applied"] += 1
+-        if fill.recording_method == RECORDING_WS_CAPTURED:
++        rm = fill.recording_method
++        if rm == RECORDING_WS_CAPTURED:
+             self.audit["ws_captured_applied"] += 1
++        elif rm == RECORDING_POLL:
++            self.audit["poll_captured_applied"] += 1
+         else:
+             self.audit["rebuild_applied"] += 1
+         w = self.wallets_raw.setdefault(fill.wallet, RawWallet(fill.wallet))
+         w.fill_count += 1
+-        if fill.recording_method == RECORDING_WS_CAPTURED:
++        if rm == RECORDING_WS_CAPTURED:
+             w.ws_fill_count += 1
++        elif rm == RECORDING_POLL:
++            w.poll_fill_count += 1
+         else:
+             w.rebuild_fill_count += 1
+-        if fill.source == "poll":
+-            w.poll_fill_count += 1
+         if fill.is_snapshot:
+             w.snapshot_fill_count += 1
+         w.realized_pnl_raw += fill.closed_pnl
+@@ -829,15 +1103,34 @@ class EngineSSOT:
+         pos.apply_fill(fill)
+ 
+     def rebuild_from_ledger(self) -> None:
++        """Rebuild internal positions from the append-only ledger, EPOCH-AWARE.
++
++        A fill contributes to a wallet's internal position ONLY if it is strictly
++        after that wallet's OPEN epoch boundary.  Fills from before the current
++        epoch (or for wallets with no epoch yet) are NOT accumulated -- mixing
++        epochs is forbidden.  The ledger itself is never modified.
++        """
+         fills = self.load_fills_from_ledger()
++        applied = 0
++        skipped_pre_epoch = 0
++        skipped_no_epoch = 0
+         with self.state_lock:
+             self.wallets_raw = {w: RawWallet(w) for w in self.wallets}
+             self.positions = {}
+             self.mark_prices = {}
+             self.audit["fills_applied"] = 0
+             for fill in fills:
++                ep = self.epoch_by_wallet.get(fill.wallet)
++                if not ep or ep.get("epoch_status") not in {"OPEN", "OPEN_UNVERIFIED_LEGACY"}:
++                    skipped_no_epoch += 1
++                    continue
++                if fill.timestamp_ms <= inum(ep.get("baseline_ts_ms"), 0):
++                    skipped_pre_epoch += 1
++                    continue
+                 self._apply_fill_unlocked(fill)
+-        log("INFO", f"REBUILD_OK fills={len(fills)}")
++                applied += 1
++        log("INFO", f"REBUILD_OK fills_total={len(fills)} applied_in_epoch={applied} "
++                    f"skipped_pre_epoch={skipped_pre_epoch} skipped_no_epoch={skipped_no_epoch}")
+         self.write_state()
+ 
+     def load_fills_from_ledger(self) -> List[RawFill]:
+@@ -918,54 +1211,108 @@ class EngineSSOT:
+             log("ERROR", f"POLL_ERROR wallet={wallet} start={start_ms} end={end_ms} err={e}")
+             return None
+ 
+-    def fetch_fills_since(self, wallet: str, start_ms: int, end_ms: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
+-        """Fetch all real fills from start_ms to end_ms using bounded windows.
+-
+-        This mirrors the proven universe_builder pattern:
+-        last stored fill - overlap -> now, split into windows, dedupe downstream.
+-
+-        If a window returns a full page, continue from the max returned timestamp
+-        + 1 within that same window so long outage catch-up cannot silently drop
+-        later fills from the same broad range.
++    def fetch_fills_since(self, wallet: str, start_ms: int, end_ms: Optional[int] = None) -> Dict[str, Any]:
++        """Fetch all real fills from start_ms to end_ms, PROVING completeness.
++
++        Returns {"ok": bool, "complete": bool, "rows": [...], "reason": str}.
++
++        Hyperliquid userFillsByTime semantics (live-proven 2026-10-07):
++          - hard row cap = API_FILLS_PAGE_CAP (2000); a wide window returns exactly 2000
++          - rows are returned ASCENDING by time
++          - startTime and endTime are BOTH INCLUSIVE
++          - MULTIPLE fills can share one timestamp
++
++        Because boundaries are inclusive and timestamps can tie, advancing by
++        max_ts + 1 would silently DROP tied fills.  We therefore re-request from
++        the inclusive boundary and suppress already-seen ids by stable fill id,
++        requiring strict forward progress on every subsequent page.
++
++        Completeness is only PROVEN when a page returns strictly fewer than the
++        API cap.  Any of the following yields complete=False (fail closed):
++          - a full page that cannot advance to a strictly newer timestamp
++            (saturated boundary: the API cannot enumerate beyond it)
++          - the per-window page ceiling is reached
++          - a transient fetch failure (rows=None)
++        A successful HTTP response is NOT proof of complete history.
+         """
+         now_ms = int(end_ms or utc_now_ms())
+         cursor = max(0, int(start_ms))
+         all_rows: List[Dict[str, Any]] = []
++        seen_ids: Set[str] = set()
++
++        def _row_id(r: Dict[str, Any]) -> str:
++            return str(raw_get(r, "tid", "oid", "hash", "id", default="") or "")
+ 
+         while cursor < now_ms:
+             window_end = min(cursor + POLL_WINDOW_MS, now_ms)
+             page_cursor = cursor
+             page_count = 0
+-            max_pages_per_window = 200  # safety: 500*200=100k fills per window, ~8 wallets/day max
+-            while page_cursor < window_end and page_count < max_pages_per_window:
++            last_progress_ts = -1
++            window_complete = False
++            while page_count < POLL_MAX_PAGES_PER_WINDOW:
+                 rows = self.fetch_fills_range(wallet, page_cursor, window_end)
+                 if rows is None:
+-                    return None
++                    # Transient failure: completeness unknown. Do NOT advance.
++                    return {"ok": False, "complete": False, "rows": all_rows,
++                            "reason": "fetch_failed"}
+                 if not rows:
++                    window_complete = True
+                     break
+ 
+-                all_rows.extend(rows)
+-                max_row_ts = max(inum(raw_get(r, "time", "timestamp", "ts"), page_cursor) for r in rows if isinstance(r, dict))
+-
+-                # If the API returns a full capped page, page forward inside the same window.
+-                # Otherwise this window is complete.
+-                if len(rows) >= POLL_MAX_PAGE_ROWS and max_row_ts >= page_cursor:
+-                    next_cursor = max_row_ts + 1
+-                    if next_cursor <= page_cursor:
+-                        next_cursor = page_cursor + 1
+-                    page_cursor = min(next_cursor, window_end)
+-                    page_count += 1
+-                    self.audit["poll_paginated_pages"] += 1
+-                    continue
+-                break
++                new_rows = 0
++                page_max_ts = page_cursor
++                for r in rows:
++                    if not isinstance(r, dict):
++                        continue
++                    rid = _row_id(r)
++                    if rid and rid in seen_ids:
++                        continue
++                    if rid:
++                        seen_ids.add(rid)
++                    all_rows.append(r)
++                    new_rows += 1
++                    t = inum(raw_get(r, "time", "timestamp", "ts"), 0)
++                    if t > page_max_ts:
++                        page_max_ts = t
++
++                # Proven complete: the API returned fewer than its hard cap.
++                if len(rows) < API_FILLS_PAGE_CAP:
++                    window_complete = True
++                    break
+ 
+-            if page_count >= max_pages_per_window:
+-                log("WARNING", f"POLL_PAGINATION_SAFEGUARD wallet={wallet} window_start={cursor} window_end={window_end} pages={page_count} — admitting data gap to prevent infinite loop")
+-                self.audit["poll_pagination_safeguard_hit"] += 1
++                # Full page. We must advance to strictly newer evidence.
++                if page_max_ts <= last_progress_ts or page_max_ts <= page_cursor:
++                    # Saturated boundary: the API cannot enumerate beyond this
++                    # timestamp. We must NOT skip it. Completeness UNKNOWN.
++                    self.audit["poll_completeness_unknown_saturated_boundary"] += 1
++                    log("WARNING",
++                        f"POLL_COMPLETENESS_UNKNOWN wallet={wallet} reason=saturated_boundary "
++                        f"ts={page_max_ts} window_start={cursor} window_end={window_end}")
++                    return {"ok": True, "complete": False, "rows": all_rows,
++                            "reason": "saturated_boundary"}
++                if new_rows == 0:
++                    # Full page of only-already-seen rows with a newer max ts:
++                    # we can advance past it, but cannot yet claim completeness.
++                    self.audit["poll_pagination_all_dupe_page"] += 1
++
++                last_progress_ts = page_max_ts
++                # Re-request from the INCLUSIVE boundary so tied timestamps are
++                # not dropped; seen_ids suppresses the rows we already have.
++                page_cursor = page_max_ts
++                page_count += 1
++                self.audit["poll_paginated_pages"] += 1
++
++            if page_count >= POLL_MAX_PAGES_PER_WINDOW and not window_complete:
++                self.audit["poll_completeness_unknown_page_ceiling"] += 1
++                log("WARNING",
++                    f"POLL_COMPLETENESS_UNKNOWN wallet={wallet} reason=page_ceiling "
++                    f"pages={page_count} window_start={cursor} window_end={window_end}")
++                return {"ok": True, "complete": False, "rows": all_rows,
++                        "reason": "page_ceiling"}
+ 
+             cursor = window_end
+ 
+-        return all_rows
++        return {"ok": True, "complete": True, "rows": all_rows, "reason": "complete"}
+ 
+     def ingest_real_fills_window(
+         self,
+@@ -990,11 +1337,22 @@ class EngineSSOT:
+         self.audit[f"{reason}_ingest_attempts"] += 1
+         log("INFO", f"REAL_FILL_INGEST_START wallet={wallet} reason={reason} start={start_ms} end={end_ms}")
+ 
+-        raw_fills = self.fetch_fills_since(wallet, start_ms, end_ms)
+-        if raw_fills is None:
++        fetch = self.fetch_fills_since(wallet, start_ms, end_ms)
++        if not fetch.get("ok"):
+             self.audit[f"{reason}_ingest_failed"] += 1
+-            log("WARNING", f"REAL_FILL_INGEST_FAILED wallet={wallet} reason={reason} start={start_ms} end={end_ms}")
+-            return {"ok": False, "parsed": 0, "applied": 0, "deduped": 0, "max_ts": start_ms}
++            log("WARNING", f"REAL_FILL_INGEST_FAILED wallet={wallet} reason={reason} start={start_ms} end={end_ms} fetch_reason={fetch.get('reason')}")
++            return {"ok": False, "complete": False, "parsed": 0, "applied": 0,
++                    "deduped": 0, "max_ts": start_ms, "reason": fetch.get("reason")}
++        raw_fills = fetch.get("rows", [])
++        complete = bool(fetch.get("complete"))
++        if not complete:
++            # Ingestion over this window could not be proven complete.  We still
++            # apply the fills we DID receive (they are real and deduped), but the
++            # caller MUST NOT treat this interval as trusted-through, and a
++            # recovery/replay must not rely on it.  Fail closed at the watermark.
++            self.audit[f"{reason}_incomplete"] += 1
++            log("WARNING", f"REAL_FILL_INGEST_INCOMPLETE wallet={wallet} reason={reason} "
++                           f"fetch_reason={fetch.get('reason')} rows={len(raw_fills)}")
+ 
+         parsed: List[RawFill] = []
+         min_ts = monitor_start_ms()
+@@ -1007,14 +1365,16 @@ class EngineSSOT:
+                 parsed.append(fill)
+         parsed.sort(key=lambda f: (f.timestamp_ms, f.wallet, f.coin, f.fill_id))
+ 
+-        boot_ms = int(self._wallet_state(wallet).get("bootstrapped_at_ms") or 0)
+-        cold_start_wallet = wallet not in self._startup_fill_wallets
++        # Epoch boundary: a fill contributes to the internal position ONLY if it
++        # is STRICTLY after the wallet's current epoch boundary.  Mixing epochs
++        # is forbidden, so pre-epoch fills are skipped (never accumulated).
++        epoch_ts = self.epoch_baseline_ts(wallet)
+         max_ts = start_ms
+         applied = 0
+         deduped = 0
+         skipped_prebaseline = 0
+         for fill in parsed:
+-            if cold_start_wallet and fill.timestamp_ms <= boot_ms:
++            if epoch_ts and fill.timestamp_ms <= epoch_ts:
+                 skipped_prebaseline += 1
+                 self.audit["poll_prebaseline_skipped"] += 1
+                 continue
+@@ -1031,15 +1391,22 @@ class EngineSSOT:
+                     self.audit["poll_deduped"] += 1
+ 
+         if advance_cursor:
+-            # Successful API cycle: advance to end, with next cycle protected by POLL_OVERLAP_MS.
++            # Advance the cursor to end on a successful cycle.  The next cycle is
++            # protected by POLL_OVERLAP_MS.  Trusted-through is advanced
++            # SEPARATELY and ONLY when completeness was proven (see
++            # _advance_trusted_through); an incomplete window must never move it.
+             self.last_poll_ts_by_wallet[wallet] = max(max_ts, end_ms)
++            if complete:
++                self._advance_trusted_through(wallet, end_ms)
+ 
+         log(
+             "INFO",
+             f"REAL_FILL_INGEST_DONE wallet={wallet} reason={reason} parsed={len(parsed)} "
+-            f"applied={applied} deduped={deduped} prebaseline_skipped={skipped_prebaseline} max_ts={max_ts}"
++            f"applied={applied} deduped={deduped} prebaseline_skipped={skipped_prebaseline} "
++            f"max_ts={max_ts} complete={complete}"
+         )
+-        return {"ok": True, "parsed": len(parsed), "applied": applied, "deduped": deduped, "max_ts": max_ts}
++        return {"ok": True, "complete": complete, "parsed": len(parsed), "applied": applied,
++                "deduped": deduped, "max_ts": max_ts, "reason": fetch.get("reason")}
+ 
+     def _set_drift_state(self, wallet: str, coin: str, status: str, detail: Dict[str, Any]) -> None:
+         wallet = wallet.lower()
+@@ -1064,21 +1431,36 @@ class EngineSSOT:
+         if not self._is_wallet_ready(wallet):
+             log("INFO", f"POLL_LOCKED wallet={wallet}")
+             return 0
+-        if wallet not in self.exchange_baseline_by_wallet:
+-            self.set_exchange_baseline(wallet, snapshot, ts_ms=now_ms)
+-            self._mark_wallet_ready(wallet, "baseline_missing_created", now_ms)
++
++        # EPOCH-AWARE reconciliation.  The baseline is the MEASURED epoch position
++        # at T0; the internal position accrues only from fills strictly after T0.
++        # A wallet with no OPEN epoch cannot be judged CLEAN -- its pair is left
++        # visibly UNRESOLVED (never silently accepted).
++        if not self.epoch_is_usable(wallet):
++            self.audit["drift_audit_no_open_epoch"] += 1
++            for coin in sorted(set(snapshot.keys()) | {c for (w, c) in self.positions.keys() if w == wallet}):
++                exch_size = fnum((snapshot.get(coin) or {}).get("signed_size"))
++                current = self.positions.get((wallet, coin))
++                internal_size = current.signed_size if current else 0.0
++                self._set_drift_state(wallet, str(coin).upper(), "DRIFT_UNRESOLVED", {
++                    "delta": exch_size - internal_size,
++                    "internal": internal_size, "exchange": exch_size,
++                    "baseline": 0.0, "tracked_exchange": exch_size,
++                    "reason": "no_open_epoch",
++                })
++            log("WARNING", f"DRIFT_AUDIT_NO_OPEN_EPOCH wallet={wallet} action=leave_unresolved")
+             return 0
+ 
+         coins = (
+             set(snapshot.keys())
+             | {coin for (w, coin) in self.positions.keys() if w == wallet}
+-            | set(self.exchange_baseline_by_wallet.get(wallet, {}).keys())
++            | set((self.epoch_by_wallet.get(wallet, {}).get("baseline_position") or {}).keys())
+         )
+ 
+         drift_rows: List[Dict[str, Any]] = []
+         for coin in sorted(coins):
+             exch_size = fnum((snapshot.get(coin) or {}).get("signed_size"))
+-            baseline = self.baseline_size(wallet, coin)
++            baseline = self.epoch_baseline(wallet, coin)
+             tracked_exchange_size = exch_size - baseline
+             current = self.positions.get((wallet, coin))
+             internal_size = current.signed_size if current else 0.0
+@@ -1109,30 +1491,26 @@ class EngineSSOT:
+         if not drift_rows:
+             return 0
+ 
+-        # One recovery call per wallet, not one fake row per coin. Start from
+-        # the earliest relevant baseline timestamp or last ledger overlap.
+-        baseline_ts_values: List[int] = []
+-        for row in drift_rows:
+-            base = self.exchange_baseline_by_wallet.get(wallet, {}).get(str(row["coin"]).upper(), {})
+-            ts = inum((base or {}).get("baseline_ts_ms"), 0)
+-            if ts > 0:
+-                baseline_ts_values.append(ts)
++        # One recovery call per wallet, not one fake row per coin.  Recovery must
++        # look at ground the normal poll did NOT just cover: fetch the interval
++        # BEFORE the last covered interval (epoch boundary .. now), not the same
++        # window again.
++        epoch_ts = self.epoch_baseline_ts(wallet)
+         last_ledger_ts = int(self.last_ledger_ts_by_wallet.get(wallet, 0) or 0)
+-        candidates = [now_ms - POLL_WINDOW_MS]
+-        if last_ledger_ts > 0:
+-            candidates.append(max(0, last_ledger_ts - POLL_OVERLAP_MS))
+-        candidates.extend(baseline_ts_values)
+-        recovery_start = max(0, min(candidates))
+-
+-        # Has anything changed since the last barren attempt over this window?
+-        # New fills advance last_ledger_ts; an earlier recovery_start would cover
+-        # ground the previous attempt did not.  Absent both, re-fetching asks the
+-        # exchange a question it has already answered.
++        covered_from = max(0, last_ledger_ts - POLL_OVERLAP_MS) if last_ledger_ts else now_ms - POLL_WINDOW_MS
++        # attempt n widens the lookback geometrically: 1d, 7d, 30d ...
++        attempt = int(self.drift_recovery_attempt_count.get(wallet, 0) or 0)
++        lookback = POLL_WINDOW_MS * (7 ** min(attempt, 3))
++        recovery_start = max(epoch_ts, now_ms - lookback)
++        # Never start after the covered region we are trying to reach behind.
++        recovery_start = min(recovery_start, covered_from)
++
+         gate = self.drift_recovery_gate_by_wallet.get(wallet) or {}
+         no_new_evidence = (
+             bool(gate.get("barren"))
+             and int(gate.get("ledger_ts", -1)) == last_ledger_ts
+-            and int(gate.get("recovery_start", -1)) <= recovery_start
++            and int(gate.get("recovery_start", -1)) == recovery_start
++            and int(gate.get("attempt", -1)) == attempt
+         )
+         if no_new_evidence and (time.time() - float(gate.get("at", 0.0))) < DRIFT_RECOVERY_RETRY_SEC:
+             self.audit["drift_recovery_quiesced"] += 1
+@@ -1142,25 +1520,25 @@ class EngineSSOT:
+                     "recovery": "QUIESCED",
+                     "recovery_quiesced_reason": "no_new_fills_since_last_barren_recovery",
+                     "recovery_retry_after_sec": DRIFT_RECOVERY_RETRY_SEC,
+-                    "recovery_last_attempt_epoch": float(gate.get("at", 0.0)),
++                    "recovery_attempt": attempt,
+                 })
+-            log(
+-                "WARNING",
+-                f"DRIFT_UNRESOLVED_QUIESCED wallet={wallet} coins={len(drift_rows)} "
+-                f"ledger_ts={last_ledger_ts} recovery_start={recovery_start} "
+-                f"retry_after_sec={DRIFT_RECOVERY_RETRY_SEC} "
+-                "reason=no_new_fills_since_last_barren_recovery"
+-            )
++            log("WARNING", f"DRIFT_UNRESOLVED_QUIESCED wallet={wallet} coins={len(drift_rows)} "
++                           f"attempt={attempt} retry_after_sec={DRIFT_RECOVERY_RETRY_SEC}")
+             return len(drift_rows)
+ 
+         self.audit["drift_recovery_attempts"] += 1
++        self.drift_recovery_attempt_count[wallet] = attempt + 1
+         ingest = self.ingest_real_fills_window(wallet, recovery_start, now_ms, "drift_recovery", advance_cursor=False)
++        ingest_complete = bool(ingest.get("complete"))
+         self.drift_recovery_gate_by_wallet[wallet] = {
+             "at": time.time(),
+             "ledger_ts": last_ledger_ts,
+             "recovery_start": recovery_start,
++            "attempt": attempt,
+             "barren": not int(ingest.get("applied", 0) or 0),
++            "complete": ingest_complete,
+         }
++        self.save_recovery_gates()
+         if ingest.get("applied", 0):
+             # Replay ensures in-memory truth exactly matches the append-only ledger.
+             self.rebuild_from_ledger()
+@@ -1170,7 +1548,7 @@ class EngineSSOT:
+         for row in drift_rows:
+             coin = str(row["coin"]).upper()
+             exch_size = fnum((snapshot.get(coin) or {}).get("signed_size"))
+-            baseline = self.baseline_size(wallet, coin)
++            baseline = self.epoch_baseline(wallet, coin)
+             tracked_exchange_size = exch_size - baseline
+             current = self.positions.get((wallet, coin))
+             internal_size = current.signed_size if current else 0.0
+@@ -1185,21 +1563,31 @@ class EngineSSOT:
+                 "recovery_end_ms": now_ms,
+                 "recovery_applied": int(ingest.get("applied", 0) or 0),
+                 "recovery_deduped": int(ingest.get("deduped", 0) or 0),
++                "recovery_attempt": attempt,
++                "recovery_complete": ingest_complete,
+             }
+             if abs(delta) <= POSITION_EPSILON:
+                 recovered += 1
+                 self.audit["drift_recovered"] += 1
++                self.drift_recovery_attempt_count[wallet] = 0
+                 self._set_drift_state(wallet, coin, "RECOVERED", detail)
+                 log("INFO", f"DRIFT_RECOVERED wallet={wallet} coin={coin} applied={ingest.get('applied', 0)}")
+             else:
+                 unresolved += 1
+                 self.audit["drift_unresolved"] += 1
+-                self._set_drift_state(wallet, coin, "DRIFT_UNRESOLVED", detail)
++                # Escalation: after ESCALATE_AFTER attempts, mark ESCALATED (still
++                # visibly unresolved).  A proof engine may back off but must never
++                # convert known-wrong into accepted-permanent.
++                status = "UNRESOLVED_ESCALATED" if attempt >= DRIFT_ESCALATE_AFTER_ATTEMPTS else "DRIFT_UNRESOLVED"
++                if not ingest_complete:
++                    detail["reason"] = "recovery_incomplete"
++                self._set_drift_state(wallet, coin, status, detail)
+                 log(
+                     "WARNING",
+-                    f"DRIFT_UNRESOLVED wallet={wallet} coin={coin} delta={delta} "
++                    f"DRIFT_{status} wallet={wallet} coin={coin} delta={delta} "
+                     f"internal={internal_size} exchange={exch_size} baseline={baseline} "
+-                    f"tracked_exchange={tracked_exchange_size} applied={ingest.get('applied', 0)}"
++                    f"tracked_exchange={tracked_exchange_size} attempt={attempt} "
++                    f"applied={ingest.get('applied', 0)} complete={ingest_complete}"
+                 )
+         return recovered + unresolved
+ 
+@@ -1233,7 +1621,14 @@ class EngineSSOT:
+             )
+             if not ingest.get("ok"):
+                 self.audit["poll_cycle_failed_no_cursor_advance"] += 1
++                self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
+                 continue
++            if not ingest.get("complete"):
++                # Input through this interval is NOT proven complete: do not
++                # advance trusted-through, but the cycle itself did not error.
++                self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
++            else:
++                self.consecutive_poll_failures[wallet] = 0
+ 
+             snapshot = self.fetch_exchange_positions(wallet)
+             if snapshot is None:
+@@ -1468,6 +1863,8 @@ class EngineSSOT:
+         with self.state_lock:
+             wallets = self._wallet_raw_state()
+             fills = self.load_fills_from_ledger()
++            currentness = self.build_currentness()
++            self._last_currentness = currentness
+             truth = {
+                 "schema": "engine_truth.v1.raw_only",
+                 "updated_at": utc_now_iso(),
+@@ -1482,16 +1879,19 @@ class EngineSSOT:
+                 "wallet_runtime": {k: dict(v) for k, v in self.wallet_runtime.items()},
+                 "drift_state": self.drift_state_by_wallet,
+                 "exchange_baselines": self.exchange_baseline_by_wallet,
++                "proof_epochs": self.epoch_by_wallet,
++                "currentness": currentness,
+                 "ledger": {
+                     "path": str(RAW_FILLS_CSV),
+                     "fill_count": len(fills),
+                     "first_ts": fills[0].timestamp_iso if fills else "",
+                     "last_ts": fills[-1].timestamp_iso if fills else "",
+                     "ws_captured_count": sum(1 for f in fills if f.recording_method == RECORDING_WS_CAPTURED),
++                    "poll_count": sum(1 for f in fills if f.recording_method == RECORDING_POLL),
+                     "rebuild_count": sum(1 for f in fills if f.recording_method == RECORDING_REBUILD),
+                     "execution_delta_eligible_count": sum(1 for f in fills if f.contributes_to_execution_delta),
+                 },
+-                "important_boundary": "raw truth only: WS_CAPTURED vs REBUILD provenance; no copy sizing, no normalisation, no portfolio modelling",
++                "important_boundary": "raw truth only: factual provenance (WS_CAPTURED/POLL/REBUILD); no copy sizing, no normalisation, no portfolio modelling",
+             }
+             return truth
+ 
