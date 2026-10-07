@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import csv
 import itertools
-from collections import Counter
 import io
 import json
 import math
@@ -772,109 +771,6 @@ def load_engine_truth() -> Dict[str, Any]:
     return truth
 
 
-def _proof_status_fields() -> Dict[str, Any]:
-    """Read the authoritative proof-status fields from engine truth.
-
-    Every value is returned as-is (None stays None).  Missing/unreadable proof
-    data is reported as UNKNOWN and is NEVER converted into a healthy default.
-    """
-    truth = load_engine_truth() or {}
-    cn = truth.get("currentness")
-    cn = cn if isinstance(cn, dict) else {}
-    epochs = truth.get("proof_epochs")
-    epochs = epochs if isinstance(epochs, dict) else {}
-    statuses = Counter(str((v or {}).get("epoch_status", "")).upper() for v in epochs.values() if isinstance(v, dict))
-    return {
-        "readable": bool(cn),
-        "inputs_current": cn.get("inputs_current"),
-        "state_trustworthy": cn.get("state_trustworthy"),
-        "open_wallets": statuses.get("OPEN"),
-        "pending_wallets": statuses.get("PENDING"),
-        "wallets_without_proven_epoch": cn.get("wallets_without_proven_epoch"),
-        "unresolved_pairs": cn.get("unresolved_pairs"),
-        "escalated_pairs": cn.get("escalated_pairs"),
-        "global_trusted_through_ms": cn.get("global_trusted_through_ms"),
-        "global_trusted_through_iso": cn.get("global_trusted_through_iso"),
-        "current_lag_ms": cn.get("current_lag_ms"),
-        "wallets_with_consecutive_failures": cn.get("wallets_with_consecutive_failures"),
-        "required_wallets": cn.get("required_wallets"),
-        "truth_updated_at": truth.get("updated_at"),
-    }
-
-
-def _proof_status_classification(f: Dict[str, Any]) -> Tuple[str, str, str]:
-    """Return (code, label, css_class).  Missing data is UNKNOWN, never healthy."""
-    if not f.get("readable"):
-        return "UNKNOWN", "UNKNOWN / NOT PROVEN", "unknown"
-    if f.get("inputs_current") is None or f.get("state_trustworthy") is None:
-        return "UNKNOWN", "UNKNOWN / NOT PROVEN", "unknown"
-    unresolved = inum(f.get("unresolved_pairs"))
-    escalated = inum(f.get("escalated_pairs"))
-    if unresolved > 0 or escalated > 0:
-        return "UNRESOLVED", "UNRESOLVED", "unresolved"
-    if bool(f.get("inputs_current")) and bool(f.get("state_trustworthy")):
-        return "TRUSTED", "TRUSTED", "trusted"
-    return "CONVERGING", "CONVERGING", "converging"
-
-
-def build_proof_status_block() -> str:
-    """Prominent proof-status banner driven ONLY by authoritative engine output.
-
-    TRUSTED = inputs_current AND state_trustworthy.
-    CONVERGING = engine healthy but wallets remain PENDING / lack a current
-    proven watermark.  UNRESOLVED = unresolved/escalated drift or an otherwise
-    untrustworthy state.  UNKNOWN = required proof data missing/unreadable.
-    """
-    f = _proof_status_fields()
-    code, label, cls = _proof_status_classification(f)
-
-    def b(value: Any) -> str:
-        if value is None:
-            return '<b class="unknown">UNKNOWN</b>'
-        return f'<b class="{"pos" if value else "warn"}">{str(bool(value)).lower()}</b>'
-
-    def n(value: Any) -> str:
-        return f'<b class="unknown">UNKNOWN</b>' if value is None else f"<b>{inum(value)}</b>"
-
-    lag_ms = f.get("current_lag_ms")
-    tt_ms = inum(f.get("global_trusted_through_ms"))
-    if lag_ms is None:
-        if tt_ms > 0:
-            lag_ms = max(0, int(time.time() * 1000) - tt_ms)
-        else:
-            lag_ms = None
-    tt_iso = f.get("global_trusted_through_iso") or ""
-    tt_display = "UNKNOWN"
-    if tt_ms > 0:
-        tt_display = html.escape(tt_iso or datetime.fromtimestamp(tt_ms / 1000, tz=timezone.utc).isoformat())
-    lag_display = "UNKNOWN" if lag_ms is None else f"{lag_ms / 1000.0:.0f}s"
-    detail = "" if f.get("readable") else "engine_truth.currentness missing or unreadable — proof state cannot be established"
-    if code == "UNRESOLVED" and not detail:
-        detail = "modelled state does not agree with exchange truth (drift unresolved/escalated)"
-
-    items = [
-        ("inputs_current", b(f.get("inputs_current"))),
-        ("state_trustworthy", b(f.get("state_trustworthy"))),
-        ("OPEN wallets", n(f.get("open_wallets"))),
-        ("PENDING wallets", n(f.get("pending_wallets"))),
-        ("wallets without proven epoch", n(f.get("wallets_without_proven_epoch"))),
-        ("unresolved pairs", n(f.get("unresolved_pairs"))),
-        ("escalated pairs", n(f.get("escalated_pairs"))),
-        ("global trusted-through", f"<b>{tt_display}</b>"),
-        ("trusted-through lag", f"<b>{lag_display}</b>"),
-        ("wallets with poll failures", n(f.get("wallets_with_consecutive_failures"))),
-    ]
-    grid = "".join(f'<div class="proof-item"><span>{html.escape(k)}</span>{v}</div>' for k, v in items)
-    truth_updated = html.escape(str(f.get("truth_updated_at") or ""), quote=True)
-    return (
-        f'<div class="proof-status proof-{cls}" data-proof-source="engine_truth.json" data-truth-updated="{truth_updated}">'
-        f'<div class="proof-head"><b>PROOF STATUS</b> <span class="proof-pill">{html.escape(label)}</span>'
-        f'<span class="muted">{html.escape(detail)}</span></div>'
-        f'<div class="proof-grid">{grid}</div>'
-        f'</div>'
-    )
-
-
 _PORTFOLIO_PERIODS_CACHE: Dict[Tuple[str, int], Dict[str, Any]] = {}
 _ACCOUNT_VALUE_CURVE_CACHE: Dict[Tuple[str, str, int], List[Dict[str, Any]]] = {}
 _COMPUTED_EQUITY_CURVE_CACHE: Dict[Tuple[str, int, int, int], List[Dict[str, Any]]] = {}
@@ -959,34 +855,11 @@ def _account_value_curve(wallet: str, period: str = "allTime") -> List[Dict[str,
     return points
 
 
-def _latest_sane_account_equity(curve: List[Dict[str, Any]]) -> Tuple[Optional[float], Optional[Dict[str, Any]], bool]:
-    """Last cached account equity, skipping a terminal near-zero collapse.
-
-    A wallet whose account was emptied (funds withdrawn) ends its
-    accountValueHistory at ~0.  That is a factual value, but it is not a valid
-    sizing denominator and is the exact input that drives the scale explosion.
-    When the tail is a near-zero collapse relative to the wallet's own peak we
-    return the most recent non-collapsed point and flag it, so the model re-bases
-    cleanly and the cache self-heals once the source is refreshed.
-    """
-    if not curve:
-        return None, None, False
-    peak = max((fnum(p.get("equity_usd")) for p in curve), default=0.0)
-    threshold = 0.01 * peak
-    for point in reversed(curve):
-        equity = fnum(point.get("equity_usd"))
-        if peak > 0 and equity < threshold:
-            continue
-        return round(equity, 4), point, point is not curve[-1]
-    return round(fnum(curve[-1].get("equity_usd")), 4), curve[-1], False
-
-
 def _current_leader_equity_from_cache(wallet: str) -> Optional[float]:
     curve = _account_value_curve(wallet)
     if not curve:
         return None
-    value, _point, _collapsed = _latest_sane_account_equity(curve)
-    return value
+    return round(fnum(curve[-1].get("equity_usd")), 4)
 
 
 def _leader_equity_source_snapshot(wallet: str) -> Dict[str, Any]:
@@ -1173,41 +1046,11 @@ def _normalised_true_drawdown_points(points: List[Dict[str, Any]], scale: float)
     return out
 
 
-def _bounded_proof_scale(alloc: float, leader_equity_base: float, curve: List[Dict[str, Any]]) -> Tuple[float, float, bool]:
-    """Return (scale, magnitude_floor, floored) for a wallet's proof curve.
-
-    Follower notional is sized from the leader's *current* account equity.  When
-    a leader's live account has collapsed to ~zero (funds withdrawn) that current
-    equity is not a valid denominator: ``max(1.0, base)`` becomes 1.0 and the
-    scale explodes to ``alloc`` (e.g. 2000x), turning a genuine few-hundred-dollar
-    curve drawdown into millions and flattening EVERY chart series plus the
-    aggregate/portfolio header.  A wallet's own proving curve is always available
-    and is the correct magnitude reference, so we floor the denominator at a
-    small fraction of the curve's peak.  No historical point is rewritten or
-    fabricated -- only the display scale is bounded.
-    """
-    base = max(1.0, fnum(leader_equity_base))
-    magnitudes = [abs(fnum(p.get("equity"))) for p in curve if isinstance(p, dict) and math.isfinite(fnum(p.get("equity")))]
-    if not magnitudes:
-        return alloc / base, 0.0, False
-    peak = max(magnitudes)
-    # Bind ONLY when the denominator has collapsed to a small fraction of the
-    # wallet's own curve (withdrawn account).  Healthy wallets (base within the
-    # curve's magnitude band) keep their existing scale unchanged.
-    collapsed = peak > 0 and base < 0.05 * peak
-    denom = peak if collapsed else base
-    return alloc / denom, peak, collapsed
-
-
 def _computed_true_drawdown_summary(wallet: str, alloc: float, leader_equity_base: float, proof_window_start_ms: int = 0, proof_window_end_ms: int = 0) -> Dict[str, Any]:
     window_start = inum(proof_window_start_ms)
     window_end = inum(proof_window_end_ms)
     curve = _computed_equity_curve(wallet, window_start, window_end)
-    scale, _scale_floor, _scale_floored = _bounded_proof_scale(
-        fnum(alloc, DEFAULT_NORM_BASE),
-        fnum(leader_equity_base, fnum(alloc, DEFAULT_NORM_BASE)),
-        curve,
-    )
+    scale = fnum(alloc, DEFAULT_NORM_BASE) / max(1.0, fnum(leader_equity_base, fnum(alloc, DEFAULT_NORM_BASE)))
     base = max(1.0, fnum(alloc, DEFAULT_NORM_BASE))
     if not curve:
         return {
@@ -1392,15 +1235,14 @@ def build_computed_true_drawdown_history(rows: List[Dict[str, Any]], ui: Optiona
             continue
         alloc = fnum(row.get("alloc"), wallet_alloc(wallet, ui))
         leader_base = fnum(row.get("effective_leader_equity_base"), alloc)
+        scale = alloc / max(1.0, leader_base)
         window_start, window_end = _row_proof_window(row)
-        _scale_curve = _computed_equity_curve(wallet, window_start, window_end)
-        scale, _scale_floor, _scale_floored = _bounded_proof_scale(alloc, leader_base, _scale_curve)
         summary = _computed_true_drawdown_summary(wallet, alloc, leader_base, window_start, window_end)
         row.update(summary)
         if summary.get("true_ts_status") != "ok":
             continue
         window_curve, _source_points, _forward_filled, _source_latest_ms = _windowed_true_curve_points(
-            _scale_curve,
+            _computed_equity_curve(wallet, window_start, window_end),
             window_start,
             window_end,
         )
@@ -8863,7 +8705,7 @@ def render_home(state: Dict[str, Any]) -> str:
     prop_selected = "selected" if _saved_mode == "proportional" else ""
     fixed_selected = "selected" if _saved_mode == "fixed" else ""
     min_checked = "checked" if parse_bool(ui.get("min_trade_notional_enabled", False)) else ""
-    return banner + HTML_TEMPLATE.format(updated=state.get("updated_at", ""), source_file=APP_SOURCE_FILE, norm=base, mode=_saved_mode.upper(), fixed=fnum(ui.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL), min_checked=min_checked, fee=fnum(ui.get("fee_bps"), DEFAULT_FEE_BPS), friction=fnum(ui.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS), cards=cards, proof_status=build_proof_status_block(), chart=render_chart(state.get("portfolio_history", []), state.get("true_drawdown_history", []), true_counts), wallet_count=modelled_count, table_head=table_head, table_rows=body_rows, raw_boundary=state.get("engine_truth_boundary", ""), filter_panel=filter_panel, excluded_section=excluded_section, equity_refresh_notice=equity_refresh_notice, prop_selected=prop_selected, fixed_selected=fixed_selected, LAST_TRADE_SSE_SCRIPT=LAST_TRADE_SSE_SCRIPT)
+    return banner + HTML_TEMPLATE.format(updated=state.get("updated_at", ""), source_file=APP_SOURCE_FILE, norm=base, mode=_saved_mode.upper(), fixed=fnum(ui.get("fixed_notional"), DEFAULT_FIXED_NOTIONAL), min_checked=min_checked, fee=fnum(ui.get("fee_bps"), DEFAULT_FEE_BPS), friction=fnum(ui.get("copy_friction_bps"), DEFAULT_COPY_FRICTION_BPS), cards=cards, chart=render_chart(state.get("portfolio_history", []), state.get("true_drawdown_history", []), true_counts), wallet_count=modelled_count, table_head=table_head, table_rows=body_rows, raw_boundary=state.get("engine_truth_boundary", ""), filter_panel=filter_panel, excluded_section=excluded_section, equity_refresh_notice=equity_refresh_notice, prop_selected=prop_selected, fixed_selected=fixed_selected, LAST_TRADE_SSE_SCRIPT=LAST_TRADE_SSE_SCRIPT)
 
 
 def extract_num(s: str) -> float:
@@ -9035,8 +8877,7 @@ body{{margin:0;background:#0d1117;color:#c9d1d9;font:12px Arial,Helvetica,sans-s
 .filter-panel{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;margin-bottom:8px}} .filter-summary{{cursor:pointer;font-size:11px;color:#c9d1d9;list-style:none}} .filter-summary::-webkit-details-marker{{display:none}} .filter-form{{margin-top:8px}} .filter-grid{{display:flex;flex-wrap:wrap;gap:6px 14px;margin-bottom:8px}} .frow{{display:inline-flex;align-items:center;gap:4px;font-size:11px;white-space:nowrap}} .frow b{{color:#8b949e}} .frow input{{width:70px;padding:2px 4px;font-size:11px}} .filter-actions{{display:inline-flex;gap:8px;align-items:center}} .apply-filter-btn{{background:#2d3c1a;border-color:#4d7a2a;color:#7ed651;padding:3px 10px;font-size:11px}} .clear-filter-btn{{background:#161b22;border-color:#30363d;color:#8b949e;padding:3px 10px;font-size:11px}}
 .excluded-section{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;margin-top:8px}} .excl-summary{{cursor:pointer;font-size:11px;color:#d29922;list-style:none}} .excl-summary::-webkit-details-marker{{display:none}} .excl-table{{width:auto;border-collapse:separate;border-spacing:0;font-size:11px;margin-top:6px}} .excl-table th{{background:#21262d;color:#8b949e;padding:4px 10px;text-align:left}} .excl-table td{{padding:4px 10px;border-bottom:1px solid #21262d;text-align:left}} .mono{{font-family:monospace}} .model-excluded-row{{opacity:.55}}
 @media(max-width:1300px){{.cards{{grid-template-columns:repeat(3,minmax(150px,1fr))}}}}
-.proof-status{{margin:8px 14px 0;border:1px solid #30363d;border-left:5px solid #8b949e;border-radius:8px;padding:8px 12px;background:#11161d}} .proof-head{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}} .proof-head b{{letter-spacing:.5px}} .proof-pill{{border-radius:12px;padding:2px 10px;font-size:11px;font-weight:700;border:1px solid}} .proof-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:3px 14px}} .proof-item{{display:flex;justify-content:space-between;gap:8px;line-height:1.55}} .proof-item span{{color:#8b949e}} .proof-trusted{{border-left-color:#2ea043}} .proof-trusted .proof-pill{{background:#003d1f;color:#2ea043;border-color:#2ea043}} .proof-converging{{border-left-color:#d29922}} .proof-converging .proof-pill{{background:#3d2f00;color:#d29922;border-color:#d29922}} .proof-unresolved{{border-left-color:#ff4d4f}} .proof-unresolved .proof-pill{{background:#3d0d0f;color:#ff4d4f;border-color:#ff4d4f}} .proof-unknown{{border-left-color:#8b949e}} .proof-unknown .proof-pill{{background:#21262d;color:#c9d1d9;border-color:#8b949e}} b.unknown{{color:#8b949e;font-weight:700}}
-</style></head><body><div class="top"><b>Wallet Proof Engine</b> <span class="muted">App: Wallet Proof Engine</span><span class="muted">Port: 8014</span> <a href="/refresh" class="refresh-btn" title="Refresh equity for selected cohort wallets (except LOCK), then rebuild the model">⟳ Rebuild model</a> <span class="live">POLL</span><span class="muted">Updated: {updated}</span><details class="global-settings"><summary>⚙ Model settings · {mode}</summary><form action="/api/ui-state" method="post" class="ajax-form"><span class="muted">Normalisation Base:</span><input name="norm_base" value="{norm}" size="8"><span class="muted">Mode:</span><select name="copy_mode"><option {prop_selected}>proportional</option><option {fixed_selected}>fixed</option></select><span class="muted">Fixed/Min $:</span><input name="fixed_notional" value="{fixed}" size="6"><label class="muted" title="When checked, model only opens wallet entries/flips whose effective copy notional is at least this wallet's Fixed/Min value."><input type="checkbox" name="min_trade_notional_enabled" value="1" {min_checked}> Min</label><span class="muted">Fee bps:</span><input name="fee_bps" value="{fee}" size="5"><span class="muted">Copy friction bps:</span><input name="copy_friction_bps" value="{friction}" size="5"><button>Set</button></form></details><form action="/api/import-copy-candidates" method="post" class="ajax-form" title="Import Wallet Talent Scout export into manual_wallets.txt with dedup"><button>Import Candidates</button></form><span id="save-status" class="muted">{equity_refresh_notice}</span><span style="margin-left:auto" class="muted">Auto refresh off</span></div>{proof_status}<div class="cards">{cards}</div><div class="section"><b>COMBINED PORTFOLIO — NON-USER WALLETS</b><div class="panel">{chart}</div><div class="small">TRACKED WALLETS ({wallet_count} modelled) — model derived in app from engine SSOT only. {raw_boundary}</div>{filter_panel}<div class="table-wrap"><table id="wallet-table"><thead>{table_head}</thead><tbody>{table_rows}</tbody></table></div>{excluded_section}</div>
+</style></head><body><div class="top"><b>Wallet Proof Engine</b> <span class="muted">App: Wallet Proof Engine</span><span class="muted">Port: 8014</span> <a href="/refresh" class="refresh-btn" title="Refresh equity for selected cohort wallets (except LOCK), then rebuild the model">⟳ Rebuild model</a> <span class="live">POLL</span><span class="muted">Updated: {updated}</span><details class="global-settings"><summary>⚙ Model settings · {mode}</summary><form action="/api/ui-state" method="post" class="ajax-form"><span class="muted">Normalisation Base:</span><input name="norm_base" value="{norm}" size="8"><span class="muted">Mode:</span><select name="copy_mode"><option {prop_selected}>proportional</option><option {fixed_selected}>fixed</option></select><span class="muted">Fixed/Min $:</span><input name="fixed_notional" value="{fixed}" size="6"><label class="muted" title="When checked, model only opens wallet entries/flips whose effective copy notional is at least this wallet's Fixed/Min value."><input type="checkbox" name="min_trade_notional_enabled" value="1" {min_checked}> Min</label><span class="muted">Fee bps:</span><input name="fee_bps" value="{fee}" size="5"><span class="muted">Copy friction bps:</span><input name="copy_friction_bps" value="{friction}" size="5"><button>Set</button></form></details><form action="/api/import-copy-candidates" method="post" class="ajax-form" title="Import Wallet Talent Scout export into manual_wallets.txt with dedup"><button>Import Candidates</button></form><span id="save-status" class="muted">{equity_refresh_notice}</span><span style="margin-left:auto" class="muted">Auto refresh off</span></div><div class="cards">{cards}</div><div class="section"><b>COMBINED PORTFOLIO — NON-USER WALLETS</b><div class="panel">{chart}</div><div class="small">TRACKED WALLETS ({wallet_count} modelled) — model derived in app from engine SSOT only. {raw_boundary}</div>{filter_panel}<div class="table-wrap"><table id="wallet-table"><thead>{table_head}</thead><tbody>{table_rows}</tbody></table></div>{excluded_section}</div>
 <script>(function(){{
 let busyUntil=0;
 const status=document.getElementById('save-status');
