@@ -1153,10 +1153,16 @@ class EngineSSOT:
         with self.seen_lock:
             if fill_id in self.seen_set:
                 return False
+            # Keep seen_set in lockstep with the bounded deque in O(1): evict the
+            # element the append is about to drop, THEN add.  The previous
+            # implementation rebuilt the whole set (set(self.seen_ids)) whenever
+            # the deque was full -- a ~250k-element rebuild on EVERY call once the
+            # ledger exceeded SEEN_FILL_IDS_MAX, which made cold start quadratic
+            # (506k ledger rows => hours of 100% CPU, no progress).
+            if self.seen_ids.maxlen is not None and len(self.seen_ids) == self.seen_ids.maxlen:
+                self.seen_set.discard(self.seen_ids[0])
             self.seen_set.add(fill_id)
             self.seen_ids.append(fill_id)
-            while len(self.seen_set) > len(self.seen_ids):
-                self.seen_set = set(self.seen_ids)
             return True
 
     def _load_ledger_seen_ids(self) -> None:
