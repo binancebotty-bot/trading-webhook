@@ -1079,20 +1079,22 @@ class EngineSSOT:
                 log("WARNING", f"EPOCH_PENDING wallet={wallet} epoch_id={ep.get('epoch_id')} "
                                f"reason=legacy_ledger_requires_reconciliation")
 
-        # Resume floor: the durable TRUSTED boundary, never a possibly-partial
-        # ledger tail.  After an incomplete interval the ledger may already hold
-        # some rows from it; resuming from last_ledger_ts would start PAST the
-        # unproven region and leap the hole.  Resume from the smaller of the
-        # ledger tail and the proven trusted-through boundary (the epoch fence
-        # when no interval has been proven complete yet).
-        last_ledger_ts = int(self.last_ledger_ts_by_wallet.get(wallet, 0) or 0)
+        # Resume floor = the earliest UNPROVEN point.  Prefer the durable trusted
+        # watermark; if none, use the epoch fence.  Pre-fence history is excluded
+        # from the epoch, so re-fetching it only burns the shared IP budget and
+        # delays convergence for inactive wallets (a wallet whose ledger tail
+        # predates its fence otherwise re-reads months of history every start).
+        # Never resume PAST a proven boundary, so an incomplete interval is
+        # re-covered rather than skipped.
         trusted = int(self.trusted_through_ms_by_wallet.get(wallet, 0) or 0)
-        if trusted <= 0:
-            trusted = inum((self.epoch_by_wallet.get(wallet) or {}).get("baseline_ts_ms"))
-        resume = max(0, min(last_ledger_ts, trusted) if (last_ledger_ts and trusted) else (last_ledger_ts or trusted))
-        # Poll-only DB hard rule: after restart, resume from a proven boundary.
-        # Never jump to near-now, or downtime fills can be missed.
-        self.last_poll_ts_by_wallet[wallet] = resume
+        fence = inum((self.epoch_by_wallet.get(wallet) or {}).get("baseline_ts_ms"))
+        if trusted > 0:
+            resume = trusted
+        elif fence > 0:
+            resume = fence
+        else:
+            resume = int(self.last_ledger_ts_by_wallet.get(wallet, 0) or 0)
+        self.last_poll_ts_by_wallet[wallet] = max(0, resume)
         self._mark_wallet_ready(wallet, "epoch_ready", fence)
 
     def bootstrap_all_wallets(self) -> None:
