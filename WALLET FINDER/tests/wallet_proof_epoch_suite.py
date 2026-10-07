@@ -1,4 +1,4 @@
-"""Regression suite for the Wallet Proof epoch repair (41 tests).
+"""Regression suite for the Wallet Proof epoch repair (42 tests).
 
 Covers the original 26 checks plus the four GPT-review gates:
   G1 snapshot-failure rejection (no epoch, no READY)
@@ -230,6 +230,15 @@ cn2 = e9.build_currentness()
 check("T5d inputs_current True while state_trustworthy False",
       cn2["inputs_current"] is True and cn2["state_trustworthy"] is False,
       f"inputs={cn2['inputs_current']} trustworthy={cn2['state_trustworthy']}")
+
+# T5e: a wallet with NO proven watermark must drag global_tt to 0 (min over ALL
+# required wallets), so a freshly-polled subset cannot look globally current.
+e9c = make_engine([W, W2], apiQ)
+e9c.trusted_through_ms_by_wallet = {W: now - 1000}  # W2 has no watermark
+cn3 = e9c.build_currentness()
+check("T5e missing watermark forces global_tt=0 and inputs_current False",
+      cn3["global_trusted_through_ms"] == 0 and cn3["inputs_current"] is False,
+      f"global={cn3['global_trusted_through_ms']} inputs={cn3['inputs_current']} never={cn3['wallets_never_current']}")
 
 # T6 recovery escalation
 apiR = FakeAPI([])
