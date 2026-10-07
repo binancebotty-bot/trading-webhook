@@ -807,9 +807,13 @@ class EngineSSOT:
             per_wallet[w] = tt
             if tt <= 0:
                 never.append(w)
-        # Global trusted-through is the MINIMUM across required wallets: a fast
-        # wallet must never make a lagging wallet appear current.
-        live = [per_wallet[w] for w in required if per_wallet[w] > 0]
+        # Global trusted-through is the MINIMUM across ALL required wallets: a
+        # fast wallet must never make a lagging wallet appear current.  A wallet
+        # with no proven watermark yet counts as 0, so global_tt is 0 (and
+        # inputs_current False) until EVERY required wallet has a proven interval
+        # -- min() over only the wallets that happen to have one would let a
+        # small, freshly-polled subset masquerade as global currentness.
+        live = [per_wallet[w] for w in required]
         global_tt = min(live) if live else 0
         now_ms = utc_now_ms()
         lag_ms = (now_ms - global_tt) if global_tt else None
