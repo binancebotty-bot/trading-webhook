@@ -505,6 +505,11 @@ class EngineSSOT:
         self.audit: Dict[str, int] = defaultdict(int)
         self.last_poll_ts_by_wallet: Dict[str, int] = {}
         self.last_exchange_snapshot_by_wallet: Dict[str, Dict[str, float]] = {}
+        # Server-observed timestamp of the LAST successful clearinghouseState
+        # response (the API's own `time`).  This is the provable fence used to
+        # timestamp a measured epoch: fills are timestamped on the SAME server
+        # clock, so a fill at ts <= fence is provably reflected in the snapshot.
+        self.last_exchange_snapshot_ts_by_wallet: Dict[str, int] = {}
         self.exchange_baseline_by_wallet: Dict[str, Dict[str, Dict[str, float]]] = self.load_exchange_baselines()
         self.wallet_runtime: Dict[str, Dict[str, Any]] = {}
         self.drift_state_by_wallet: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -598,6 +603,10 @@ class EngineSSOT:
                 if ep.get("baseline_position") is None or ep.get("baseline_ts_ms") in (None, 0):
                     # Incomplete epoch record: do not trust it.
                     continue
+                # Legacy persisted status from an earlier repair build maps to
+                # PENDING (never silently trusted as OPEN).
+                if ep.get("epoch_status") == "OPEN_UNVERIFIED_LEGACY":
+                    ep["epoch_status"] = "PENDING"
                 out[str(w).lower()] = ep
             return out
         except Exception as e:
@@ -642,7 +651,11 @@ class EngineSSOT:
             "baseline_ts_ms": ts,
             "baseline_position": base,
             "baseline_provenance": reason,
-            "epoch_status": "OPEN",
+            # Every fresh epoch starts PENDING: it becomes trusted (OPEN) only
+            # after a complete post-fence interval AND an independent
+            # reconciliation (_maybe_promote_epoch).  No epoch is trusted merely
+            # because it was created.
+            "epoch_status": "PENDING",
             "opened_at_ms": ts,
             "epoch_history": history,
         }
@@ -676,7 +689,46 @@ class EngineSSOT:
 
     def epoch_is_usable(self, wallet: str) -> bool:
         ep = self.epoch_by_wallet.get(wallet.lower())
-        return bool(ep) and ep.get("epoch_status") == "OPEN"
+        return bool(ep) and ep.get("epoch_status") in {"OPEN", "PENDING"}
+
+    def pending_epoch_can_promote(self, wallet: str, snapshot: Dict[str, Dict[str, float]]) -> bool:
+        """A PENDING epoch becomes trusted ONLY after (a) a complete post-fence
+        interval and (b) an independent reconciliation proving the model matches
+        exchange truth for every coin.  A fresh snapshot alone is never enough.
+        """
+        wallet = wallet.lower()
+        ep = self.epoch_by_wallet.get(wallet) or {}
+        if ep.get("epoch_status") != "PENDING":
+            return False
+        fence = inum(ep.get("baseline_ts_ms"))
+        if not ep.get("post_epoch_complete_interval"):
+            return False
+        if int(self.trusted_through_ms_by_wallet.get(wallet, 0) or 0) <= fence:
+            return False
+        coins = set(snapshot.keys()) | set((ep.get("baseline_position") or {}).keys()) | \
+            {c for (w, c) in self.positions.keys() if w == wallet}
+        for coin in coins:
+            exch = fnum((snapshot.get(coin) or {}).get("signed_size"))
+            current = self.positions.get((wallet, coin))
+            internal = current.signed_size if current else 0.0
+            if abs((exch - self.epoch_baseline(wallet, coin)) - internal) > POSITION_EPSILON:
+                return False
+        return True
+
+    def _maybe_promote_epoch(self, wallet: str, snapshot: Dict[str, Dict[str, float]]) -> None:
+        wallet = wallet.lower()
+        ep = self.epoch_by_wallet.get(wallet)
+        if not ep or ep.get("epoch_status") != "PENDING":
+            return
+        if not self.pending_epoch_can_promote(wallet, snapshot):
+            return
+        ep["epoch_status"] = "OPEN"
+        ep["promoted_at_ms"] = utc_now_ms()
+        ep["promotion_evidence"] = "complete_post_fence_interval+independent_reconciliation"
+        self.save_epochs()
+        self.audit["epochs_promoted"] += 1
+        log("INFO", f"EPOCH_PROMOTED wallet={wallet} epoch_id={ep.get('epoch_id')} "
+                    f"evidence=complete_interval+reconciliation")
 
     # ---- recovery gate persistence ----------------------------------------
     def _load_recovery_gate_state(self) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, int]]:
@@ -714,6 +766,11 @@ class EngineSSOT:
         prev = int(self.trusted_through_ms_by_wallet.get(wallet, 0) or 0)
         if int(end_ms) > prev:
             self.trusted_through_ms_by_wallet[wallet] = int(end_ms)
+            # Mark that a COMPLETE post-fence interval now exists for this wallet;
+            # this is one of the two PENDING -> OPEN promotion requirements.
+            ep = self.epoch_by_wallet.get(wallet)
+            if ep and int(end_ms) > inum(ep.get("baseline_ts_ms")):
+                ep["post_epoch_complete_interval"] = True
             self.save_watermarks()
 
     def save_watermarks(self) -> None:
@@ -765,7 +822,10 @@ class EngineSSOT:
             and (now_ms - global_tt) <= int(POLL_SECONDS * 2 * 1000)
         )
 
-        # State trustworthiness: any pair not CLEAN/RECOVERED is not trustworthy.
+        # State trustworthiness: EVERY required wallet must have a PROVEN epoch
+        # (OPEN, i.e. promoted/reconciled) and zero unresolved pairs.  A PENDING
+        # or absent epoch is NOT trustworthy, so an unaudited or flat wallet can
+        # never silently disappear from this gate.
         unresolved = 0
         escalated = 0
         total = 0
@@ -778,7 +838,13 @@ class EngineSSOT:
                     unresolved += 1
                 elif st in {"DRIFT_UNRESOLVED", "DRIFT_DETECTED"}:
                     unresolved += 1
-        state_trustworthy = bool(total > 0 and unresolved == 0)
+        wallets_without_proven_epoch = [
+            w for w in required
+            if (self.epoch_by_wallet.get(w) or {}).get("epoch_status") != "OPEN"
+        ]
+        state_trustworthy = bool(
+            total > 0 and unresolved == 0 and not wallets_without_proven_epoch
+        )
 
         return {
             "per_wallet_trusted_through_ms": per_wallet,
@@ -789,6 +855,7 @@ class EngineSSOT:
             "required_wallets": len(required),
             "wallets_never_current": len(never),
             "wallets_with_consecutive_failures": len(failed),
+            "wallets_without_proven_epoch": len(wallets_without_proven_epoch),
             "inputs_current": inputs_current,
             "state_trustworthy": state_trustworthy,
             "unresolved_pairs": unresolved,
@@ -899,19 +966,27 @@ class EngineSSOT:
                            if w == wallet and abs(p.signed_size) > POSITION_EPSILON}
         epoch = self._open_epoch(wallet, snapshot, ts_ms=ts, reason="measured_ledger_without_saved_baseline")
         epoch["legacy_internal_at_open"] = legacy_internal
-        epoch["epoch_status"] = "OPEN_UNVERIFIED_LEGACY"
+        # PENDING, never trusted: promotion requires a complete post-fence
+        # interval AND an independent reconciliation (see _maybe_promote_epoch).
+        epoch["epoch_status"] = "PENDING"
         self.save_epochs()
         self.audit["epochs_opened_unverified_legacy"] += 1
-        log("WARNING", f"EPOCH_OPEN_UNVERIFIED_LEGACY wallet={wallet} "
+        log("WARNING", f"EPOCH_PENDING wallet={wallet} "
                        f"legacy_internal_pairs={len(legacy_internal)} "
                        f"reason=ledger_existed_without_measured_baseline")
 
     def baseline_size(self, wallet: str, coin: str) -> float:
         return fnum((self.exchange_baseline_by_wallet.get(wallet.lower(), {}).get(str(coin).upper(), {}) or {}).get("signed_size"))
 
-    def fetch_exchange_positions(self, wallet: str) -> Optional[Dict[str, Dict[str, float]]]:
+    def fetch_exchange_positions(self, wallet: str) -> Tuple[Optional[Dict[str, Dict[str, float]]], int]:
+        """Fetch the current clearinghouseState.
+
+        Returns (positions, fence_ms).  fence_ms is the SERVER `time` from the
+        response -- the provable snapshot timestamp.  On any failure returns
+        (None, 0); callers must abort, never treat failure as a flat account.
+        """
         if requests is None:
-            return None
+            return None, 0
         if RATE_GUARD is not None and not RATE_GUARD.acquire(
             "clearinghouseState", timeout_s=SSOT_ACQUIRE_TIMEOUT_SEC
         ):
@@ -920,7 +995,7 @@ class EngineSSOT:
             # path in another process its headroom.
             self.audit["rate_budget_skipped_snapshots"] += 1
             log("INFO", f"RATE_BUDGET_SKIP wallet={wallet} request=clearinghouseState")
-            return None
+            return None, 0
         try:
             r = requests.post(
                 "https://api.hyperliquid.xyz/info",
@@ -931,7 +1006,14 @@ class EngineSSOT:
             if not isinstance(data, dict) or "assetPositions" not in data:
                 self.audit["position_snapshot_invalid"] += 1
                 log("WARNING", f"POSITION_SNAPSHOT_INVALID wallet={wallet} response={str(data)[:160]}")
-                return None
+                return None, 0
+            # Provable fence: the server's own response time.  A snapshot without
+            # it cannot fence an epoch, so fail closed rather than guess.
+            fence = inum(data.get("time"))
+            if fence <= 0:
+                self.audit["position_snapshot_no_time"] += 1
+                log("WARNING", f"POSITION_SNAPSHOT_NO_TIME wallet={wallet} action=fail_closed")
+                return None, 0
             out: Dict[str, Dict[str, float]] = {}
             for p in data.get("assetPositions", []):
                 pos = p.get("position", {}) if isinstance(p, dict) else {}
@@ -945,47 +1027,69 @@ class EngineSSOT:
                     "unrealized_pnl": fnum(pos.get("unrealizedPnl")),
                 }
             self.audit["position_snapshot_requests"] += 1
-            return out
+            return out, fence
         except Exception as e:
             self.audit["position_snapshot_errors"] += 1
             log("ERROR", f"POSITION_SNAPSHOT_ERROR wallet={wallet} err={e}")
-            return None
+            return None, 0
 
     def bootstrap_wallet_from_exchange(self, wallet: str, ts_ms: Optional[int] = None) -> None:
         wallet = wallet.lower()
-        now = int(ts_ms or utc_now_ms())
-        snapshot = self.fetch_exchange_positions(wallet)
+        snapshot, fence = self.fetch_exchange_positions(wallet)
         if snapshot is None:
-            log("WARNING", f"BOOTSTRAP_SNAPSHOT_FAILED wallet={wallet}")
-            snapshot = {}
+            # FAIL CLOSED: a failed snapshot must NOT create an epoch.  An empty
+            # snapshot would otherwise become a fake "measured" zero baseline and
+            # make every future fill look like drift.  No epoch, no READY.
+            self.audit["bootstrap_snapshot_failed"] += 1
+            log("WARNING", f"BOOTSTRAP_SNAPSHOT_FAILED wallet={wallet} action=abort_no_epoch_no_ready")
+            self.wallet_runtime.setdefault(wallet, {})["ready"] = False
+            return
         self.last_exchange_snapshot_by_wallet[wallet] = {k: dict(v) for k, v in snapshot.items()}
+        self.last_exchange_snapshot_ts_by_wallet[wallet] = fence
 
         # Maintain the legacy baseline mirror for any downstream readers, but the
-        # authoritative model is the measured proof epoch below.
-        self.set_exchange_baseline(wallet, snapshot, ts_ms=now)
+        # authoritative model is the measured proof epoch below.  The epoch is
+        # fenced at the SERVER snapshot time, never a pre-request local clock.
+        self.set_exchange_baseline(wallet, snapshot, ts_ms=fence)
 
         if not self.epoch_is_usable(wallet):
-            # No OPEN epoch yet -> establish a fresh MEASURED epoch.  baseline =
-            # current exchange position, internal_delta = 0, consume only fills
-            # strictly after T0.  Any legacy ledger position is retained only as
-            # a visible historical marker, never as accumulated internal truth.
+            # No OPEN/PENDING epoch yet -> establish a fresh MEASURED epoch at the
+            # server fence: baseline = current exchange position, internal_delta =
+            # 0, consume only fills strictly after the fence.  Any legacy ledger
+            # position is retained only as a visible historical marker, never as
+            # accumulated internal truth.
             had_ledger = wallet in self._startup_fill_wallets
             reason = "measured_restart_existing_ledger" if had_ledger else "measured_cold_start"
-            ep = self._open_epoch(wallet, snapshot, ts_ms=now, reason=reason)
+            ep = self._open_epoch(wallet, snapshot, ts_ms=fence, reason=reason)
             if had_ledger:
-                ep["epoch_status"] = "OPEN_UNVERIFIED_LEGACY"
+                # Legacy-ledger epochs start PENDING: they become trusted only
+                # after a complete post-fence interval AND an independent
+                # reconciliation proves the model matches exchange truth.
+                ep["epoch_status"] = "PENDING"
                 ep["legacy_internal_at_open"] = {
                     c: round(p.signed_size, 12)
                     for (w, c), p in self.positions.items()
                     if w == wallet and abs(p.signed_size) > POSITION_EPSILON
                 }
                 self.save_epochs()
+                log("WARNING", f"EPOCH_PENDING wallet={wallet} epoch_id={ep.get('epoch_id')} "
+                               f"reason=legacy_ledger_requires_reconciliation")
 
+        # Resume floor: the durable TRUSTED boundary, never a possibly-partial
+        # ledger tail.  After an incomplete interval the ledger may already hold
+        # some rows from it; resuming from last_ledger_ts would start PAST the
+        # unproven region and leap the hole.  Resume from the smaller of the
+        # ledger tail and the proven trusted-through boundary (the epoch fence
+        # when no interval has been proven complete yet).
         last_ledger_ts = int(self.last_ledger_ts_by_wallet.get(wallet, 0) or 0)
-        # Poll-only DB hard rule: after restart, resume from the last ledger fill.
+        trusted = int(self.trusted_through_ms_by_wallet.get(wallet, 0) or 0)
+        if trusted <= 0:
+            trusted = inum((self.epoch_by_wallet.get(wallet) or {}).get("baseline_ts_ms"))
+        resume = max(0, min(last_ledger_ts, trusted) if (last_ledger_ts and trusted) else (last_ledger_ts or trusted))
+        # Poll-only DB hard rule: after restart, resume from a proven boundary.
         # Never jump to near-now, or downtime fills can be missed.
-        self.last_poll_ts_by_wallet[wallet] = max(0, last_ledger_ts)
-        self._mark_wallet_ready(wallet, "epoch_ready", now)
+        self.last_poll_ts_by_wallet[wallet] = resume
+        self._mark_wallet_ready(wallet, "epoch_ready", fence)
 
     def bootstrap_all_wallets(self) -> None:
         log("INFO", f"BOOTSTRAP_START wallets={len(self.wallets)}")
@@ -1121,7 +1225,7 @@ class EngineSSOT:
             self.audit["fills_applied"] = 0
             for fill in fills:
                 ep = self.epoch_by_wallet.get(fill.wallet)
-                if not ep or ep.get("epoch_status") not in {"OPEN", "OPEN_UNVERIFIED_LEGACY"}:
+                if not ep or ep.get("epoch_status") not in {"OPEN", "PENDING"}:
                     skipped_no_epoch += 1
                     continue
                 if fill.timestamp_ms <= inum(ep.get("baseline_ts_ms"), 0):
@@ -1391,13 +1495,21 @@ class EngineSSOT:
                     self.audit["poll_deduped"] += 1
 
         if advance_cursor:
-            # Advance the cursor to end on a successful cycle.  The next cycle is
+            # Advance the cursor ONLY on a PROVEN-COMPLETE cycle.  An incomplete
+            # window must NOT advance last_poll_ts: if it did, the next complete
+            # poll would leap over the unresolved interval and later report
+            # inputs_current=True while a hole remains.  The next cycle is
             # protected by POLL_OVERLAP_MS.  Trusted-through is advanced
             # SEPARATELY and ONLY when completeness was proven (see
             # _advance_trusted_through); an incomplete window must never move it.
-            self.last_poll_ts_by_wallet[wallet] = max(max_ts, end_ms)
             if complete:
+                self.last_poll_ts_by_wallet[wallet] = max(max_ts, end_ms)
                 self._advance_trusted_through(wallet, end_ms)
+            else:
+                self.audit["poll_incomplete_no_cursor_advance"] += 1
+                log("WARNING", f"POLL_INCOMPLETE_NO_ADVANCE wallet={wallet} "
+                               f"reason={fetch.get('reason')} cursor_held_at="
+                               f"{self.last_poll_ts_by_wallet.get(wallet, 0)}")
 
         log(
             "INFO",
@@ -1431,6 +1543,9 @@ class EngineSSOT:
         if not self._is_wallet_ready(wallet):
             log("INFO", f"POLL_LOCKED wallet={wallet}")
             return 0
+
+        # Independent reconciliation also gates PENDING -> OPEN promotion.
+        self._maybe_promote_epoch(wallet, snapshot)
 
         # EPOCH-AWARE reconciliation.  The baseline is the MEASURED epoch position
         # at T0; the internal position accrues only from fills strictly after T0.
@@ -1630,11 +1745,12 @@ class EngineSSOT:
             else:
                 self.consecutive_poll_failures[wallet] = 0
 
-            snapshot = self.fetch_exchange_positions(wallet)
+            snapshot, fence = self.fetch_exchange_positions(wallet)
             if snapshot is None:
                 log("WARNING", f"POLL_SNAPSHOT_SKIPPED wallet={wallet} reason=invalid_or_failed")
                 continue
             self.last_exchange_snapshot_by_wallet[wallet] = {k: dict(v) for k, v in snapshot.items()}
+            self.last_exchange_snapshot_ts_by_wallet[wallet] = fence
             self.audit_position_drift_only(wallet, snapshot)
             self._wallet_state(wallet)["last_poll_reconcile_ms"] = now
 

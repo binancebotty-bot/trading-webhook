@@ -103,3 +103,30 @@ Copied real `exchange_baselines.json` + `engine_truth.json` (184 wallets, 2375 p
 - New runtime files (`proof_epoch.json`, `recovery_gate.json`, `proof_watermark.json`) are created on first run.
 
 **GO / NO-GO: GO** — model is sound; defects were implementation-level and are now located, fixed, and tested. Success is *not* "the new epoch begins CLEAN"; it is the engine staying correct while processing new fills and across restart/recovery.
+
+---
+
+## 8. GPT review response — four gates corrected (revision 2)
+
+GPT review ruling `CHANGES_REQUIRED` identified four correctness blockers plus a
+secondary trust-contract defect. All are now fixed and covered by dedicated tests.
+
+| Gate | Defect | Fix |
+|---|---|---|
+| **G1** | `fetch_exchange_positions()` returning `None` was converted to `{}`, then used to open a fake zero "measured" epoch. | `fetch_exchange_positions` now returns `(positions, fence_ms)`; on failure `(None, 0)`. `bootstrap_wallet_from_exchange` **aborts**: no epoch, no READY. |
+| **G2** | Epoch timestamp was a pre-request local clock (`now`), captured possibly at the start of the whole sweep — a fill between that timestamp and the snapshot could be double-counted. | Epoch is fenced at the **server** `clearinghouseState.time` (the same clock that timestamps fills). A snapshot with no `time` fails closed. Rebuild excludes fills `<= fence`, includes `> fence`. |
+| **G3** | `OPEN_UNVERIFIED_LEGACY` had no promotion path → permanent unresolved. | Replaced with **`PENDING`**. `_maybe_promote_epoch()` promotes PENDING → `OPEN` **only** after (a) a complete post-fence interval (`post_epoch_complete_interval`, set by `_advance_trusted_through`) **and** (b) an independent reconciliation for every coin. Legacy persisted status maps to PENDING on load. |
+| **G4** | Incomplete fetch still advanced `last_poll_ts_by_wallet` to `end_ms`; a later complete poll could leap the hole and report `inputs_current=True`. Restart resumed from a possibly-partial ledger tail. | Cursor advances **only** when `complete`. Restart resume point = `min(last_ledger_ts, trusted_boundary)` (trusted boundary = watermark, else epoch fence) — never past an unresolved gap. |
+| **G5** | `state_trustworthy` was `total > 0 and unresolved == 0` — an unaudited/flat wallet could vanish from the gate. | Now also requires **every required wallet to have a proven epoch (`OPEN`)**; `wallets_without_proven_epoch` is reported. |
+
+**Revision-2 test suite: 41/41 PASS** (was 26). New gates G1–G5 covered explicitly:
+snapshot-failure rejection; server-fence timestamp + at-fence fill exclusion;
+PENDING→OPEN convergence (positive and mismatch-negative); incomplete-interval
+no-leap across restart; trustworthy requires a proven epoch per wallet.
+
+### Honest note on CI
+GitHub shows **no CI checks / workflow runs** on the review branch — the 41/41
+result is author-executed locally, not independently run by GitHub. Reviewers who
+want independent execution should run
+`python "WALLET FINDER/tests/wallet_proof_epoch_suite.py"` (self-contained, mocked
+network, scratch IO; never touches live state).
