@@ -66,6 +66,12 @@ PROOF_EPOCH_JSON = OUTPUT_DIR / "proof_epoch.json"      # measured proof epochs 
 RECOVERY_GATE_JSON = OUTPUT_DIR / "recovery_gate.json"  # durable barren-recovery gate + attempt counts
 PROOF_WATERMARK_JSON = OUTPUT_DIR / "proof_watermark.json"  # durable trusted-through watermarks
 WALLET_GATE_FILE = BASE_DIR / "wallet_gate.json"  # visibility only; not modelling
+# Frozen manifest of wallets whose current epoch baseline was measured PRE-FIX
+# (native-only clearinghouseState) and OMITS held HIP-3 builder positions.  Auto
+# re-measurement is permitted ONLY while the wallet's CURRENT epoch_id matches
+# this manifest; once rolled, the epoch_id changes and no further automatic roll
+# is possible (so a legitimately-later builder position can never be rebaselined).
+HIP3_BASELINE_OMISSION_MANIFEST = BASE_DIR / "hip3_baseline_omission_targets.json"
 
 WS_URL = "wss://api.hyperliquid.xyz/ws"
 MAX_WALLETS = int(os.getenv("HL_MAX_WALLETS", "0"))  # 0 = unlimited; poll-only mode has no legacy WS wallet cap
@@ -558,6 +564,10 @@ class EngineSSOT:
         # _remeasure_epoch_baseline_omission): a failed union fetch must not
         # re-issue every poll cycle.
         self._baseline_remeasure_gate: Dict[str, float] = {}
+        # Frozen {wallet: expected_epoch_id} manifest of proven pre-fix baselines;
+        # auto re-measurement is permitted ONLY for a wallet whose current epoch_id
+        # still matches.  Empty manifest => no automatic roll (fail closed).
+        self._hip3_omission_targets: Dict[str, str] = self._load_hip3_omission_targets()
 
         startup_fills = self.load_fills_from_ledger()
         self._startup_fill_wallets: Set[str] = {f.wallet for f in startup_fills}
@@ -657,6 +667,26 @@ class EngineSSOT:
             ),
             "wallets": self.epoch_by_wallet,
         })
+
+    def _load_hip3_omission_targets(self) -> Dict[str, str]:
+        """Frozen manifest {wallet: expected_epoch_id} of proven pre-fix baselines.
+
+        Missing/empty manifest => {} => NO wallet is eligible for automatic
+        re-measurement (fail closed).  This binds the guard to the exact cohort we
+        proved defective, so a legitimately-later builder position can never be
+        rebaselined.
+        """
+        try:
+            if not HIP3_BASELINE_OMISSION_MANIFEST.exists():
+                return {}
+            data = json.loads(HIP3_BASELINE_OMISSION_MANIFEST.read_text(encoding="utf-8"))
+            tg = data.get("targets", data) if isinstance(data, dict) else {}
+            if not isinstance(tg, dict):
+                return {}
+            return {str(w).lower(): str(e) for w, e in tg.items() if e}
+        except Exception as e:
+            log("WARNING", f"HIP3_OMISSION_MANIFEST_LOAD_FAILED err={e} action=no_auto_roll")
+            return {}
 
     def _open_epoch(self, wallet: str, snapshot: Dict[str, Dict[str, float]],
                     ts_ms: Optional[int] = None, reason: str = "measured_snapshot") -> Dict[str, Any]:
@@ -1901,11 +1931,24 @@ class EngineSSOT:
             )
 
         if baseline_omission_rows:
-            # The wallet's epoch baseline is a known-defective pre-fix measurement.
-            # Re-measure it on the current native + all-builder-DEX union (the
-            # approved HIP-3 path).  Fail closed: if enumeration/snapshot/fence
-            # proof fails, the wallet is NOT rolled and the pairs stay flagged.
-            self._remeasure_epoch_baseline_omission(wallet, len(baseline_omission_rows))
+            # Only roll when the wallet is a FROZEN manifest target (its current
+            # epoch is the proven pre-fix defective one) AND every non-clean pair
+            # is a builder-baseline omission.  Any other non-clean pair (e.g. a
+            # native tracking gap) means the wallet is MIXED -> FAIL CLOSED, never
+            # absorb the genuine native discrepancy by rebaselining the whole wallet.
+            target_epoch = (self._hip3_omission_targets or {}).get(wallet)
+            current_epoch_id = (self.epoch_by_wallet.get(wallet) or {}).get("epoch_id")
+            if not target_epoch or target_epoch != current_epoch_id:
+                self.audit["baseline_remeasure_not_a_target"] += 1
+            elif drift_rows:
+                self.audit["baseline_remeasure_mixed_drift_blocked"] += 1
+                log("WARNING", f"BASELINE_REMEASURE_BLOCKED_MIXED wallet={wallet} "
+                               f"builder_omissions={len(baseline_omission_rows)} "
+                               f"other_drift={len(drift_rows)} action=no_roll")
+            else:
+                # Re-measure on the current native + all-builder-DEX union.
+                # Fail closed: if enumeration/snapshot/fence proof fails, no roll.
+                self._remeasure_epoch_baseline_omission(wallet, len(baseline_omission_rows))
 
         if not drift_rows:
             return len(baseline_omission_rows)

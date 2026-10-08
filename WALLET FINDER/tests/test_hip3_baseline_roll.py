@@ -77,6 +77,7 @@ def new_engine(epochs=None, positions=None):
     e.drift_recovery_gate_by_wallet = {}
     e.consecutive_poll_failures = defaultdict(int)
     e._baseline_remeasure_gate = {}
+    e._hip3_omission_targets = {}
     # wallets must be READY or drift audit returns early
     e.wallet_runtime = {W: {"ready": True}, NATIVE_W: {"ready": True}}
     return e
@@ -90,6 +91,7 @@ def test_guard_flags_builder_omission_not_native_drift():
         "epoch_id": "w-1", "epoch_status": "OPEN", "baseline_ts_ms": T - 10**9,
         "baseline_position": {"BTC": {"signed_size": 1.0, "entry_price": 1.0}},
     }
+    e._hip3_omission_targets = {W: "w-1"}   # frozen manifest: this epoch is the proven defect
     # a genuine NATIVE drift the guard must NOT capture
     e.epoch_by_wallet[NATIVE_W] = {
         "epoch_id": "n-1", "epoch_status": "OPEN", "baseline_ts_ms": T - 10**9,
@@ -129,6 +131,7 @@ def test_prior_epoch_preserved_unresolved():
         "epoch_id": "defective-1", "epoch_status": "OPEN", "baseline_ts_ms": T - 10**9,
         "baseline_position": {},
     }
+    e._hip3_omission_targets = {W: "defective-1"}
     fr = FakeRequests({
         "clearinghouseState": lambda b: ch_state([pos("xyz:MRNA", -5.0)], T) if b.get("dex") == "xyz"
         else ch_state([], T),
@@ -153,6 +156,7 @@ def test_roll_fails_closed_on_union_failure():
         "epoch_id": "defective-1", "epoch_status": "OPEN", "baseline_ts_ms": T - 10**9,
         "baseline_position": {},
     }
+    e._hip3_omission_targets = {W: "defective-1"}
 
     def boom(b):
         raise RuntimeError("perpDexs down")
@@ -190,9 +194,59 @@ def test_remeasure_is_gated():
     print("PASS 4/4 re-measure is gated (no repeated union fetch)")
 
 
+def test_post_fix_non_target_not_rolled():
+    """A post-fix epoch (NOT in the manifest) with a baseline-zero builder coin
+    + a missing fill must NOT auto-roll -- it may be genuine later drift."""
+    e = new_engine()
+    e.epoch_by_wallet[W] = {
+        "epoch_id": "post-fix-999", "epoch_status": "PENDING", "baseline_ts_ms": T,
+        "baseline_position": {},   # builder position opened AFTER the epoch
+    }
+    # manifest holds a DIFFERENT (the old) epoch_id -> current epoch is NOT a target
+    e._hip3_omission_targets = {W: "defective-OLD"}
+    fr = FakeRequests({
+        "clearinghouseState": lambda b: ch_state([pos("xyz:MRNA", -5.0)], T) if b.get("dex") == "xyz"
+        else ch_state([], T),
+        "userFillsByTime": lambda b: [],
+    })
+    mod.requests = fr; mod.RATE_GUARD = None
+    e.audit_position_drift_only(W, {"XYZ:MRNA": {"signed_size": -5.0}})
+    # guard still FLAGS it (surfaced), but the epoch must NOT be rolled
+    assert e.epoch_by_wallet[W]["epoch_id"] == "post-fix-999", "post-fix epoch must be untouched"
+    assert e.audit["epochs_rolled_baseline_omission"] == 0
+    assert e.audit["baseline_remeasure_not_a_target"] == 1
+    print("PASS 5/6 post-fix / non-target epoch is NOT auto-rolled")
+
+
+def test_mixed_drift_wallet_not_rolled():
+    """A target wallet with builder omission PLUS ordinary native drift must NOT roll."""
+    e = new_engine()
+    e.epoch_by_wallet[W] = {
+        "epoch_id": "defective-1", "epoch_status": "OPEN", "baseline_ts_ms": T - 10**9,
+        "baseline_position": {"ETH": {"signed_size": 0.0, "entry_price": 0.0}},  # ETH omitted too
+    }
+    e._hip3_omission_targets = {W: "defective-1"}   # it IS a manifest target
+    fr = FakeRequests({
+        "clearinghouseState": lambda b: ch_state([pos("xyz:MRNA", -5.0), pos("ETH", 7.0)], T)
+        if b.get("dex") == "xyz" else ch_state([pos("ETH", 7.0)], T),
+        "userFillsByTime": lambda b: [],
+    })
+    mod.requests = fr; mod.RATE_GUARD = None
+    # snapshot: builder omission (XYZ:MRNA) + genuine NATIVE drift (ETH held, not in baseline)
+    e.audit_position_drift_only(W, {"XYZ:MRNA": {"signed_size": -5.0}, "ETH": {"signed_size": 7.0}})
+    assert e.epoch_by_wallet[W]["epoch_id"] == "defective-1", "mixed wallet must NOT roll"
+    assert e.audit["epochs_rolled_baseline_omission"] == 0
+    assert e.audit["baseline_remeasure_mixed_drift_blocked"] == 1
+    # the native ETH discrepancy is preserved (not absorbed)
+    assert e.drift_state_by_wallet[W]["ETH"]["status"] in {"DRIFT_DETECTED", "DRIFT_UNRESOLVED"}
+    print("PASS 6/6 mixed-drift (target + native) wallet is NOT rolled; native drift preserved")
+
+
 if __name__ == "__main__":
     test_guard_flags_builder_omission_not_native_drift()
     test_prior_epoch_preserved_unresolved()
     test_roll_fails_closed_on_union_failure()
     test_remeasure_is_gated()
+    test_post_fix_non_target_not_rolled()
+    test_mixed_drift_wallet_not_rolled()
     print("\nALL BASELINE-OMISSION ROLL TESTS PASSED")
