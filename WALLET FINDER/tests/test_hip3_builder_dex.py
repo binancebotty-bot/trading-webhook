@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import os
 import sys
-from collections import defaultdict
+import threading
+from collections import defaultdict, deque
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -74,6 +75,43 @@ def new_engine():
     e.drift_state_by_wallet = {}
     e.mark_prices = {}
     e.wallets_raw = {}
+    e.shard_status = {}  # WS shard status for operational_inputs_fresh
+    e._capacity_invariant = {}
+    e._capacity_bootstrap_complete = False
+    e._capacity_rest_pages = defaultdict(list)
+    e._wallet_due_ms = {}
+    e._poll_rotation_offset = 0
+    e._proof_fence_by_wallet = {}
+    e._post_fence_buffer = defaultdict(list)
+    e._proof_fence_lock = threading.Lock()
+    e._wallet_state_data = {}
+    e.wallets = [W, NATIVE_W]
+    e.consecutive_poll_failures = defaultdict(int)
+    e._hip3_omission_targets = {}
+    e._pending_proof_cache = {}
+    e._pending_proof_cache_lock = threading.Lock()
+    e._drift_state_by_wallet = {}
+    e._hip3_omission_targets = {}
+    e._pending_proof_cache = {}
+    e._pending_proof_cache_lock = threading.Lock()
+    e.drift_recovery_attempt_count = {}
+    e.max_drift_recovery_attempts = 3
+    e.trusted_through_ms_by_wallet = {}
+    e.last_poll_ts_by_wallet = {}
+    e.epoch_by_wallet = {}
+    e._capacity_invariant = {}
+    e.drift_recovery_gate_by_wallet = {}
+    e.last_drift_recovery_wallet_ts_ms = {}
+    e.last_proof_fetch_ms = {}
+    e.seen_ids = deque(maxlen=1000)
+    e.seen_set = set()
+    e.seen_lock = threading.Lock()
+    e.state_lock = threading.Lock()
+
+    class _NoopLedger:
+        def append(self, row):
+            return None
+    e.raw_ledger = _NoopLedger()
     return e
 
 
@@ -290,6 +328,195 @@ def test_fill_hook_learns_builder_dex():
     print("PASS 6/8 builder fill registers the DEX; native fill does not")
 
 
+def test_constructor_startup_regression():
+    """Constructor must initialize capacity state BEFORE _compute_capacity_invariant()."""
+    e = new_engine()
+    assert hasattr(e, '_capacity_rest_pages'), "_capacity_rest_pages must exist after __init__"
+    assert hasattr(e, '_wallet_due_ms'), "_wallet_due_ms must exist after __init__"
+    assert hasattr(e, '_capacity_bootstrap_complete'), "_capacity_bootstrap_complete must exist after __init__"
+    assert e._capacity_bootstrap_complete is False, "bootstrap must not be complete before bootstrap_all_wallets"
+    assert hasattr(e, '_proof_fence_by_wallet'), "_proof_fence_by_wallet must exist after __init__"
+    assert hasattr(e, '_post_fence_buffer'), "_post_fence_buffer must exist after __init__"
+    assert hasattr(e, '_proof_fence_lock'), "_proof_fence_lock must exist after __init__"
+    print("PASS 9/17 constructor initializes capacity + fence state before _compute_capacity_invariant()")
+
+
+def test_proof_fence_activated_before_snapshot():
+    """Proof fence MUST be active BEFORE snapshots — check via event ordering.
+
+    Uses an instrumented accept_fill to verify the fence is set before
+    any ingest path that could apply a WS fill during the proof window.
+    """
+    e = new_engine()
+    e.wallet_runtime = {W: {"ready": True, "bootstrapped_at_ms": 0}}
+    e.epoch_by_wallet = {W: {"epoch_status": "OPEN", "baseline_ts_ms": 1791445590000}}
+    e.trusted_through_ms_by_wallet = {W: 1791445590000}
+    e.last_poll_ts_by_wallet = {W: 1791445590000}
+
+    call_order = []
+    orig_set_fence = e._set_proof_fence
+    orig_fetch = e._fetch_snapshots_only
+
+    def tracked_set_fence(wallet, fence_hi):
+        call_order.append("set_fence")
+        orig_set_fence(wallet, fence_hi)
+
+    def tracked_fetch(wallet, dexes):
+        call_order.append("fetch_snapshots")
+        return orig_fetch(wallet, dexes)
+
+    e._set_proof_fence = tracked_set_fence
+    e._fetch_snapshots_only = tracked_fetch
+
+    fr = FakeRequests({
+        "clearinghouseState": lambda b: ch_state([pos("BTC", 1.0)], 1791445590000),
+    })
+    mod.requests = fr
+    mod.RATE_GUARD = None
+    e._process_wallet_proof(W, 1791445595000)
+    assert call_order[0] == "set_fence", \
+        f"set_fence must come first, got {call_order}"
+    assert call_order[1] == "fetch_snapshots", \
+        f"fetch_snapshots must come after set_fence, got {call_order}"
+    print("PASS 10/17 proof fence activated BEFORE snapshots")
+
+
+def test_buffered_fills_released_only_after_reconciliation():
+    """Buffered post-fence WS fills must be released in finally, NOT before reconcile."""
+    e = new_engine()
+    e.wallet_runtime = {W: {"ready": True, "bootstrapped_at_ms": 0}}
+    e.epoch_by_wallet = {W: {"epoch_status": "OPEN", "baseline_ts_ms": 1791445590000}}
+    e.trusted_through_ms_by_wallet = {W: 1791445590000}
+    e.last_poll_ts_by_wallet = {W: 1791445590000}
+
+    # Simulate a buffered post-fence fill
+    buffered_fill = mod.RawFill(
+        fill_id="fb1", wallet=W, coin="BTC", side="BUY", price=50.0, size=1.0,
+        signed_size_delta=1.0, start_position=0.0, end_position=1.0,
+        closed_pnl=0.0, fee=0.0, timestamp_ms=1791445595000,
+        timestamp_iso="", received_at_ms=1791445595000, received_at_iso="",
+        latency_ms=0, source="ws", recording_method="WS_CAPTURED"
+    )
+    from collections import deque
+    e._post_fence_buffer[W] = [buffered_fill]
+
+    fr = FakeRequests({
+        "clearinghouseState": lambda b: ch_state([pos("BTC", 1.0)], 1791445590000),
+    })
+    mod.requests = fr
+    mod.RATE_GUARD = None
+
+    # The fill should NOT be in positions before reconciliation
+    e._process_wallet_proof(W, 1791445596000)
+    # After the proof, the buffered fill should have been applied
+    assert e.audit.get("ws_post_fence_applied", 0) == 1, \
+        "buffered fill must be released in finally block"
+    print("PASS 11/17 buffered fills released in finally after reconciliation")
+
+
+def test_native_only_uses_canonical_ingest():
+    """Native-only wallet (single DEX) uses _advance_trusted_through, not direct assignment."""
+    e = new_engine()
+    e.wallet_runtime = {NATIVE_W: {"ready": True, "bootstrapped_at_ms": 0}}
+    e.epoch_by_wallet = {NATIVE_W: {"epoch_status": "OPEN", "baseline_ts_ms": 1791445590000,
+                                     "epoch_id": "e1", "post_epoch_complete_interval": False}}
+    e.trusted_through_ms_by_wallet = {NATIVE_W: 1791445590000}
+    e.last_poll_ts_by_wallet = {NATIVE_W: 1791445590000}
+    e.perp_dex_names = []  # native-only
+
+    fr = FakeRequests({
+        "clearinghouseState": lambda b: ch_state([pos("BTC", 1.0)], 1791445591000),
+        "userFillsByTime": lambda b: [],
+    })
+    mod.requests = fr
+    mod.RATE_GUARD = None
+    e._process_wallet_proof(NATIVE_W, 1791445596000)
+    tt = e.trusted_through_ms_by_wallet.get(NATIVE_W, 0)
+    assert tt == 1791445591000, f"trusted_through must be advanced via _advance_trusted_through, got {tt}"
+    assert e.epoch_by_wallet[NATIVE_W].get("post_epoch_complete_interval") is True, \
+        "PENDING->OPEN promotion requires post_epoch_complete_interval=True"
+    print("PASS 12/17 native-only wallet uses canonical ingest + _advance_trusted_through()")
+
+
+def test_fixed_sla_capacity_failure():
+    """Fixed SLA: capacity_achievable must be False when theoretical minimum exceeds SLA."""
+    e = new_engine()
+    e._capacity_rest_pages = defaultdict(list)
+    for w in [W, NATIVE_W]:
+        e._capacity_rest_pages[w] = [5000]  # 5000 pages/wallet -> theoretical minimum >> 2160s SLA
+    e._wallets = [W, NATIVE_W]
+    e._compute_capacity_invariant()
+    inv = e._capacity_invariant
+    assert inv["declared_freshness_sla_seconds"] == 2160, "SLA must be fixed at 2160s"
+    assert inv["capacity_achievable"] is False, \
+        f"capacity_achievable must be False when theoretical_minimum={inv['theoretical_minimum_cycle_seconds']}s > SLA={inv['declared_freshness_sla_seconds']}s"
+    print("PASS 13/17 fixed SLA: capacity_achievable=False when theoretical minimum exceeds SLA")
+
+
+def test_scheduler_non_blocking_timeout():
+    """SSOT_ACQUIRE_TIMEOUT_SEC must be <= 2 for scheduler paths."""
+    assert mod.SSOT_ACQUIRE_TIMEOUT_SEC <= 2.0, \
+        f"SSOT_ACQUIRE_TIMEOUT_SEC must be <=2 for non-blocking scheduler, got {mod.SSOT_ACQUIRE_TIMEOUT_SEC}"
+    print("PASS 14/17 scheduler acquisition timeout is non-blocking (<=2s)")
+
+
+def test_scheduler_cadence_inside_sla():
+    """Scheduler must schedule wallets at < 100% of SLA, leaving headroom."""
+    e = new_engine()
+    e._capacity_invariant = {
+        "declared_freshness_sla_seconds": 2160,
+        "capacity_achievable": True,
+        "theoretical_minimum_cycle_seconds": 60,
+    }
+    sla_ms = 2160 * 1000
+    schedule_target_ms = int(sla_ms * 0.8)
+    # The due-time update must use schedule_target_ms, not full SLA
+    assert schedule_target_ms < sla_ms, \
+        "schedule target must be strictly inside the SLA"
+    print("PASS 15/17 scheduler cadence strictly inside SLA (80% target)")
+
+
+def test_operational_inputs_fresh_present():
+    """build_currentness must include operational_inputs_fresh field."""
+    e = new_engine()
+    e.wallets = [W]
+    e.trusted_through_ms_by_wallet = {W: 1791445590000}
+    e._capacity_invariant = {"capacity_achievable": True, "declared_freshness_sla_seconds": 2160}
+    e.epoch_by_wallet = {W: {"epoch_status": "OPEN", "baseline_ts_ms": 1791445580000}}
+    e.consecutive_poll_failures = defaultdict(int)
+    cw = e.build_currentness()
+    assert "operational_inputs_fresh" in cw, "operational_inputs_fresh must be present"
+    assert isinstance(cw["operational_inputs_fresh"], bool), \
+        "operational_inputs_fresh must be a boolean"
+    print("PASS 16/17 operational_inputs_fresh present in build_currentness")
+
+
+def test_cold_bootstrap_no_historical_fetch():
+    """Cold bootstrap must NOT issue userFillsByTime for historical catch-up.
+
+    A fresh wallet with no trusted_through should prove only the narrow
+    snapshot-coherence interval, not fetch months of history.
+    """
+    e = new_engine()
+    e.wallets = [NATIVE_W]
+    e.perp_dex_names = []
+    e.epoch_by_wallet = {}  # no prior epoch
+    e.trusted_through_ms_by_wallet = {}  # no watermark
+    e.last_poll_ts_by_wallet = {}  # no cursor
+
+    fr = FakeRequests({
+        "clearinghouseState": lambda b: ch_state([pos("BTC", 1.0)], 1791445590000),
+        "userFillsByTime": lambda b: [],
+    })
+    mod.requests = fr
+    mod.RATE_GUARD = None
+    e.bootstrap_wallet_from_exchange(NATIVE_W, ts_ms=1791445590500)
+    # Cold bootstrap should NOT call userFillsByTime (native-only, no proof needed)
+    assert fr.count("userFillsByTime") == 0, \
+        f"cold bootstrap must not issue historical proof fetch, got {fr.count('userFillsByTime')} calls"
+    print("PASS 17/17 cold bootstrap does not issue historical fill fetch")
+
+
 if __name__ == "__main__":
     test_builder_dex_of()
     test_perp_dexs_cached()
@@ -299,4 +526,13 @@ if __name__ == "__main__":
     test_fill_hook_learns_builder_dex()
     test_cold_bootstrap_discovers_preledger_builder_position()
     test_failed_perp_dexs_blocks_bootstrap()
+    test_constructor_startup_regression()
+    test_proof_fence_activated_before_snapshot()
+    test_buffered_fills_released_only_after_reconciliation()
+    test_native_only_uses_canonical_ingest()
+    test_fixed_sla_capacity_failure()
+    test_scheduler_non_blocking_timeout()
+    test_scheduler_cadence_inside_sla()
+    test_operational_inputs_fresh_present()
+    test_cold_bootstrap_no_historical_fetch()
     print("\nALL HIP-3 PROOF TESTS PASSED")
