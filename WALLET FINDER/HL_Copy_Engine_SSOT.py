@@ -1620,21 +1620,31 @@ class EngineSSOT:
         """
         wallet = wallet.lower()
         start_ms = max(0, int(start_ms))
-        fence_hi_ms = max(start_ms, int(fence_hi_ms))
         fence_lo_ms = int(fence_lo_ms)
 
-        # STALE SNAPSHOT.  fence_hi earlier than the watermark already proven
-        # means this snapshot cannot advance trust -- it would move the watermark
-        # BACKWARDS, and its older union could overwrite a newer measured one.
-        # Fail closed before spending a REST call.
+        # STALE SNAPSHOT -- checked against the ORIGINAL server fence, BEFORE any
+        # adjustment.  A previous version clamped fence_hi_ms with
+        # max(start_ms, fence_hi_ms) first; because the real caller passes the
+        # trusted watermark as start_ms, that clamp manufactured a LATER fence
+        # (server 3000, watermark 5000 -> 5000) and the guard below then compared
+        # 5000 < 5000 and passed, so an obsolete snapshot was accepted.  Never
+        # move a fence forward: an earlier fence than the watermark already proven
+        # cannot advance trust, and its older union must not overwrite a newer
+        # measured one.  Fail closed before spending a REST call.
+        server_fence_hi_ms = int(fence_hi_ms)
         proven_through = int(self.trusted_through_ms_by_wallet.get(wallet, 0) or 0)
-        if fence_hi_ms < proven_through:
+        if server_fence_hi_ms < proven_through:
             self.audit["hip3_stale_snapshot_rejected"] += 1
             log("WARNING", f"HIP3_STALE_SNAPSHOT wallet={wallet} "
-                           f"fence_hi={fence_hi_ms} proven_through={proven_through} "
+                           f"fence_hi={server_fence_hi_ms} "
+                           f"proven_through={proven_through} "
                            f"action=fail_closed")
             return {"ok": True, "complete": False, "hip3_coherent": False,
                     "rows": [], "rest_pages": 0, "reason": "stale_snapshot"}
+
+        # Proven to be at or beyond the watermark: it is safe to use as the
+        # interval end.  Floor it at fence_lo so the scan window is well formed.
+        fence_hi_ms = max(server_fence_hi_ms, fence_lo_ms)
 
         # ONE fetch covering the WHOLE span.  Fetching from start_ms alone can
         # miss a fill that landed before start_ms but inside (fence_lo, fence_hi]:

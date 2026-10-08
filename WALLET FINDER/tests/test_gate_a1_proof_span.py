@@ -27,6 +27,34 @@ if ENGINE_DIR not in sys.path:
 
 import HL_Copy_Engine_SSOT as engine_mod
 
+
+def _isolate_proof_state():
+    """Redirect every persisted proof path into a per-run temp directory.
+
+    The engine writes epochs, watermarks and the recovery gate to real files at
+    import time.  Tests must never create, truncate or delete those.  After
+    rebuilding the DATA_DIR-based paths we chdir into the temp tree as well, so
+    any relative path the engine resolves also lands there.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path as _Path
+
+    tmp = tempfile.mkdtemp(prefix="b8014_gate_a_")
+    for name in ("PROOF_EPOCH_JSON", "PROOF_WATERMARK_JSON", "RECOVERY_GATE_JSON",
+                 "RAW_FILLS_CSV"):
+        cur = getattr(engine_mod, name, None)
+        if not cur:
+            continue
+        # keep the ORIGINAL type: CsvLedger and friends call .parent on these.
+        setattr(engine_mod, name, _Path(tmp) / _Path(str(cur)).name)
+    os.chdir(tmp)
+    return tmp
+
+
+_ISOLATED = _isolate_proof_state()
+print("proof state isolated to: %s" % _ISOLATED)
+
 assert os.path.dirname(os.path.abspath(engine_mod.__file__)) == \
     os.path.abspath(ENGINE_DIR), (
         "imported engine from %s but ENGINE_DIR is %s" % (engine_mod.__file__, ENGINE_DIR))
@@ -213,15 +241,10 @@ def test_a13_control_proven_bootstrap_publishes():
     hand-built bag of attributes -- otherwise a missing attribute could make
     the control fail for the wrong reason, or worse, pass vacuously.
     """
-    from pathlib import Path
-
-    for f in (engine_mod.PROOF_EPOCH_JSON, engine_mod.PROOF_WATERMARK_JSON,
-              engine_mod.RECOVERY_GATE_JSON):
-        try:
-            Path(f).unlink()
-        except (FileNotFoundError, OSError):
-            pass
-
+    # NOTE: do NOT unlink the engine's proof files to isolate this test.  They are
+    # production proof history.  suite_tmpdir() (installed at import) already
+    # redirects every one of those paths into a per-run temp directory, so the
+    # real files are never opened, let alone deleted.
     e = engine_mod.EngineSSOT(wallets=[W])
     e.cold_bootstrap_dexes = lambda w: ["dex-a"]
     e._fetch_snapshots_only = lambda w, d: (
@@ -246,6 +269,54 @@ def test_a13_control_proven_bootstrap_publishes():
     ok("A1.3c", "proven bootstrap still publishes snapshot state (real constructor)")
 
 
+def test_a12_realistic_stale_watermark_caller_path():
+    """The REAL caller path, as named in the A1 REVIEW.
+
+    The reviewer showed the guard was bypassable because the method clamped
+    fence_hi_ms with max(start_ms, fence_hi_ms) BEFORE the stale check, and the
+    real caller passes the trusted watermark as start_ms:
+
+        trusted=5000, start=5000, actual server fence_hi=3000
+             -> clamp moved the fence to 5000
+             -> guard compared 5000 < 5000 and PASSED
+             -> an obsolete snapshot was accepted
+
+    This asserts the exact scenario: rejected, no REST spent, and no cursor or
+    snapshot state touched.
+    """
+    e = engine()
+    e.trusted_through_ms_by_wallet[W] = 5000
+    install_fetch(e, [])
+
+    # Mirror the caller: start_ms == the trusted watermark.
+    proof = e.prove_interval_coherent(W, 5000, 2000, 3000)
+
+    assert proof.get("reason") == "stale_snapshot", (
+        "DEFECT 1 NOT FIXED: the stale guard was bypassed on the real caller "
+        "path -- trusted=5000 start=5000 server fence_hi=3000 returned "
+        "reason=%r. The fence must be validated BEFORE any adjustment, never "
+        "manufactured forward with max(start_ms, fence_hi_ms)."
+        % proof.get("reason"))
+    assert proof.get("complete") is False and proof.get("hip3_coherent") is False, (
+        "a bypassed stale snapshot must fail closed on BOTH flags, got %r"
+        % proof)
+    assert e.fetch_log == [], (
+        "no REST request may be spent on an obsolete snapshot; windows seen: %s"
+        % (e.fetch_log,))
+
+    # No cursor / watermark / snapshot mutation.
+    assert e.trusted_through_ms_by_wallet[W] == 5000, (
+        "the watermark moved on a rejected stale snapshot: %r"
+        % e.trusted_through_ms_by_wallet[W])
+    assert W not in e.last_exchange_snapshot_by_wallet, (
+        "a rejected stale snapshot published snapshot state")
+    assert W not in e.last_exchange_snapshot_ts_by_wallet, (
+        "a rejected stale snapshot published a snapshot timestamp")
+    assert W not in e.wallet_active_dexes, (
+        "a rejected stale snapshot published active DEX state")
+    ok("A2.1", "stale watermark on the real caller path is rejected with no REST and no state change")
+
+
 if __name__ == "__main__":
     print("=== GATE A1 regression tests ===")
     test_a11_fill_before_start_ms_inside_span_is_caught()
@@ -255,5 +326,6 @@ if __name__ == "__main__":
     test_a12_control_equal_boundary_accepted()
     test_a13_rejected_bootstrap_leaves_no_cached_state()
     test_a13_control_proven_bootstrap_publishes()
+    test_a12_realistic_stale_watermark_caller_path()
     print("")
     print("ALL GATE A1 TESTS PASSED (%d assertion-groups)" % len(PASSES))
