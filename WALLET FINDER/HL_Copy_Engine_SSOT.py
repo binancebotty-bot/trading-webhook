@@ -816,6 +816,17 @@ class EngineSSOT:
             log("WARNING", f"BASELINE_REMEASURE_SKIPPED wallet={wallet} reason=union_snapshot_or_fence_failed")
             return False
         fence = max(dex_times.values()) if dex_times else 0
+        # Same rule as bootstrap: a re-measured baseline is authoritative, so an
+        # incoherent union is rejected rather than recorded.
+        fence_lo_rm = min(dex_times.values()) if dex_times else fence
+        if fence > fence_lo_rm:
+            proof = self.prove_interval_coherent(wallet, fence_lo_rm, fence_lo_rm, fence)
+            if not (proof.get("ok") and proof.get("hip3_coherent")):
+                self.audit["baseline_remeasure_union_incoherent"] += 1
+                log("WARNING", f"BASELINE_REMEASURE_INCOHERENT wallet={wallet} "
+                           f"lo={fence_lo_rm} hi={fence} reason={proof.get('reason')} "
+                           f"action=fail_closed_no_remeasure")
+                return False
         prior = self.epoch_by_wallet.get(wallet) or {}
         # Close the prior epoch as UNRESOLVED with the explicit reason BEFORE the
         # roll, so _open_epoch preserves it as UNRESOLVED in epoch_history (it
@@ -1544,6 +1555,63 @@ class EngineSSOT:
             dex_times[dex] = t
         return out, dex_times
 
+    def prove_interval_coherent(
+        self,
+        wallet: str,
+        start_ms: int,
+        fence_lo_ms: int,
+        fence_hi_ms: int,
+    ) -> Dict[str, Any]:
+        """Prove fill-history completeness over (start_ms, fence_hi] AND certify
+        that the multi-DEX snapshot union is coherent.
+
+        ONE REST fetch serves both proofs -- this is the same single-fetch
+        discipline fetch_wallet_positions used. The rows are returned UNPARSED;
+        the caller routes them through the canonical ingestion path so there is
+        exactly one place that parses, dedupes and appends.
+
+        FAILS CLOSED on every error path. A caller that receives
+        ``complete=False`` or ``hip3_coherent=False`` MUST NOT advance the
+        watermark and MUST NOT accept the snapshot as a measured baseline.
+        """
+        wallet = wallet.lower()
+        start_ms = max(0, int(start_ms))
+        fence_hi_ms = max(start_ms, int(fence_hi_ms))
+        fetch = self.fetch_fills_since(wallet, start_ms, fence_hi_ms)
+        rest_pages = int(fetch.get("rest_pages", 1))
+        if not fetch.get("ok"):
+            self.audit["hip3_fence_proof_unavailable"] += 1
+            return {"ok": False, "complete": False, "hip3_coherent": False,
+                    "rows": [], "rest_pages": rest_pages,
+                    "reason": fetch.get("reason", "fetch_failed")}
+        if not fetch.get("complete"):
+            self.audit["hip3_fence_proof_incomplete"] += 1
+            return {"ok": True, "complete": False, "hip3_coherent": False,
+                    "rows": fetch.get("rows", []), "rest_pages": rest_pages,
+                    "reason": fetch.get("reason", "incomplete")}
+
+        self._update_capacity_with_rest_pages(wallet, rest_pages)
+        rows = fetch.get("rows", [])
+        # Coherence: a fill inside (fence_lo, fence_hi] landed BETWEEN the
+        # sequential snapshots, so the union is not a coherent single instant.
+        # When fence_lo == fence_hi the interval is empty and this is vacuously
+        # coherent -- which is the ONLY thing special about a native-only wallet.
+        if fence_hi_ms > fence_lo_ms:
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                t = inum(raw_get(r, "time", "timestamp", "ts"), 0)
+                if fence_lo_ms < t <= fence_hi_ms:
+                    self.audit["hip3_union_incoherent_unified"] += 1
+                    log("WARNING", f"HIP3_UNION_INCOHERENT wallet={wallet} "
+                               f"lo={fence_lo_ms} hi={fence_hi_ms} fill_ts={t} "
+                               f"action=fail_closed")
+                    return {"ok": True, "complete": False, "hip3_coherent": False,
+                            "rows": rows, "rest_pages": rest_pages,
+                            "reason": "hip3_union_incoherent"}
+        return {"ok": True, "complete": True, "hip3_coherent": True, "rows": rows,
+                "rest_pages": rest_pages, "reason": "proven"}
+
     def fetch_wallet_positions(
         self, wallet: str, dexes: Iterable[str]
     ) -> Tuple[Optional[Dict[str, Dict[str, float]]], int, Dict[str, int], Optional[Dict[str, Any]]]:
@@ -1646,6 +1714,24 @@ class EngineSSOT:
         # Maintain the legacy baseline mirror for any downstream readers, but the
         # authoritative model is the measured proof epoch below.  The epoch is
         # fenced at the SERVER snapshot time, never a pre-request local clock.
+        # COHERENCE BEFORE A MEASURED BASELINE.  Sequential snapshots span
+        # [fence_lo, fence_hi]; a fill landing between them makes the union an
+        # incoherent instant.  A measured epoch is AUTHORITATIVE, so an
+        # incoherent union must never become one -- fail closed instead.
+        fence_lo = min(dex_times.values()) if dex_times else fence_hi
+        if fence_hi > fence_lo:
+            proof = self.prove_interval_coherent(wallet, fence_lo, fence_lo, fence_hi)
+            if not (proof.get("ok") and proof.get("hip3_coherent")):
+                self.audit["bootstrap_union_incoherent_rejected"] += 1
+                log("WARNING", f"BOOTSTRAP_UNION_INCOHERENT wallet={wallet} "
+                           f"lo={fence_lo} hi={fence_hi} reason={proof.get('reason')} "
+                           f"action=fail_closed_no_epoch_no_ready")
+                return False
+            # A fill found in the coherence window is REAL and must be applied
+            # before the baseline is measured, or it is silently lost.
+            if proof.get("rows"):
+                self.ingest_fetched_rows(wallet, proof["rows"], fence_hi, "bootstrap")
+
         self.set_exchange_baseline(wallet, snapshot, ts_ms=fence_hi)
 
         if not self.epoch_is_usable(wallet):
@@ -1656,7 +1742,7 @@ class EngineSSOT:
             # accumulated internal truth.
             had_ledger = wallet in self._startup_fill_wallets
             reason = "measured_restart_existing_ledger" if had_ledger else "measured_cold_start"
-            ep = self._open_epoch(wallet, snapshot, ts_ms=fence, reason=reason)
+            ep = self._open_epoch(wallet, snapshot, ts_ms=fence_hi, reason=reason)
             if had_ledger:
                 # Legacy-ledger epochs start PENDING: they become trusted only
                 # after a complete post-fence interval AND an independent
@@ -2074,7 +2160,7 @@ class EngineSSOT:
         self._update_capacity_with_rest_pages(wallet, rest_pages)
         raw_fills = fetch.get("rows", [])
         complete = bool(fetch.get("complete"))
-        if not complete:
+        if not complete:   # rows are still real; watermark stays held (fail closed)
             # Ingestion over this window could not be proven complete.  We still
             # apply the fills we DID receive (they are real and deduped), but the
             # caller MUST NOT treat this interval as trusted-through, and a
@@ -2082,6 +2168,35 @@ class EngineSSOT:
             self.audit[f"{reason}_incomplete"] += 1
             log("WARNING", f"REAL_FILL_INGEST_INCOMPLETE wallet={wallet} reason={reason} "
                            f"fetch_reason={fetch.get('reason')} rows={len(raw_fills)}")
+
+        return self.ingest_fetched_rows(wallet, raw_fills, end_ms, reason,
+                                       start_ms=start_ms, complete=complete,
+                                       fetch_reason=fetch.get("reason"),
+                                       advance_cursor=advance_cursor)
+
+    def ingest_fetched_rows(
+        self,
+        wallet: str,
+        raw_fills: List[Any],
+        end_ms: int,
+        reason: str,
+        *,
+        start_ms: Optional[int] = None,
+        complete: bool = True,
+        fetch_reason: Optional[str] = None,
+        advance_cursor: bool = False,
+    ) -> Dict[str, Any]:
+        """THE single row-application path: parse, dedupe, epoch-filter, apply.
+
+        Callers must have already PROVEN the interval if they intend to advance
+        a cursor or a watermark. This function applies real, deduped rows only;
+        it never fabricates a row and never widens a window.
+        """
+        wallet = wallet.lower()
+        raw_fills = list(raw_fills or [])
+        start_ms = int(start_ms if start_ms is not None else 0)
+        end_ms = max(start_ms, int(end_ms))
+        self.audit[f"{reason}_ingest_attempts"] += 1
 
         parsed: List[RawFill] = []
         min_ts = monitor_start_ms()
@@ -2133,7 +2248,7 @@ class EngineSSOT:
             else:
                 self.audit["poll_incomplete_no_cursor_advance"] += 1
                 log("WARNING", f"POLL_INCOMPLETE_NO_ADVANCE wallet={wallet} "
-                               f"reason={fetch.get('reason')} cursor_held_at="
+                               f"reason={fetch_reason} cursor_held_at="
                                f"{self.last_poll_ts_by_wallet.get(wallet, 0)}")
 
         log(
@@ -2143,7 +2258,7 @@ class EngineSSOT:
             f"max_ts={max_ts} complete={complete}"
         )
         return {"ok": True, "complete": complete, "parsed": len(parsed), "applied": applied,
-                "deduped": deduped, "max_ts": max_ts, "reason": fetch.get("reason")}
+                "deduped": deduped, "max_ts": max_ts, "reason": fetch_reason}
 
     def _set_drift_state(self, wallet: str, coin: str, status: str, detail: Dict[str, Any]) -> None:
         wallet = wallet.lower()
@@ -2446,16 +2561,32 @@ class EngineSSOT:
                     # Truly fresh wallet: prove (fence_lo, fence_hi] only.
                     start_ms = fence_lo
 
-            if fence_hi != fence_lo:
-                # Multi-DEX wallet: prove (start_ms, fence_hi] via canonical ingest.
-                ingest = self.ingest_real_fills_window(
-                    wallet, start_ms, fence_hi, "poll", advance_cursor=True
-                )
-            else:
-                # Native-only wallet: snapshot is self-coherent, no REST proof needed.
-                ingest = {"ok": True, "complete": True, "parsed": 0, "applied": 0,
-                          "deduped": 0, "max_ts": fence_hi, "reason": "native_only_no_proof"}
+            # ONE REST fetch proves BOTH things for EVERY wallet:
+            #   (a) fill-history completeness over (start_ms, fence_hi]
+            #   (b) multi-DEX snapshot union coherence over (fence_lo, fence_hi]
+            # A native-only wallet is NOT exempt from (a): a snapshot proves the
+            # position at one instant, never that no fills were missed since the
+            # watermark.  It is only exempt from (b), because with a single
+            # snapshot fence_lo == fence_hi and that interval is empty -- a
+            # property of the interval, not of the completeness proof.
+            proof = self.prove_interval_coherent(wallet, start_ms, fence_lo, fence_hi)
+            if not (proof.get("ok") and proof.get("complete") and proof.get("hip3_coherent")):
+                # Fail closed: no watermark advance, no drift acceptance, and the
+                # snapshot is NOT recorded as current truth for this wallet.
+                self.audit["poll_cycle_failed_no_cursor_advance"] += 1
+                if not proof.get("hip3_coherent", True):
+                    self.audit["poll_union_incoherent_rejected"] += 1
+                self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
+                log("WARNING", f"POLL_PROOF_FAIL wallet={wallet} reason={proof.get('reason')} "
+                           f"complete={proof.get('complete')} coherent={proof.get('hip3_coherent')} "
+                           f"action=fail_closed_no_cursor_advance")
+                return
 
+            # Rows are routed through the ONE canonical ingestion path: parse,
+            # dedupe and append happen in exactly one place.
+            ingest = self.ingest_fetched_rows(
+                wallet, proof["rows"], fence_hi, "poll", advance_cursor=True
+            )
             if not ingest.get("ok"):
                 self.audit["poll_cycle_failed_no_cursor_advance"] += 1
                 self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
@@ -2463,12 +2594,8 @@ class EngineSSOT:
 
             if ingest.get("complete"):
                 self.consecutive_poll_failures[wallet] = 0
-                # A COMPLETE interval is proven through fence_hi on THIS wallet, so
-                # the watermark advances via the canonical helper.  This must run on
-                # BOTH paths -- the multi-DEX REST proof AND the native-only
-                # self-coherent snapshot.  A self-coherent snapshot advances nothing
-                # by itself, so omitting this left native-only wallets permanently
-                # un-current (trusted_through frozen at bootstrap forever).
+                # Completeness AND coherence are both proven through fence_hi, so
+                # the watermark advances via the canonical helper.
                 self._advance_trusted_through(wallet, fence_hi)
                 self.last_poll_ts_by_wallet[wallet] = fence_hi
             else:
