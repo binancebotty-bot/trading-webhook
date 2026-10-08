@@ -988,7 +988,13 @@ class EngineSSOT:
             self._proof_fence_by_wallet[wallet] = int(fence_hi_ms)
 
     def _clear_proof_fence(self, wallet: str) -> List[Any]:
-        """Clear the proof fence and return any buffered post-fence fills."""
+        """Clear the proof fence and return any buffered post-fence fills.
+
+        The drain and the fence removal share one lock acquisition, so a fill can
+        never be appended to a buffer that has already been popped.  A fill that
+        arrives after this returns sees no fence and is applied inline by
+        accept_fill(), which is correct: the proof window has closed.
+        """
         with self._proof_fence_lock:
             self._proof_fence_by_wallet.pop(wallet, None)
             buffered = self._post_fence_buffer.pop(wallet, [])
@@ -1080,20 +1086,58 @@ class EngineSSOT:
                     f"fixed_sla={declared_sla_sec}s "
                     f"achievable={capacity_achievable}")
 
+    def _expected_shard_ids(self) -> Set[int]:
+        """Shard ids start() would create, derived the same way.
+
+        Freshness must be judged against the shards that are EXPECTED to exist.
+        With one fresh shard out of four, the intake path is NOT delivering.
+        """
+        try:
+            return set(range(len(chunked(list(self.wallets), WALLETS_PER_SHARD))))
+        except Exception:
+            return set()
+
     def _ws_data_fresh(self) -> bool:
-        """True when the WS intake path has delivered data within a reasonable window."""
+        """True only when EVERY expected shard has delivered data recently.
+
+        A single healthy shard proves nothing when four are required: three dead
+        shards mean three quarters of the wallets are not being fed, so
+        operational freshness must fail closed rather than pass on the best case.
+        """
         if not self.shard_status:
             return False
+        expected = self._expected_shard_ids()
+        if not expected:
+            return False
         now_ms = utc_now_ms()
-        for st in self.shard_status.values():
+        window_ms = WS_DATA_STALE_MS or 300000
+        for sid in sorted(expected):
+            st = self.shard_status.get(sid)
+            if not st:
+                return False
             last_data = int(st.get("last_data_ms", 0) or 0)
-            if last_data and (now_ms - last_data) < (WS_DATA_STALE_MS or 300000):
-                return True
-        return False
+            if not last_data or (now_ms - last_data) >= window_ms:
+                return False
+        return True
 
     def _rest_fresh(self) -> bool:
-        """True when at least one wallet has a non-zero trusted-through watermark."""
-        return any(int(tt) > 0 for tt in self.trusted_through_ms_by_wallet.values())
+        """True when at least one wallet's watermark is recent against the clock.
+
+        A non-zero watermark can be months old; that is not operational freshness.
+        Age is measured, so a stalled engine reports stale instead of healthy.
+        """
+        if not self.trusted_through_ms_by_wallet:
+            return False
+        now_ms = utc_now_ms()
+        window_ms = WS_DATA_STALE_MS or 300000
+        for tt in self.trusted_through_ms_by_wallet.values():
+            try:
+                v = int(tt)
+            except (TypeError, ValueError):
+                continue
+            if v > 0 and (now_ms - v) < window_ms:
+                return True
+        return False
 
     def build_currentness(self) -> Dict[str, Any]:
         """Smallest explicit currentness contract.
@@ -1861,12 +1905,18 @@ class EngineSSOT:
         # A WS fill queued immediately before the proof job can be consumed
         # by worker_loop after the fence activates.  Check here, not just
         # in _on_ws_message, to close the race.
+        # RACE-FREE FENCE CHECK.  The fence decision and the buffer append happen
+        # under ONE lock acquisition.  Previously the lock was released between
+        # reading the fence and appending, so _clear_proof_fence() could drain the
+        # buffer and drop the fence in that window: the fill would then be
+        # appended to a fresh list belonging to a wallet with no fence, and would
+        # never be released -- a silently lost fill.
         with self._proof_fence_lock:
             fence_hi = self._proof_fence_by_wallet.get(fill.wallet)
-        if fence_hi is not None and fill.timestamp_ms > fence_hi:
-            self._buffer_post_fence_fill(fill.wallet, fill)
-            self.audit["ws_post_fence_buffered_accept"] += 1
-            return False
+            if fence_hi is not None and fill.timestamp_ms > fence_hi:
+                self._post_fence_buffer[fill.wallet].append(fill)
+                self.audit["ws_post_fence_buffered_accept"] += 1
+                return False
         if not self._remember_id(fill.fill_id):
             self.audit["duplicates"] += 1
             self.wallets_raw.setdefault(fill.wallet, RawWallet(fill.wallet)).duplicate_fill_count += 1
