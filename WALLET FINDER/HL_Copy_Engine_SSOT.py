@@ -1115,6 +1115,15 @@ class EngineSSOT:
             st = self.shard_status.get(sid)
             if not st:
                 return False
+            # CONNECTION STATUS, not just recency.  A shard marked ERROR or CLOSED
+            # is not receiving anything, so a recent last_data_ms is stale residue
+            # rather than evidence of liveness -- it would keep WS trust alive for
+            # a shard that is no longer connected.  Only an OPEN shard can be
+            # fresh, and it must ALSO be within the window.
+            status = str(st.get("status", "") or "").upper()
+            if status and status != "OPEN":
+                self.audit["ws_shard_not_open"] += 1
+                return False
             last_data = int(st.get("last_data_ms", 0) or 0)
             if not last_data or (now_ms - last_data) >= window_ms:
                 return False
@@ -2811,11 +2820,22 @@ class EngineSSOT:
                     continue
                 # Proof fence: if a proof job is active for this wallet and the
                 # fill is newer than fence_hi, buffer it instead of applying.
-                # This prevents the WS proof-fence race.
+                #
+                # ONE acquisition decides everything.  The previous code read the
+                # fence under the lock, RELEASED it, then called
+                # _buffer_post_fence_fill() which re-acquired to append.  A drain
+                # landing in that window removed the fence and popped the buffer,
+                # and the WS thread then re-created both for a fill that was
+                # already being released -- the fill was STRANDED and silently
+                # lost.  Deciding and appending under a single acquisition leaves
+                # no window between "is there a fence" and "buffer against it".
+                buffered = False
                 with self._proof_fence_lock:
                     fence_hi = self._proof_fence_by_wallet.get(wallet)
-                if fence_hi is not None and fill.timestamp_ms > fence_hi:
-                    self._buffer_post_fence_fill(wallet, fill)
+                    if fence_hi is not None and fill.timestamp_ms > fence_hi:
+                        self._post_fence_buffer[wallet].append(fill)
+                        buffered = True
+                if buffered:
                     self.audit["ws_post_fence_buffered"] += 1
                     continue
                 try:
