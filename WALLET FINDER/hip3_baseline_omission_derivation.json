@@ -1,394 +1,10 @@
 {
-  "schema": "hip3_baseline_omission_derivation.v2",
+  "schema": "hip3_baseline_omission_derivation.v3",
   "fix_restart_ms": 1791446594000,
-  "criteria": "pre-fix epoch AND baseline==0 AND exchange!=0 AND (exchange - internal)!=0 AND interval [old_fence, snapshot] proven COMPLETE (trusted_through >= snapshot_ts)",
-  "proven_wallet_count": 33,
-  "proven_pair_count": 218,
-  "targets": {
-    "0x0008f22cbce8fa5ccc942fa7a454242ed94155f1": {
-      "epoch_id": "0x0008f22c-1791398550140",
-      "proven_coins": {
-        "XYZ:BRENTOIL": -6.99,
-        "XYZ:GOLD": 0.4051
-      }
-    },
-    "0x037919a275ddc336d024fa489c462d19c949838e": {
-      "epoch_id": "0x037919a2-1791398554394",
-      "proven_coins": {
-        "XYZ:MSTR": 2116.779
-      }
-    },
-    "0x061c9d98dca634ec51a38a79c2c9c734f8a5bf79": {
-      "epoch_id": "0x061c9d98-1791398556888",
-      "proven_coins": {
-        "XYZ:AAPL": -5.905,
-        "XYZ:AMZN": -8.519,
-        "XYZ:META": -3.693,
-        "XYZ:MSFT": -4.17,
-        "XYZ:NVDA": -10.304,
-        "XYZ:SILVER": -34.36
-      }
-    },
-    "0x069f458978a51ef6a9e2f6b6eb1fe2f39271c5a2": {
-      "epoch_id": "0x069f4589-1791398496163",
-      "proven_coins": {
-        "IO:ANTH": -2.0,
-        "IO:GPRO": -6500.0,
-        "MKTS:USBOND": 50.0,
-        "XYZ:BABA": 20.0,
-        "XYZ:CL": -48.245,
-        "XYZ:GOOGL": 12.23,
-        "XYZ:MRNA": -268.73,
-        "XYZ:SILVER": 33.6,
-        "XYZ:SOXL": -377.08,
-        "XYZ:UNITREE": -400.0
-      }
-    },
-    "0x1fc2b8d6bf6ebbc5edba103bb791d38904c37a97": {
-      "epoch_id": "0x1fc2b8d6-1791398531945",
-      "proven_coins": {
-        "XYZ:CBRS": 13.21,
-        "XYZ:MU": 4.577
-      }
-    },
-    "0x2d8ed020a4133e3d7dd84692902050507092cb25": {
-      "epoch_id": "0x2d8ed020-1791398472346",
-      "proven_coins": {
-        "XYZ:NBIS": -0.67
-      }
-    },
-    "0x2ded914aa5fadadd7d32d678924188586d7c656b": {
-      "epoch_id": "0x2ded914a-1791398468595",
-      "proven_coins": {
-        "XYZ:AAPL": 14.801,
-        "XYZ:AMZN": 7.77,
-        "XYZ:CL": -83.61,
-        "XYZ:GOOGL": 23.14,
-        "XYZ:SILVER": 312.5
-      }
-    },
-    "0x4101ce19ee81f24da894976e585f1e79119dbd93": {
-      "epoch_id": "0x4101ce19-1791398525199",
-      "proven_coins": {
-        "XYZ:JP225": -0.1,
-        "XYZ:KIOXIA": -400.0,
-        "XYZ:META": -25.0,
-        "XYZ:PLTR": -20.0,
-        "XYZ:XYZ100": -0.8
-      }
-    },
-    "0x41c684cbde3e449cc67c70aacb6132e3eb25b06d": {
-      "epoch_id": "0x41c684cb-1791398530124",
-      "proven_coins": {
-        "XYZ:META": 600.0
-      }
-    },
-    "0x4343a57b45c4235d5131c9dafdfb7a9b1d9106c8": {
-      "epoch_id": "0x4343a57b-1791398559301",
-      "proven_coins": {
-        "XYZ:EUR": 979.8,
-        "XYZ:JP225": -0.01286,
-        "XYZ:JPY": -28.9,
-        "XYZ:SP500": -0.229,
-        "XYZ:XYZ100": -0.0391
-      }
-    },
-    "0x45ae322cba529d9201248a4dc72dd2bfa4efd286": {
-      "epoch_id": "0x45ae322c-1791398584733",
-      "proven_coins": {
-        "XYZ:SPCX": -30.17,
-        "XYZ:TSLA": -4.859
-      }
-    },
-    "0x4655212f929e63d6be39a83e1def59fc533f32f9": {
-      "epoch_id": "0x4655212f-1791398466910",
-      "proven_coins": {
-        "XYZ:IREN": 273.8
-      }
-    },
-    "0x487033d8ed8c955098148e87fa66f54b046d5c41": {
-      "epoch_id": "0x487033d8-1791398522777",
-      "proven_coins": {
-        "IO:ANTH": 8.55,
-        "IO:DRAM": -682.17,
-        "IO:EWY": 33.24,
-        "IO:GPRO": -756.2,
-        "IO:IONQ": -260.24,
-        "IO:NBIS": -468.88,
-        "IO:SNDK": 4.3301,
-        "MKTS:SMALL2000": -6.993,
-        "MKTS:USTECH": -1.412,
-        "PARA:10Y": 4374.0,
-        "PARA:AAOI": 8.99,
-        "PARA:AVGO": 14.08,
-        "PARA:CIEN": 0.28,
-        "PARA:COHR": 15.89,
-        "PARA:CRDO": 100.97,
-        "PARA:GLW": 57.38,
-        "PARA:IREN": 279.37,
-        "PARA:NET": -3.01,
-        "PARA:RDDT": -119.84,
-        "PARA:SMCI": -156.72,
-        "PARA:SOFI": 57.59,
-        "PARA:STX": 11.634,
-        "PARA:TER": 25.12,
-        "PARA:UNITREE": 40.98,
-        "PARA:VST": -108.09,
-        "XYZ:AAOI": 29.42,
-        "XYZ:AAPL": 57.392,
-        "XYZ:AMAT": 2.26,
-        "XYZ:AMD": -8.965,
-        "XYZ:AMZN": 58.248,
-        "XYZ:ARM": -154.85,
-        "XYZ:ASML": -4.485,
-        "XYZ:AVGO": -2.36,
-        "XYZ:BB": -4111.7,
-        "XYZ:BE": -30.91,
-        "XYZ:BIRD": -566.5,
-        "XYZ:BX": -67.04,
-        "XYZ:CBRS": -688.99,
-        "XYZ:CL": 83.536,
-        "XYZ:COIN": -4.233,
-        "XYZ:COST": 0.0111,
-        "XYZ:CRWV": 765.48,
-        "XYZ:CVX": 0.48,
-        "XYZ:CXMT": -3311.7,
-        "XYZ:DELL": -14.98,
-        "XYZ:DKNG": -1197.01,
-        "XYZ:DRAM": -883.1,
-        "XYZ:EBAY": 17.95,
-        "XYZ:EWJ": 10.43,
-        "XYZ:EWT": 86.45,
-        "XYZ:EWY": -29.426,
-        "XYZ:EWZ": -44.53,
-        "XYZ:GEV": -6.913,
-        "XYZ:GIGADEV": -45.08,
-        "XYZ:GME": -293.97,
-        "XYZ:GOOGL": 11.686,
-        "XYZ:HIMS": -351.92,
-        "XYZ:HYUNDAI": -9.765,
-        "XYZ:IBM": 36.77,
-        "XYZ:INTC": 20.01,
-        "XYZ:IREN": 364.1,
-        "XYZ:JP225": -8e-05,
-        "XYZ:JPY": 2160.68,
-        "XYZ:KORU": 2628.6,
-        "XYZ:LITE": 2.256,
-        "XYZ:LLY": 2.2216,
-        "XYZ:LYTE": 362.11,
-        "XYZ:MAGS": -53.05,
-        "XYZ:META": -17.335,
-        "XYZ:MINIMAX": 72.51,
-        "XYZ:MRNA": -79.15,
-        "XYZ:MRVL": 9.96,
-        "XYZ:MSFT": -1.001,
-        "XYZ:MU": 38.296,
-        "XYZ:NATGAS": 3.5,
-        "XYZ:NBIS": -97.61,
-        "XYZ:NCLD": -924.58,
-        "XYZ:NET": -8.73,
-        "XYZ:NFLX": -63.766,
-        "XYZ:NOW": -15.52,
-        "XYZ:NVDA": -25.288,
-        "XYZ:ORCL": 4.273,
-        "XYZ:PLTR": -35.735,
-        "XYZ:PURRDAT": -211.0,
-        "XYZ:QCOM": -6.62,
-        "XYZ:QNT": -215.78,
-        "XYZ:RDDT": -20.09,
-        "XYZ:RIVN": 166.62,
-        "XYZ:RKLB": -169.15,
-        "XYZ:SHAZ": 73.53,
-        "XYZ:SHEIN": 776.8,
-        "XYZ:SKHX": -39.211,
-        "XYZ:SKHY": 32.14,
-        "XYZ:SMH": -85.317,
-        "XYZ:SMSN": -28.487,
-        "XYZ:SNDK": 5.969,
-        "XYZ:SNXX": -58.0,
-        "XYZ:SOFTBANK": -250.524,
-        "XYZ:SOXL": 33.04,
-        "XYZ:SPCX": -311.9,
-        "XYZ:STRC": -18.9,
-        "XYZ:TSLA": -298.572,
-        "XYZ:TSM": -22.558,
-        "XYZ:UNITREE": 24.69,
-        "XYZ:URNM": -122.79,
-        "XYZ:USAR": -1425.21,
-        "XYZ:WDC": -299.161,
-        "XYZ:XBI": -21.82,
-        "XYZ:XLE": 75.68,
-        "XYZ:ZM": -41.241
-      }
-    },
-    "0x4c968a3a530f76f655e7e7010075aa63cec87de2": {
-      "epoch_id": "0x4c968a3a-1791398476196",
-      "proven_coins": {
-        "XYZ:XYZ100": -17.9512
-      }
-    },
-    "0x54075eb39ac1a22cea2b8fc1f8398728b7890c04": {
-      "epoch_id": "0x54075eb3-1791398543592",
-      "proven_coins": {
-        "XYZ:BRENTOIL": 2.0,
-        "XYZ:EUR": -17.0,
-        "XYZ:GOLD": -0.2562,
-        "XYZ:SILVER": -13.0,
-        "XYZ:SP500": -0.002,
-        "XYZ:XYZ100": -0.0333
-      }
-    },
-    "0x5c740a903a81fe71b2d4de262ca18ec3f7cf2539": {
-      "epoch_id": "0x5c740a90-1791398549538",
-      "proven_coins": {
-        "XYZ:CBRS": 1.46,
-        "XYZ:CL": -0.001,
-        "XYZ:GOOGL": 0.885,
-        "XYZ:SILVER": -0.01,
-        "XYZ:SP500": -0.127,
-        "XYZ:URNM": 0.01,
-        "XYZ:XYZ100": -0.0056
-      }
-    },
-    "0x6b72e906a80bb733b7cfb1a0ff3c102043f3e603": {
-      "epoch_id": "0x6b72e906-1791398493748",
-      "proven_coins": {
-        "XYZ:CL": -233.182,
-        "XYZ:GOLD": 1.2433,
-        "XYZ:SILVER": 42.74,
-        "XYZ:SP500": -2.564
-      }
-    },
-    "0x6f42a18b6df587f018685fd8eade684ae91cd16d": {
-      "epoch_id": "0x6f42a18b-1791398478555",
-      "proven_coins": {
-        "XYZ:GOLD": 0.2751,
-        "XYZ:SP500": 0.918
-      }
-    },
-    "0x734f033cfd98e90c018e66594323600024776ae7": {
-      "epoch_id": "0x734f033c-1791398459368",
-      "proven_coins": {
-        "XYZ:HYUNDAI": 38.287,
-        "XYZ:MINIMAX": 32.0,
-        "XYZ:ZHIPU": 99.0
-      }
-    },
-    "0x80b165ed5f0484866b133696e9cd732fca15e9ad": {
-      "epoch_id": "0x80b165ed-1791398553779",
-      "proven_coins": {
-        "XYZ:JPY": 478.28
-      }
-    },
-    "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d": {
-      "epoch_id": "0x8bae3527-1791398467444",
-      "proven_coins": {
-        "XYZ:GOOGL": 219.928,
-        "XYZ:SKHX": 2107.974,
-        "XYZ:SKHY": -16202.56
-      }
-    },
-    "0x9221a960277fe388b899f58117aa9bd298463002": {
-      "epoch_id": "0x9221a960-1791398517694",
-      "proven_coins": {
-        "XYZ:AMD": 0.001,
-        "XYZ:BABA": 6.235,
-        "XYZ:BB": 1052.9,
-        "XYZ:CRCL": 55.011,
-        "XYZ:DRAM": 0.1,
-        "XYZ:EWY": 7.007,
-        "XYZ:GOLD": -0.0001,
-        "XYZ:GOOGL": 24.801,
-        "XYZ:META": 85.245,
-        "XYZ:MSFT": 1.686,
-        "XYZ:NVDA": 0.001,
-        "XYZ:SPCX": 202.33
-      }
-    },
-    "0x995a826fc3dd9cf4f26948dd187a08129ecc37e4": {
-      "epoch_id": "0x995a826f-1791398471669",
-      "proven_coins": {
-        "XYZ:GOLD": 5.0
-      }
-    },
-    "0x9aca58e24ff5845f245e7c2c897fef1bc59b3555": {
-      "epoch_id": "0x9aca58e2-1791398468045",
-      "proven_coins": {
-        "PARA:VST": 3117.37,
-        "XYZ:ORCL": 17156.444,
-        "XYZ:QCOM": 5580.47,
-        "XYZ:SPCX": -2363.58
-      }
-    },
-    "0x9e70cd4c4d001d595e42e475ff905d5ecd4e85ea": {
-      "epoch_id": "0x9e70cd4c-1791398590063",
-      "proven_coins": {
-        "XYZ:BRENTOIL": -21.5,
-        "XYZ:EUR": 2539.3
-      }
-    },
-    "0xa6690c41f293b28d373f80b050e3cf67bcf15953": {
-      "epoch_id": "0xa6690c41-1791398461856",
-      "proven_coins": {
-        "XYZ:MRNA": 30.28,
-        "XYZ:NVDA": -25.201
-      }
-    },
-    "0xa8f02c6b221d01f8a6d8adbc88a5f85b8569cd8e": {
-      "epoch_id": "0xa8f02c6b-1791398556208",
-      "proven_coins": {
-        "XYZ:JP225": -0.05798,
-        "XYZ:SP500": -2.248
-      }
-    },
-    "0xbb5048a65be6366beb86e06b21fa3018bb99340d": {
-      "epoch_id": "0xbb5048a6-1791398477923",
-      "proven_coins": {
-        "XYZ:HYUNDAI": 0.365
-      }
-    },
-    "0xd539db92e3e6de06cbd0d2ea94061d9bfb47ffc4": {
-      "epoch_id": "0xd539db92-1791398475644",
-      "proven_coins": {
-        "XYZ:SPCX": -0.44
-      }
-    },
-    "0xd5489a59e96cd16baca90eafda526ae1aa933b5d": {
-      "epoch_id": "0xd5489a59-1791398548935",
-      "proven_coins": {
-        "XYZ:CL": 5.65,
-        "XYZ:SILVER": 5.0
-      }
-    },
-    "0xd8c5228c515db3043dfa0c8cd6f22450ee9a99b0": {
-      "epoch_id": "0xd8c5228c-1791398524536",
-      "proven_coins": {
-        "XYZ:AMZN": -20550.0,
-        "XYZ:GOLD": -623.0541,
-        "XYZ:GOOGL": -34500.0,
-        "XYZ:META": -10380.0,
-        "XYZ:NVDA": -44100.0,
-        "XYZ:SILVER": -124056.24,
-        "XYZ:SP500": 1069.297,
-        "XYZ:XYZ100": 43.9193
-      }
-    },
-    "0xe434bd49e491819366fc5a679e83df459e67302f": {
-      "epoch_id": "0xe434bd49-1791398536870",
-      "proven_coins": {
-        "XYZ:SPCX": 8.28
-      }
-    },
-    "0xeeaf4055e581dae6a4eaea0a66181ecb207787f1": {
-      "epoch_id": "0xeeaf4055-1791398473620",
-      "proven_coins": {
-        "XYZ:AAPL": 100.0,
-        "XYZ:META": -50.0,
-        "XYZ:SKHX": -14.842,
-        "XYZ:XYZ100": -4.7612
-      }
-    }
-  },
+  "criteria": "pre-fix epoch AND baseline==0 AND exchange!=0 AND (exchange - internal)!=0 AND snapshot_fence >= old_fence (interval proven complete by fetch_wallet_positions)",
+  "proven_wallet_count": 0,
+  "proven_pair_count": 0,
+  "targets": {},
   "wallets": {
     "0x0008f22cbce8fa5ccc942fa7a454242ed94155f1": {
       "epoch_id": "0x0008f22c-1791398550140",
@@ -400,27 +16,22 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -6.99,
           "old_fence_ms": 1791398550140,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GOLD": {
           "exchange_at_snapshot": 0.4051,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 0.4051,
           "old_fence_ms": 1791398550140,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:BRENTOIL",
-        "XYZ:GOLD"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x037919a275ddc336d024fa489c462d19c949838e": {
       "epoch_id": "0x037919a2-1791398554394",
@@ -432,16 +43,13 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 2116.779,
           "old_fence_ms": 1791398554394,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:MSTR"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x061c9d98dca634ec51a38a79c2c9c734f8a5bf79": {
       "epoch_id": "0x061c9d98-1791398556888",
@@ -453,71 +61,58 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -5.905,
           "old_fence_ms": 1791398556888,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:AMZN": {
           "exchange_at_snapshot": -8.519,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -8.519,
           "old_fence_ms": 1791398556888,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:META": {
           "exchange_at_snapshot": -3.693,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -3.693,
           "old_fence_ms": 1791398556888,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:MSFT": {
           "exchange_at_snapshot": -4.17,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -4.17,
           "old_fence_ms": 1791398556888,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:NVDA": {
           "exchange_at_snapshot": -10.304,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -10.304,
           "old_fence_ms": 1791398556888,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SILVER": {
           "exchange_at_snapshot": -34.36,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -34.36,
           "old_fence_ms": 1791398556888,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:AAPL",
-        "XYZ:AMZN",
-        "XYZ:META",
-        "XYZ:MSFT",
-        "XYZ:NVDA",
-        "XYZ:SILVER"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x069f458978a51ef6a9e2f6b6eb1fe2f39271c5a2": {
       "epoch_id": "0x069f4589-1791398496163",
@@ -529,115 +124,94 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -2.0,
           "old_fence_ms": 1791398496163,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "IO:GPRO": {
           "exchange_at_snapshot": -6500.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -6500.0,
           "old_fence_ms": 1791398496163,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "MKTS:USBOND": {
           "exchange_at_snapshot": 50.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 50.0,
           "old_fence_ms": 1791398496163,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:BABA": {
           "exchange_at_snapshot": 20.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 20.0,
           "old_fence_ms": 1791398496163,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:CL": {
           "exchange_at_snapshot": -48.245,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -48.245,
           "old_fence_ms": 1791398496163,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GOOGL": {
           "exchange_at_snapshot": 12.23,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 12.23,
           "old_fence_ms": 1791398496163,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:MRNA": {
           "exchange_at_snapshot": -288.73,
           "post_fence_delta_sum(internal)": -20.0,
           "omitted_position_at_old_fence": -268.73,
           "old_fence_ms": 1791398496163,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SILVER": {
           "exchange_at_snapshot": 33.6,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 33.6,
           "old_fence_ms": 1791398496163,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SOXL": {
           "exchange_at_snapshot": -377.08,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -377.08,
           "old_fence_ms": 1791398496163,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:UNITREE": {
           "exchange_at_snapshot": -400.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -400.0,
           "old_fence_ms": 1791398496163,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "IO:ANTH",
-        "IO:GPRO",
-        "MKTS:USBOND",
-        "XYZ:BABA",
-        "XYZ:CL",
-        "XYZ:GOOGL",
-        "XYZ:MRNA",
-        "XYZ:SILVER",
-        "XYZ:SOXL",
-        "XYZ:UNITREE"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x1fc2b8d6bf6ebbc5edba103bb791d38904c37a97": {
       "epoch_id": "0x1fc2b8d6-1791398531945",
@@ -649,27 +223,22 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 13.21,
           "old_fence_ms": 1791398531945,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:MU": {
           "exchange_at_snapshot": 4.577,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 4.577,
           "old_fence_ms": 1791398531945,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:CBRS",
-        "XYZ:MU"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x2d8ed020a4133e3d7dd84692902050507092cb25": {
       "epoch_id": "0x2d8ed020-1791398472346",
@@ -681,16 +250,13 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.67,
           "old_fence_ms": 1791398472346,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:NBIS"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x2ded914aa5fadadd7d32d678924188586d7c656b": {
       "epoch_id": "0x2ded914a-1791398468595",
@@ -702,60 +268,49 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 14.801,
           "old_fence_ms": 1791398468595,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:AMZN": {
           "exchange_at_snapshot": 7.77,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 7.77,
           "old_fence_ms": 1791398468595,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:CL": {
           "exchange_at_snapshot": -83.61,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -83.61,
           "old_fence_ms": 1791398468595,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GOOGL": {
           "exchange_at_snapshot": 23.14,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 23.14,
           "old_fence_ms": 1791398468595,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SILVER": {
           "exchange_at_snapshot": 312.5,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 312.5,
           "old_fence_ms": 1791398468595,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:AAPL",
-        "XYZ:AMZN",
-        "XYZ:CL",
-        "XYZ:GOOGL",
-        "XYZ:SILVER"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x4101ce19ee81f24da894976e585f1e79119dbd93": {
       "epoch_id": "0x4101ce19-1791398525199",
@@ -767,60 +322,49 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.1,
           "old_fence_ms": 1791398525199,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:KIOXIA": {
           "exchange_at_snapshot": -400.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -400.0,
           "old_fence_ms": 1791398525199,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:META": {
           "exchange_at_snapshot": -25.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -25.0,
           "old_fence_ms": 1791398525199,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:PLTR": {
           "exchange_at_snapshot": -20.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -20.0,
           "old_fence_ms": 1791398525199,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:XYZ100": {
           "exchange_at_snapshot": -0.8,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.8,
           "old_fence_ms": 1791398525199,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:JP225",
-        "XYZ:KIOXIA",
-        "XYZ:META",
-        "XYZ:PLTR",
-        "XYZ:XYZ100"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x41c684cbde3e449cc67c70aacb6132e3eb25b06d": {
       "epoch_id": "0x41c684cb-1791398530124",
@@ -832,16 +376,13 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 600.0,
           "old_fence_ms": 1791398530124,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:META"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x4343a57b45c4235d5131c9dafdfb7a9b1d9106c8": {
       "epoch_id": "0x4343a57b-1791398559301",
@@ -853,60 +394,49 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 979.8,
           "old_fence_ms": 1791398559301,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:JP225": {
           "exchange_at_snapshot": -0.01286,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.01286,
           "old_fence_ms": 1791398559301,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:JPY": {
           "exchange_at_snapshot": -31.39,
           "post_fence_delta_sum(internal)": -2.4899999999999998,
           "omitted_position_at_old_fence": -28.900000000000002,
           "old_fence_ms": 1791398559301,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SP500": {
           "exchange_at_snapshot": -0.229,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.229,
           "old_fence_ms": 1791398559301,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:XYZ100": {
           "exchange_at_snapshot": -0.0391,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.0391,
           "old_fence_ms": 1791398559301,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:EUR",
-        "XYZ:JP225",
-        "XYZ:JPY",
-        "XYZ:SP500",
-        "XYZ:XYZ100"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x45ae322cba529d9201248a4dc72dd2bfa4efd286": {
       "epoch_id": "0x45ae322c-1791398584733",
@@ -918,27 +448,22 @@
           "post_fence_delta_sum(internal)": -22.939999999999998,
           "omitted_position_at_old_fence": -30.17,
           "old_fence_ms": 1791398584733,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:TSLA": {
           "exchange_at_snapshot": -4.859,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -4.859,
           "old_fence_ms": 1791398584733,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:SPCX",
-        "XYZ:TSLA"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x4655212f929e63d6be39a83e1def59fc533f32f9": {
       "epoch_id": "0x4655212f-1791398466910",
@@ -950,16 +475,13 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 273.8,
           "old_fence_ms": 1791398466910,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:IREN"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x487033d8ed8c955098148e87fa66f54b046d5c41": {
       "epoch_id": "0x487033d8-1791398522777",
@@ -971,1215 +493,1012 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 8.55,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "IO:DRAM": {
           "exchange_at_snapshot": -682.17,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -682.17,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "IO:EWY": {
           "exchange_at_snapshot": 33.24,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 33.24,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "IO:GPRO": {
           "exchange_at_snapshot": -756.2,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -756.2,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "IO:IONQ": {
           "exchange_at_snapshot": -260.24,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -260.24,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "IO:NBIS": {
           "exchange_at_snapshot": -468.88,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -468.88,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "IO:SNDK": {
           "exchange_at_snapshot": 4.3301,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 4.3301,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "MKTS:SMALL2000": {
           "exchange_at_snapshot": -6.993,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -6.993,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "MKTS:USTECH": {
           "exchange_at_snapshot": -1.412,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -1.412,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:10Y": {
           "exchange_at_snapshot": 4374.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 4374.0,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:AAOI": {
           "exchange_at_snapshot": 8.99,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 8.99,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:AVGO": {
           "exchange_at_snapshot": 14.08,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 14.08,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:CIEN": {
           "exchange_at_snapshot": 0.28,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 0.28,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:COHR": {
           "exchange_at_snapshot": 15.89,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 15.89,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:CRDO": {
           "exchange_at_snapshot": 100.97,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 100.97,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:GLW": {
           "exchange_at_snapshot": 57.38,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 57.38,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:IREN": {
           "exchange_at_snapshot": 279.37,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 279.37,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:NET": {
           "exchange_at_snapshot": -3.01,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -3.01,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:RDDT": {
           "exchange_at_snapshot": -119.84,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -119.84,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:SMCI": {
           "exchange_at_snapshot": -156.72,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -156.72,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:SOFI": {
           "exchange_at_snapshot": 57.59,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 57.59,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:STX": {
           "exchange_at_snapshot": 11.634,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 11.634,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:TER": {
           "exchange_at_snapshot": 25.12,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 25.12,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:UNITREE": {
           "exchange_at_snapshot": 40.98,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 40.98,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "PARA:VST": {
           "exchange_at_snapshot": -108.09,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -108.09,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:AAOI": {
           "exchange_at_snapshot": 29.42,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 29.42,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:AAPL": {
           "exchange_at_snapshot": 57.392,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 57.392,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:AMAT": {
           "exchange_at_snapshot": 2.26,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 2.26,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:AMD": {
           "exchange_at_snapshot": -8.965,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -8.965,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:AMZN": {
           "exchange_at_snapshot": 58.248,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 58.248,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:ARM": {
           "exchange_at_snapshot": -154.85,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -154.85,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:ASML": {
           "exchange_at_snapshot": -4.485,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -4.485,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:AVGO": {
           "exchange_at_snapshot": -2.36,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -2.36,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:BB": {
           "exchange_at_snapshot": -4111.7,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -4111.7,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:BE": {
           "exchange_at_snapshot": -30.91,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -30.91,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:BIRD": {
           "exchange_at_snapshot": -566.5,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -566.5,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:BX": {
           "exchange_at_snapshot": -67.04,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -67.04,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:CBRS": {
           "exchange_at_snapshot": -688.99,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -688.99,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:CL": {
           "exchange_at_snapshot": 83.536,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 83.536,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:COIN": {
           "exchange_at_snapshot": -4.233,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -4.233,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:COST": {
           "exchange_at_snapshot": 0.0111,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 0.0111,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:CRWV": {
           "exchange_at_snapshot": 765.48,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 765.48,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:CVX": {
           "exchange_at_snapshot": 0.48,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 0.48,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:CXMT": {
           "exchange_at_snapshot": -3311.7,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -3311.7,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:DELL": {
           "exchange_at_snapshot": -14.98,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -14.98,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:DKNG": {
           "exchange_at_snapshot": -1197.01,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -1197.01,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:DRAM": {
           "exchange_at_snapshot": -883.1,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -883.1,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:EBAY": {
           "exchange_at_snapshot": 17.95,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 17.95,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:EWJ": {
           "exchange_at_snapshot": 10.43,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 10.43,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:EWT": {
           "exchange_at_snapshot": 86.45,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 86.45,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:EWY": {
           "exchange_at_snapshot": -29.426,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -29.426,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:EWZ": {
           "exchange_at_snapshot": -44.53,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -44.53,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GEV": {
           "exchange_at_snapshot": -6.913,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -6.913,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GIGADEV": {
           "exchange_at_snapshot": -45.08,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -45.08,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GME": {
           "exchange_at_snapshot": -293.97,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -293.97,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GOOGL": {
           "exchange_at_snapshot": 11.686,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 11.686,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:HIMS": {
           "exchange_at_snapshot": -351.92,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -351.92,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:HYUNDAI": {
           "exchange_at_snapshot": -9.765,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -9.765,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:IBM": {
           "exchange_at_snapshot": 36.77,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 36.77,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:INTC": {
           "exchange_at_snapshot": 20.01,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 20.01,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:IREN": {
           "exchange_at_snapshot": 364.1,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 364.1,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:JP225": {
           "exchange_at_snapshot": -8e-05,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -8e-05,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:JPY": {
           "exchange_at_snapshot": 2160.68,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 2160.68,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:KORU": {
           "exchange_at_snapshot": 2628.6,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 2628.6,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:LITE": {
           "exchange_at_snapshot": 2.256,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 2.256,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:LLY": {
           "exchange_at_snapshot": 2.2216,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 2.2216,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:LYTE": {
           "exchange_at_snapshot": 362.11,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 362.11,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:MAGS": {
           "exchange_at_snapshot": -53.05,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -53.05,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:META": {
           "exchange_at_snapshot": -17.335,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -17.335,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:MINIMAX": {
           "exchange_at_snapshot": 72.51,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 72.51,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:MRNA": {
           "exchange_at_snapshot": -79.15,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -79.15,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:MRVL": {
           "exchange_at_snapshot": 9.96,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 9.96,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:MSFT": {
           "exchange_at_snapshot": -1.001,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -1.001,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:MU": {
           "exchange_at_snapshot": 38.296,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 38.296,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:NATGAS": {
           "exchange_at_snapshot": 3.5,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 3.5,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:NBIS": {
           "exchange_at_snapshot": -97.61,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -97.61,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:NCLD": {
           "exchange_at_snapshot": -766.95,
           "post_fence_delta_sum(internal)": 157.63000000000005,
           "omitted_position_at_old_fence": -924.5800000000002,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:NET": {
           "exchange_at_snapshot": -8.73,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -8.73,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:NFLX": {
           "exchange_at_snapshot": -63.766,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -63.766,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:NOW": {
           "exchange_at_snapshot": -15.52,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -15.52,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:NVDA": {
           "exchange_at_snapshot": -25.288,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -25.288,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:ORCL": {
           "exchange_at_snapshot": 4.273,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 4.273,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:PLTR": {
           "exchange_at_snapshot": -35.735,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -35.735,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:PURRDAT": {
           "exchange_at_snapshot": -211.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -211.0,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:QCOM": {
           "exchange_at_snapshot": -6.62,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -6.62,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:QNT": {
           "exchange_at_snapshot": -215.78,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -215.78,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:RDDT": {
           "exchange_at_snapshot": -20.09,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -20.09,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:RIVN": {
           "exchange_at_snapshot": 166.62,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 166.62,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:RKLB": {
           "exchange_at_snapshot": -169.15,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -169.15,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SHAZ": {
           "exchange_at_snapshot": 73.53,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 73.53,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SHEIN": {
           "exchange_at_snapshot": 776.8,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 776.8,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SKHX": {
           "exchange_at_snapshot": -39.211,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -39.211,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SKHY": {
           "exchange_at_snapshot": 32.14,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 32.14,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SMH": {
           "exchange_at_snapshot": -85.317,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -85.317,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SMSN": {
           "exchange_at_snapshot": -28.487,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -28.487,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SNDK": {
           "exchange_at_snapshot": 5.969,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 5.969,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SNXX": {
           "exchange_at_snapshot": -58.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -58.0,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SOFTBANK": {
           "exchange_at_snapshot": -250.524,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -250.524,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SOXL": {
           "exchange_at_snapshot": 33.04,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 33.04,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SPCX": {
           "exchange_at_snapshot": -311.9,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -311.9,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:STRC": {
           "exchange_at_snapshot": -18.9,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -18.9,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:TSLA": {
           "exchange_at_snapshot": -298.572,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -298.572,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:TSM": {
           "exchange_at_snapshot": -22.558,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -22.558,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:UNITREE": {
           "exchange_at_snapshot": 24.69,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 24.69,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:URNM": {
           "exchange_at_snapshot": -122.79,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -122.79,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:USAR": {
           "exchange_at_snapshot": -1425.21,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -1425.21,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:WDC": {
           "exchange_at_snapshot": -299.161,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -299.161,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:XBI": {
           "exchange_at_snapshot": -21.82,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -21.82,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:XLE": {
           "exchange_at_snapshot": 75.68,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 75.68,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:ZM": {
           "exchange_at_snapshot": -41.241,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -41.241,
           "old_fence_ms": 1791398522777,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "IO:ANTH",
-        "IO:DRAM",
-        "IO:EWY",
-        "IO:GPRO",
-        "IO:IONQ",
-        "IO:NBIS",
-        "IO:SNDK",
-        "MKTS:SMALL2000",
-        "MKTS:USTECH",
-        "PARA:10Y",
-        "PARA:AAOI",
-        "PARA:AVGO",
-        "PARA:CIEN",
-        "PARA:COHR",
-        "PARA:CRDO",
-        "PARA:GLW",
-        "PARA:IREN",
-        "PARA:NET",
-        "PARA:RDDT",
-        "PARA:SMCI",
-        "PARA:SOFI",
-        "PARA:STX",
-        "PARA:TER",
-        "PARA:UNITREE",
-        "PARA:VST",
-        "XYZ:AAOI",
-        "XYZ:AAPL",
-        "XYZ:AMAT",
-        "XYZ:AMD",
-        "XYZ:AMZN",
-        "XYZ:ARM",
-        "XYZ:ASML",
-        "XYZ:AVGO",
-        "XYZ:BB",
-        "XYZ:BE",
-        "XYZ:BIRD",
-        "XYZ:BX",
-        "XYZ:CBRS",
-        "XYZ:CL",
-        "XYZ:COIN",
-        "XYZ:COST",
-        "XYZ:CRWV",
-        "XYZ:CVX",
-        "XYZ:CXMT",
-        "XYZ:DELL",
-        "XYZ:DKNG",
-        "XYZ:DRAM",
-        "XYZ:EBAY",
-        "XYZ:EWJ",
-        "XYZ:EWT",
-        "XYZ:EWY",
-        "XYZ:EWZ",
-        "XYZ:GEV",
-        "XYZ:GIGADEV",
-        "XYZ:GME",
-        "XYZ:GOOGL",
-        "XYZ:HIMS",
-        "XYZ:HYUNDAI",
-        "XYZ:IBM",
-        "XYZ:INTC",
-        "XYZ:IREN",
-        "XYZ:JP225",
-        "XYZ:JPY",
-        "XYZ:KORU",
-        "XYZ:LITE",
-        "XYZ:LLY",
-        "XYZ:LYTE",
-        "XYZ:MAGS",
-        "XYZ:META",
-        "XYZ:MINIMAX",
-        "XYZ:MRNA",
-        "XYZ:MRVL",
-        "XYZ:MSFT",
-        "XYZ:MU",
-        "XYZ:NATGAS",
-        "XYZ:NBIS",
-        "XYZ:NCLD",
-        "XYZ:NET",
-        "XYZ:NFLX",
-        "XYZ:NOW",
-        "XYZ:NVDA",
-        "XYZ:ORCL",
-        "XYZ:PLTR",
-        "XYZ:PURRDAT",
-        "XYZ:QCOM",
-        "XYZ:QNT",
-        "XYZ:RDDT",
-        "XYZ:RIVN",
-        "XYZ:RKLB",
-        "XYZ:SHAZ",
-        "XYZ:SHEIN",
-        "XYZ:SKHX",
-        "XYZ:SKHY",
-        "XYZ:SMH",
-        "XYZ:SMSN",
-        "XYZ:SNDK",
-        "XYZ:SNXX",
-        "XYZ:SOFTBANK",
-        "XYZ:SOXL",
-        "XYZ:SPCX",
-        "XYZ:STRC",
-        "XYZ:TSLA",
-        "XYZ:TSM",
-        "XYZ:UNITREE",
-        "XYZ:URNM",
-        "XYZ:USAR",
-        "XYZ:WDC",
-        "XYZ:XBI",
-        "XYZ:XLE",
-        "XYZ:ZM"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
+    },
+    "0x4a07a3c64cdd534b482c0fc388f95584368060f3": {
+      "epoch_id": "0x4a07a3c6-1791398538062",
+      "epoch_baseline_ts_ms": 1791398538062,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:GOLD": {
+          "exchange_at_snapshot": 4.9133,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 4.9133,
+          "old_fence_ms": 1791398538062,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        }
+      },
+      "proven_coins": [],
+      "proven": false
     },
     "0x4c968a3a530f76f655e7e7010075aa63cec87de2": {
       "epoch_id": "0x4c968a3a-1791398476196",
@@ -2191,16 +1510,13 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -17.9512,
           "old_fence_ms": 1791398476196,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:XYZ100"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x54075eb39ac1a22cea2b8fc1f8398728b7890c04": {
       "epoch_id": "0x54075eb3-1791398543592",
@@ -2212,71 +1528,58 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 2.0,
           "old_fence_ms": 1791398543592,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:EUR": {
           "exchange_at_snapshot": -17.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -17.0,
           "old_fence_ms": 1791398543592,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GOLD": {
           "exchange_at_snapshot": -0.2562,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.2562,
           "old_fence_ms": 1791398543592,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SILVER": {
           "exchange_at_snapshot": -13.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -13.0,
           "old_fence_ms": 1791398543592,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SP500": {
           "exchange_at_snapshot": -0.002,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.002,
           "old_fence_ms": 1791398543592,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:XYZ100": {
           "exchange_at_snapshot": -0.0333,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.0333,
           "old_fence_ms": 1791398543592,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:BRENTOIL",
-        "XYZ:EUR",
-        "XYZ:GOLD",
-        "XYZ:SILVER",
-        "XYZ:SP500",
-        "XYZ:XYZ100"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x5c740a903a81fe71b2d4de262ca18ec3f7cf2539": {
       "epoch_id": "0x5c740a90-1791398549538",
@@ -2288,82 +1591,67 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 1.46,
           "old_fence_ms": 1791398549538,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:CL": {
           "exchange_at_snapshot": -0.001,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.001,
           "old_fence_ms": 1791398549538,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GOOGL": {
           "exchange_at_snapshot": 0.885,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 0.885,
           "old_fence_ms": 1791398549538,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SILVER": {
           "exchange_at_snapshot": -0.01,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.01,
           "old_fence_ms": 1791398549538,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SP500": {
           "exchange_at_snapshot": -0.127,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.127,
           "old_fence_ms": 1791398549538,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:URNM": {
           "exchange_at_snapshot": 0.01,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 0.01,
           "old_fence_ms": 1791398549538,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:XYZ100": {
           "exchange_at_snapshot": -0.0056,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.0056,
           "old_fence_ms": 1791398549538,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:CBRS",
-        "XYZ:CL",
-        "XYZ:GOOGL",
-        "XYZ:SILVER",
-        "XYZ:SP500",
-        "XYZ:URNM",
-        "XYZ:XYZ100"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x6b72e906a80bb733b7cfb1a0ff3c102043f3e603": {
       "epoch_id": "0x6b72e906-1791398493748",
@@ -2375,49 +1663,40 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -233.182,
           "old_fence_ms": 1791398493748,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GOLD": {
           "exchange_at_snapshot": 1.2675,
           "post_fence_delta_sum(internal)": 0.0242,
           "omitted_position_at_old_fence": 1.2433,
           "old_fence_ms": 1791398493748,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SILVER": {
           "exchange_at_snapshot": 44.43,
           "post_fence_delta_sum(internal)": 1.69,
           "omitted_position_at_old_fence": 42.74,
           "old_fence_ms": 1791398493748,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SP500": {
           "exchange_at_snapshot": -2.564,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -2.564,
           "old_fence_ms": 1791398493748,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:CL",
-        "XYZ:GOLD",
-        "XYZ:SILVER",
-        "XYZ:SP500"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x6f42a18b6df587f018685fd8eade684ae91cd16d": {
       "epoch_id": "0x6f42a18b-1791398478555",
@@ -2429,27 +1708,22 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 0.2751,
           "old_fence_ms": 1791398478555,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SP500": {
           "exchange_at_snapshot": 0.918,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 0.918,
           "old_fence_ms": 1791398478555,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:GOLD",
-        "XYZ:SP500"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x734f033cfd98e90c018e66594323600024776ae7": {
       "epoch_id": "0x734f033c-1791398459368",
@@ -2461,38 +1735,31 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 38.287,
           "old_fence_ms": 1791398459368,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:MINIMAX": {
           "exchange_at_snapshot": 112.0,
           "post_fence_delta_sum(internal)": 80.0,
           "omitted_position_at_old_fence": 32.0,
           "old_fence_ms": 1791398459368,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:ZHIPU": {
           "exchange_at_snapshot": 99.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 99.0,
           "old_fence_ms": 1791398459368,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:HYUNDAI",
-        "XYZ:MINIMAX",
-        "XYZ:ZHIPU"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x80b165ed5f0484866b133696e9cd732fca15e9ad": {
       "epoch_id": "0x80b165ed-1791398553779",
@@ -2504,16 +1771,13 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 478.28,
           "old_fence_ms": 1791398553779,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:JPY"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d": {
       "epoch_id": "0x8bae3527-1791398467444",
@@ -2525,38 +1789,31 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 219.928,
           "old_fence_ms": 1791398467444,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SKHX": {
           "exchange_at_snapshot": 2107.974,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 2107.974,
           "old_fence_ms": 1791398467444,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SKHY": {
           "exchange_at_snapshot": -16202.56,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -16202.56,
           "old_fence_ms": 1791398467444,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:GOOGL",
-        "XYZ:SKHX",
-        "XYZ:SKHY"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x9221a960277fe388b899f58117aa9bd298463002": {
       "epoch_id": "0x9221a960-1791398517694",
@@ -2568,137 +1825,112 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 0.001,
           "old_fence_ms": 1791398517694,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:BABA": {
           "exchange_at_snapshot": 6.235,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 6.235,
           "old_fence_ms": 1791398517694,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:BB": {
           "exchange_at_snapshot": 1052.9,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 1052.9,
           "old_fence_ms": 1791398517694,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:CRCL": {
           "exchange_at_snapshot": 55.011,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 55.011,
           "old_fence_ms": 1791398517694,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:DRAM": {
           "exchange_at_snapshot": 0.1,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 0.1,
           "old_fence_ms": 1791398517694,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:EWY": {
           "exchange_at_snapshot": 7.007,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 7.007,
           "old_fence_ms": 1791398517694,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GOLD": {
           "exchange_at_snapshot": -0.0001,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.0001,
           "old_fence_ms": 1791398517694,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GOOGL": {
           "exchange_at_snapshot": 24.801,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 24.801,
           "old_fence_ms": 1791398517694,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:META": {
           "exchange_at_snapshot": 85.245,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 85.245,
           "old_fence_ms": 1791398517694,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:MSFT": {
           "exchange_at_snapshot": 1.686,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 1.686,
           "old_fence_ms": 1791398517694,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:NVDA": {
           "exchange_at_snapshot": 0.001,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 0.001,
           "old_fence_ms": 1791398517694,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SPCX": {
           "exchange_at_snapshot": 202.33,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 202.33,
           "old_fence_ms": 1791398517694,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:AMD",
-        "XYZ:BABA",
-        "XYZ:BB",
-        "XYZ:CRCL",
-        "XYZ:DRAM",
-        "XYZ:EWY",
-        "XYZ:GOLD",
-        "XYZ:GOOGL",
-        "XYZ:META",
-        "XYZ:MSFT",
-        "XYZ:NVDA",
-        "XYZ:SPCX"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x995a826fc3dd9cf4f26948dd187a08129ecc37e4": {
       "epoch_id": "0x995a826f-1791398471669",
@@ -2710,16 +1942,13 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 5.0,
           "old_fence_ms": 1791398471669,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:GOLD"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0x9aca58e24ff5845f245e7c2c897fef1bc59b3555": {
       "epoch_id": "0x9aca58e2-1791398468045",
@@ -2731,49 +1960,319 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 3117.37,
           "old_fence_ms": 1791398468045,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:ORCL": {
           "exchange_at_snapshot": 17156.444,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 17156.444,
           "old_fence_ms": 1791398468045,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:QCOM": {
           "exchange_at_snapshot": 5580.47,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 5580.47,
           "old_fence_ms": 1791398468045,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SPCX": {
           "exchange_at_snapshot": -2363.58,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -2363.58,
           "old_fence_ms": 1791398468045,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "PARA:VST",
-        "XYZ:ORCL",
-        "XYZ:QCOM",
-        "XYZ:SPCX"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
+    },
+    "0x9d6ca7aad4c3cbb1cc18b5e7b8e59496a03bb22f": {
+      "epoch_id": "0x9d6ca7aa-1791398530738",
+      "epoch_baseline_ts_ms": 1791398530738,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:SNDK": {
+          "exchange_at_snapshot": -23.366,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -23.366,
+          "old_fence_ms": 1791398530738,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        }
+      },
+      "proven_coins": [],
+      "proven": false
+    },
+    "0x9db82c502472d76742fdd69609dfcc6e01327401": {
+      "epoch_id": "0x9db82c50-1791398515745",
+      "epoch_baseline_ts_ms": 1791398515745,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "PARA:UNITREE": {
+          "exchange_at_snapshot": -0.15,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -0.15,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:AAPL": {
+          "exchange_at_snapshot": -32.696,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -32.696,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:BABA": {
+          "exchange_at_snapshot": 0.586,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 0.586,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:BB": {
+          "exchange_at_snapshot": 482.3,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 482.3,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:BIRD": {
+          "exchange_at_snapshot": 2.2,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 2.2,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:BOT": {
+          "exchange_at_snapshot": 338.72,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 338.72,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:CBRS": {
+          "exchange_at_snapshot": 107.82,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 107.82,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:CL": {
+          "exchange_at_snapshot": -40.771,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -40.771,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:COPPER": {
+          "exchange_at_snapshot": 1649.0,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 1649.0,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:CRWV": {
+          "exchange_at_snapshot": 28.58,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 28.58,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:CXMT": {
+          "exchange_at_snapshot": -167.8,
+          "post_fence_delta_sum(internal)": 74.0,
+          "omitted_position_at_old_fence": -241.8,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:EWY": {
+          "exchange_at_snapshot": -0.253,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -0.253,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:GME": {
+          "exchange_at_snapshot": 3.55,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 3.55,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:HIMS": {
+          "exchange_at_snapshot": 10.08,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 10.08,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:MRNA": {
+          "exchange_at_snapshot": -0.04,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -0.04,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:MRVL": {
+          "exchange_at_snapshot": 0.35,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 0.35,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:MU": {
+          "exchange_at_snapshot": 0.044,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 0.044,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:NBIS": {
+          "exchange_at_snapshot": 0.09,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 0.09,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:ORCL": {
+          "exchange_at_snapshot": 106.266,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 106.266,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:PURRDAT": {
+          "exchange_at_snapshot": 1.0,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 1.0,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:QNT": {
+          "exchange_at_snapshot": 2.4,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 2.4,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:RKLB": {
+          "exchange_at_snapshot": 1.59,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 1.59,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:SILVER": {
+          "exchange_at_snapshot": 0.84,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 0.84,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:SKHX": {
+          "exchange_at_snapshot": 0.153,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 0.153,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:SMSN": {
+          "exchange_at_snapshot": -0.125,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -0.125,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:SNDK": {
+          "exchange_at_snapshot": -0.771,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -0.771,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:SP500": {
+          "exchange_at_snapshot": -0.572,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -0.572,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:USAR": {
+          "exchange_at_snapshot": 38.86,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 38.86,
+          "old_fence_ms": 1791398515745,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        }
+      },
+      "proven_coins": [],
+      "proven": false
     },
     "0x9e70cd4c4d001d595e42e475ff905d5ecd4e85ea": {
       "epoch_id": "0x9e70cd4c-1791398590063",
@@ -2785,27 +2284,22 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -21.5,
           "old_fence_ms": 1791398590063,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:EUR": {
           "exchange_at_snapshot": 2539.3,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 2539.3,
           "old_fence_ms": 1791398590063,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:BRENTOIL",
-        "XYZ:EUR"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0xa6690c41f293b28d373f80b050e3cf67bcf15953": {
       "epoch_id": "0xa6690c41-1791398461856",
@@ -2817,27 +2311,22 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 30.28,
           "old_fence_ms": 1791398461856,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:NVDA": {
           "exchange_at_snapshot": -25.201,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -25.201,
           "old_fence_ms": 1791398461856,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:MRNA",
-        "XYZ:NVDA"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0xa8f02c6b221d01f8a6d8adbc88a5f85b8569cd8e": {
       "epoch_id": "0xa8f02c6b-1791398556208",
@@ -2849,27 +2338,22 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.05798,
           "old_fence_ms": 1791398556208,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SP500": {
           "exchange_at_snapshot": -2.248,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -2.248,
           "old_fence_ms": 1791398556208,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:JP225",
-        "XYZ:SP500"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0xbb5048a65be6366beb86e06b21fa3018bb99340d": {
       "epoch_id": "0xbb5048a6-1791398477923",
@@ -2881,16 +2365,166 @@
           "post_fence_delta_sum(internal)": 0.246,
           "omitted_position_at_old_fence": 0.365,
           "old_fence_ms": 1791398477923,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:HYUNDAI"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
+    },
+    "0xcf66b5b579feabe8e59970428756106b1bddb4d7": {
+      "epoch_id": "0xcf66b5b5-1791398537478",
+      "epoch_baseline_ts_ms": 1791398537478,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:AAPL": {
+          "exchange_at_snapshot": -9.748,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -9.748,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:AMD": {
+          "exchange_at_snapshot": -5.531,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -5.531,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:CBRS": {
+          "exchange_at_snapshot": 17.47,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 17.47,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:CRWV": {
+          "exchange_at_snapshot": 28.42,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 28.42,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:CXMT": {
+          "exchange_at_snapshot": -335.8,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -335.8,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:INTC": {
+          "exchange_at_snapshot": -24.79,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -24.79,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:META": {
+          "exchange_at_snapshot": -4.626,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -4.626,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:MRNA": {
+          "exchange_at_snapshot": -15.34,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -15.34,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:NBIS": {
+          "exchange_at_snapshot": -12.03,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -12.03,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:PURRDAT": {
+          "exchange_at_snapshot": -229.0,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -229.0,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:RIVN": {
+          "exchange_at_snapshot": 210.11,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 210.11,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:SOXL": {
+          "exchange_at_snapshot": -21.67,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -21.67,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:STRC": {
+          "exchange_at_snapshot": -34.2,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -34.2,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:USAR": {
+          "exchange_at_snapshot": 207.64,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 207.64,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:XLE": {
+          "exchange_at_snapshot": -51.92,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -51.92,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:ZHIPU": {
+          "exchange_at_snapshot": 33.707,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": 33.707,
+          "old_fence_ms": 1791398537478,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        }
+      },
+      "proven_coins": [],
+      "proven": false
     },
     "0xd539db92e3e6de06cbd0d2ea94061d9bfb47ffc4": {
       "epoch_id": "0xd539db92-1791398475644",
@@ -2902,16 +2536,13 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -0.44,
           "old_fence_ms": 1791398475644,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:SPCX"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0xd5489a59e96cd16baca90eafda526ae1aa933b5d": {
       "epoch_id": "0xd5489a59-1791398548935",
@@ -2923,27 +2554,22 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 5.65,
           "old_fence_ms": 1791398548935,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SILVER": {
           "exchange_at_snapshot": 5.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 5.0,
           "old_fence_ms": 1791398548935,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:CL",
-        "XYZ:SILVER"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0xd8c5228c515db3043dfa0c8cd6f22450ee9a99b0": {
       "epoch_id": "0xd8c5228c-1791398524536",
@@ -2955,93 +2581,76 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -20550.0,
           "old_fence_ms": 1791398524536,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GOLD": {
           "exchange_at_snapshot": -650.4973,
           "post_fence_delta_sum(internal)": -27.4432,
           "omitted_position_at_old_fence": -623.0541,
           "old_fence_ms": 1791398524536,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:GOOGL": {
           "exchange_at_snapshot": -34400.0,
           "post_fence_delta_sum(internal)": 100.0,
           "omitted_position_at_old_fence": -34500.0,
           "old_fence_ms": 1791398524536,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:META": {
           "exchange_at_snapshot": -10380.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -10380.0,
           "old_fence_ms": 1791398524536,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:NVDA": {
           "exchange_at_snapshot": -43700.0,
           "post_fence_delta_sum(internal)": 400.0,
           "omitted_position_at_old_fence": -44100.0,
           "old_fence_ms": 1791398524536,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SILVER": {
           "exchange_at_snapshot": -124056.24,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -124056.24,
           "old_fence_ms": 1791398524536,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SP500": {
           "exchange_at_snapshot": 1069.297,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 1069.297,
           "old_fence_ms": 1791398524536,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:XYZ100": {
           "exchange_at_snapshot": 35.0545,
           "post_fence_delta_sum(internal)": -8.8648,
           "omitted_position_at_old_fence": 43.9193,
           "old_fence_ms": 1791398524536,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:AMZN",
-        "XYZ:GOLD",
-        "XYZ:GOOGL",
-        "XYZ:META",
-        "XYZ:NVDA",
-        "XYZ:SILVER",
-        "XYZ:SP500",
-        "XYZ:XYZ100"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0xe434bd49e491819366fc5a679e83df459e67302f": {
       "epoch_id": "0xe434bd49-1791398536870",
@@ -3053,16 +2662,13 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 8.28,
           "old_fence_ms": 1791398536870,
-          "snapshot_ts_ms": 1791449290819,
-          "trusted_through_ms": 1791449290819,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:SPCX"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
     },
     "0xeeaf4055e581dae6a4eaea0a66181ecb207787f1": {
       "epoch_id": "0xeeaf4055-1791398473620",
@@ -3074,49 +2680,85 @@
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": 100.0,
           "old_fence_ms": 1791398473620,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:META": {
           "exchange_at_snapshot": -50.0,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -50.0,
           "old_fence_ms": 1791398473620,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:SKHX": {
           "exchange_at_snapshot": -14.842,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -14.842,
           "old_fence_ms": 1791398473620,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         },
         "XYZ:XYZ100": {
           "exchange_at_snapshot": -4.7612,
           "post_fence_delta_sum(internal)": 0.0,
           "omitted_position_at_old_fence": -4.7612,
           "old_fence_ms": 1791398473620,
-          "snapshot_ts_ms": 1791452808766,
-          "trusted_through_ms": 1791452808766,
-          "interval_complete": true,
-          "proven": true
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
         }
       },
-      "proven_coins": [
-        "XYZ:AAPL",
-        "XYZ:META",
-        "XYZ:SKHX",
-        "XYZ:XYZ100"
-      ],
-      "proven": true
+      "proven_coins": [],
+      "proven": false
+    },
+    "0xfdbaa5eee7cdf45eec3a71a672065a67191fda7a": {
+      "epoch_id": "0xfdbaa5ee-1791398520913",
+      "epoch_baseline_ts_ms": 1791398520913,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "PARA:ANSEM": {
+          "exchange_at_snapshot": -7939.0,
+          "post_fence_delta_sum(internal)": -6103.0,
+          "omitted_position_at_old_fence": -1836.0,
+          "old_fence_ms": 1791398520913,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "PARA:TREAD": {
+          "exchange_at_snapshot": -308.0,
+          "post_fence_delta_sum(internal)": -8.0,
+          "omitted_position_at_old_fence": -300.0,
+          "old_fence_ms": 1791398520913,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "PARA:TTWO": {
+          "exchange_at_snapshot": -4.55,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -4.55,
+          "old_fence_ms": 1791398520913,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        },
+        "XYZ:SP500": {
+          "exchange_at_snapshot": -0.169,
+          "post_fence_delta_sum(internal)": 0.0,
+          "omitted_position_at_old_fence": -0.169,
+          "old_fence_ms": 1791398520913,
+          "snapshot_fence_ms": 0,
+          "interval_complete": false,
+          "proven": false
+        }
+      },
+      "proven_coins": [],
+      "proven": false
     }
   }
 }

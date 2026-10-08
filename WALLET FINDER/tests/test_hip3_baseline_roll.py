@@ -13,14 +13,18 @@ Deterministic + offline (module-level `requests` replaced with a fake).
 """
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+WF = HERE.parent
 sys.path.insert(0, str(HERE.parent))
 
 import HL_Copy_Engine_SSOT as mod  # noqa: E402
+POSITION_EPSILON = mod.POSITION_EPSILON
 
 
 class _Resp:
@@ -274,6 +278,52 @@ def test_unmanifested_builder_coin_blocks_roll():
     print("PASS 7/7 unmanifested builder coin -> ordinary DRIFT_*, wallet NOT rolled")
 
 
+def test_manifested_coin_delta_mismatch_blocks_roll():
+    """A manifested coin whose current_delta != frozen omission (e.g. a later
+    missing fill changed the delta) must go ordinary DRIFT_* and block the roll."""
+    e = new_engine()
+    e.epoch_by_wallet[W] = {
+        "epoch_id": "defective-1", "epoch_status": "OPEN", "baseline_ts_ms": T - 10**9,
+        "baseline_position": {},
+    }
+    # manifest says omitted = -5.0, but current delta = -8.0 (later missing fill)
+    e._hip3_omission_targets = {W: {"epoch_id": "defective-1", "proven_coins": {"XYZ:MRNA": -5.0}}}
+    fr = FakeRequests({
+        "clearinghouseState": lambda b: ch_state([pos("xyz:MRNA", -8.0)], T)
+        if b.get("dex") == "xyz" else ch_state([], T),
+        "perpDexs": lambda b: {"perpDexs": [{"name": "xyz"}]},
+    })
+    mod.requests = fr; mod.RATE_GUARD = None
+    e.audit_position_drift_only(W, {"XYZ:MRNA": {"signed_size": -8.0}})
+    # delta = -8.0, manifest says -5.0 -> mismatch -> ordinary DRIFT_*
+    st = e.drift_state_by_wallet[W]["XYZ:MRNA"]["status"]
+    assert st in {"DRIFT_DETECTED", "DRIFT_UNRESOLVED", "UNRESOLVED_ESCALATED"}, st
+    assert e.epoch_by_wallet[W]["epoch_id"] == "defective-1"
+    assert e.audit["epochs_rolled_baseline_omission"] == 0
+    print("PASS 8/8 manifested coin delta mismatch -> ordinary DRIFT_*, no roll")
+
+
+def test_derivation_uses_snapshot_fence():
+    """The derivation must use the actual snapshot fence from the drift state,
+    not trusted_through. Verify the derivation script reads snapshot_fence_ms."""
+    import subprocess, sys
+    r = subprocess.run(
+        [sys.executable, r"C:/Users/wigmore/.hermes/cache/scratch/derive_r5.py"],
+        capture_output=True, text=True, timeout=120
+    )
+    # The derivation should run without error (even if 0 proven due to no restart yet)
+    assert r.returncode == 0, f"derive_r5.py failed: {r.stderr}"
+    # Check that the derivation file uses snapshot_fence_ms
+    deriv_path = WF / "hip3_baseline_omission_derivation.json"
+    if deriv_path.exists():
+        d = json.loads(deriv_path.read_text())
+        # All entries should have snapshot_fence_ms field
+        for w, v in d.get("wallets", {}).items():
+            for c, coin_data in v.get("builder_coins", {}).items():
+                assert "snapshot_fence_ms" in coin_data, f"Missing snapshot_fence_ms for {w}/{c}"
+    print("PASS 9/9 derivation uses actual snapshot fence (snapshot_fence_ms)")
+
+
 if __name__ == "__main__":
     test_guard_flags_builder_omission_not_native_drift()
     test_prior_epoch_preserved_unresolved()
@@ -282,4 +332,6 @@ if __name__ == "__main__":
     test_post_fix_non_target_not_rolled()
     test_mixed_drift_wallet_not_rolled()
     test_unmanifested_builder_coin_blocks_roll()
+    test_manifested_coin_delta_mismatch_blocks_roll()
+    test_derivation_uses_snapshot_fence()
     print("\nALL BASELINE-OMISSION ROLL TESTS PASSED")

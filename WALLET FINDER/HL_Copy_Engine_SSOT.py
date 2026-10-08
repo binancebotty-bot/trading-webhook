@@ -1840,6 +1840,7 @@ class EngineSSOT:
         self.drift_state_by_wallet.setdefault(wallet, {})[coin] = {
             "status": status,
             "updated_at": utc_now_iso(),
+            "snapshot_fence_ms": self.last_exchange_snapshot_ts_by_wallet.get(wallet, 0),
             **detail,
         }
 
@@ -1926,6 +1927,7 @@ class EngineSSOT:
                 and self._builder_dex_of(coin) is not None
                 and abs(baseline) <= POSITION_EPSILON
                 and abs(exch_size) > POSITION_EPSILON
+                and abs(delta - target_coins[coin]) <= POSITION_EPSILON
             ):
                 self._set_drift_state(wallet, coin, "BASELINE_INVALID_REMEASUREMENT_REQUIRED", {
                     "delta": delta, "internal": internal_size, "exchange": exch_size,
