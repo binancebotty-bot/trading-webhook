@@ -1878,6 +1878,13 @@ class EngineSSOT:
 
         drift_rows: List[Dict[str, Any]] = []
         baseline_omission_rows: List[Dict[str, Any]] = []
+        # Eligibility: only a wallet whose CURRENT epoch is the exact proven pre-fix
+        # defective epoch (frozen manifest) may be treated as a baseline omission.
+        # A non-target / post-fix epoch follows the ORDINARY drift path -- its
+        # builder discrepancy may be a genuinely missing fill, not a bad baseline.
+        target_epoch = (self._hip3_omission_targets or {}).get(wallet)
+        current_epoch_id = (self.epoch_by_wallet.get(wallet) or {}).get("epoch_id")
+        is_omission_target = bool(target_epoch) and target_epoch == current_epoch_id
         for coin in sorted(coins):
             exch_size = fnum((snapshot.get(coin) or {}).get("signed_size"))
             baseline = self.epoch_baseline(wallet, coin)
@@ -1901,7 +1908,8 @@ class EngineSSOT:
             # must NOT trigger a wide recovery fetch.  Surface it explicitly for
             # re-measurement instead.  Never generalised to ordinary drift.
             if (
-                self._builder_dex_of(coin) is not None
+                is_omission_target
+                and self._builder_dex_of(coin) is not None
                 and abs(baseline) <= POSITION_EPSILON
                 and abs(exch_size) > POSITION_EPSILON
             ):
@@ -1931,16 +1939,13 @@ class EngineSSOT:
             )
 
         if baseline_omission_rows:
-            # Only roll when the wallet is a FROZEN manifest target (its current
-            # epoch is the proven pre-fix defective one) AND every non-clean pair
-            # is a builder-baseline omission.  Any other non-clean pair (e.g. a
-            # native tracking gap) means the wallet is MIXED -> FAIL CLOSED, never
-            # absorb the genuine native discrepancy by rebaselining the whole wallet.
-            target_epoch = (self._hip3_omission_targets or {}).get(wallet)
-            current_epoch_id = (self.epoch_by_wallet.get(wallet) or {}).get("epoch_id")
-            if not target_epoch or target_epoch != current_epoch_id:
-                self.audit["baseline_remeasure_not_a_target"] += 1
-            elif drift_rows:
+            # baseline_omission_rows is non-empty ONLY when is_omission_target was
+            # true (the guard above requires it), so the wallet is a frozen target.
+            # Still require EVERY non-clean pair to be a builder omission: any other
+            # non-clean pair (e.g. a native tracking gap) means the wallet is MIXED
+            # -> FAIL CLOSED, never absorb the genuine native discrepancy by
+            # rebaselining the whole wallet.
+            if drift_rows:
                 self.audit["baseline_remeasure_mixed_drift_blocked"] += 1
                 log("WARNING", f"BASELINE_REMEASURE_BLOCKED_MIXED wallet={wallet} "
                                f"builder_omissions={len(baseline_omission_rows)} "

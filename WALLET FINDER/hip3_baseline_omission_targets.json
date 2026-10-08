@@ -1,7 +1,8 @@
 {
   "schema": "hip3_baseline_omission_targets.v1",
-  "note": "Frozen set of wallets whose CURRENT epoch baseline was measured PRE-FIX (native-only clearinghouseState) and therefore OMITS held HIP-3 builder positions. Auto re-measurement is permitted ONLY while the wallet's current epoch_id matches this manifest; after a roll the epoch_id changes and no further automatic roll is possible.",
-  "created_utc": "2026-10-08T09:42:18.283267+00:00",
+  "note": "Derived from hip3_baseline_omission_derivation.json. Each entry is a wallet whose CURRENT epoch was opened BEFORE the HIP-3 union fix (native-only snapshot) and therefore OMITS a builder position it holds. Auto re-measurement is permitted ONLY while the wallet's current epoch_id equals the entry; after a roll the epoch_id changes (post-fix) and no further automatic roll is possible.",
+  "derivation_utc": "2026-10-08T09:52:09.575849+00:00",
+  "fix_restart_ms": 1791446594000,
   "targets": {
     "0x0008f22cbce8fa5ccc942fa7a454242ed94155f1": "0x0008f22c-1791398550140",
     "0x037919a275ddc336d024fa489c462d19c949838e": "0x037919a2-1791398554394",
@@ -22,9 +23,11 @@
     "0x6f42a18b6df587f018685fd8eade684ae91cd16d": "0x6f42a18b-1791398478555",
     "0x734f033cfd98e90c018e66594323600024776ae7": "0x734f033c-1791398459368",
     "0x80b165ed5f0484866b133696e9cd732fca15e9ad": "0x80b165ed-1791398553779",
+    "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d": "0x8bae3527-1791398467444",
     "0x9221a960277fe388b899f58117aa9bd298463002": "0x9221a960-1791398517694",
     "0x995a826fc3dd9cf4f26948dd187a08129ecc37e4": "0x995a826f-1791398471669",
     "0x9aca58e24ff5845f245e7c2c897fef1bc59b3555": "0x9aca58e2-1791398468045",
+    "0x9e70cd4c4d001d595e42e475ff905d5ecd4e85ea": "0x9e70cd4c-1791398590063",
     "0xa6690c41f293b28d373f80b050e3cf67bcf15953": "0xa6690c41-1791398461856",
     "0xa8f02c6b221d01f8a6d8adbc88a5f85b8569cd8e": "0xa8f02c6b-1791398556208",
     "0xbb5048a65be6366beb86e06b21fa3018bb99340d": "0xbb5048a6-1791398477923",

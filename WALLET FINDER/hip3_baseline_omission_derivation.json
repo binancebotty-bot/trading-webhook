@@ -1,0 +1,2035 @@
+{
+  "schema": "hip3_baseline_omission_derivation.v1",
+  "fix_restart_ms": 1791446594000,
+  "criteria": "current epoch pre-fix (native-only snapshot) AND wallet holds a builder coin absent from that epoch's baseline",
+  "proven_wallet_count": 32,
+  "proven_pair_count": 217,
+  "proven_targets": {
+    "0x0008f22cbce8fa5ccc942fa7a454242ed94155f1": "0x0008f22c-1791398550140",
+    "0x037919a275ddc336d024fa489c462d19c949838e": "0x037919a2-1791398554394",
+    "0x061c9d98dca634ec51a38a79c2c9c734f8a5bf79": "0x061c9d98-1791398556888",
+    "0x069f458978a51ef6a9e2f6b6eb1fe2f39271c5a2": "0x069f4589-1791398496163",
+    "0x1fc2b8d6bf6ebbc5edba103bb791d38904c37a97": "0x1fc2b8d6-1791398531945",
+    "0x2ded914aa5fadadd7d32d678924188586d7c656b": "0x2ded914a-1791398468595",
+    "0x4101ce19ee81f24da894976e585f1e79119dbd93": "0x4101ce19-1791398525199",
+    "0x41c684cbde3e449cc67c70aacb6132e3eb25b06d": "0x41c684cb-1791398530124",
+    "0x4343a57b45c4235d5131c9dafdfb7a9b1d9106c8": "0x4343a57b-1791398559301",
+    "0x45ae322cba529d9201248a4dc72dd2bfa4efd286": "0x45ae322c-1791398584733",
+    "0x4655212f929e63d6be39a83e1def59fc533f32f9": "0x4655212f-1791398466910",
+    "0x487033d8ed8c955098148e87fa66f54b046d5c41": "0x487033d8-1791398522777",
+    "0x4c968a3a530f76f655e7e7010075aa63cec87de2": "0x4c968a3a-1791398476196",
+    "0x54075eb39ac1a22cea2b8fc1f8398728b7890c04": "0x54075eb3-1791398543592",
+    "0x5c740a903a81fe71b2d4de262ca18ec3f7cf2539": "0x5c740a90-1791398549538",
+    "0x6b72e906a80bb733b7cfb1a0ff3c102043f3e603": "0x6b72e906-1791398493748",
+    "0x6f42a18b6df587f018685fd8eade684ae91cd16d": "0x6f42a18b-1791398478555",
+    "0x734f033cfd98e90c018e66594323600024776ae7": "0x734f033c-1791398459368",
+    "0x80b165ed5f0484866b133696e9cd732fca15e9ad": "0x80b165ed-1791398553779",
+    "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d": "0x8bae3527-1791398467444",
+    "0x9221a960277fe388b899f58117aa9bd298463002": "0x9221a960-1791398517694",
+    "0x995a826fc3dd9cf4f26948dd187a08129ecc37e4": "0x995a826f-1791398471669",
+    "0x9aca58e24ff5845f245e7c2c897fef1bc59b3555": "0x9aca58e2-1791398468045",
+    "0x9e70cd4c4d001d595e42e475ff905d5ecd4e85ea": "0x9e70cd4c-1791398590063",
+    "0xa6690c41f293b28d373f80b050e3cf67bcf15953": "0xa6690c41-1791398461856",
+    "0xa8f02c6b221d01f8a6d8adbc88a5f85b8569cd8e": "0xa8f02c6b-1791398556208",
+    "0xbb5048a65be6366beb86e06b21fa3018bb99340d": "0xbb5048a6-1791398477923",
+    "0xd539db92e3e6de06cbd0d2ea94061d9bfb47ffc4": "0xd539db92-1791398475644",
+    "0xd5489a59e96cd16baca90eafda526ae1aa933b5d": "0xd5489a59-1791398548935",
+    "0xd8c5228c515db3043dfa0c8cd6f22450ee9a99b0": "0xd8c5228c-1791398524536",
+    "0xe434bd49e491819366fc5a679e83df459e67302f": "0xe434bd49-1791398536870",
+    "0xeeaf4055e581dae6a4eaea0a66181ecb207787f1": "0xeeaf4055-1791398473620"
+  },
+  "wallets": {
+    "0x0008f22cbce8fa5ccc942fa7a454242ed94155f1": {
+      "epoch_id": "0x0008f22c-1791398550140",
+      "epoch_baseline_ts_ms": 1791398550140,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:BRENTOIL": {
+          "exchange": -6.99,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789746778146,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GOLD": {
+          "exchange": 0.4051,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x037919a275ddc336d024fa489c462d19c949838e": {
+      "epoch_id": "0x037919a2-1791398554394",
+      "epoch_baseline_ts_ms": 1791398554394,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:MSTR": {
+          "exchange": 2116.779,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x061c9d98dca634ec51a38a79c2c9c734f8a5bf79": {
+      "epoch_id": "0x061c9d98-1791398556888",
+      "epoch_baseline_ts_ms": 1791398556888,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:AAPL": {
+          "exchange": -5.905,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:AMZN": {
+          "exchange": -8.519,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:META": {
+          "exchange": -3.693,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:MSFT": {
+          "exchange": -4.17,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:NVDA": {
+          "exchange": -10.304,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SILVER": {
+          "exchange": -34.36,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x069f458978a51ef6a9e2f6b6eb1fe2f39271c5a2": {
+      "epoch_id": "0x069f4589-1791398496163",
+      "epoch_baseline_ts_ms": 1791398496163,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "IO:ANTH": {
+          "exchange": -2.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789188497956,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "IO:GPRO": {
+          "exchange": -6500.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788313632745,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "MKTS:USBOND": {
+          "exchange": 50.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790736501920,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:BABA": {
+          "exchange": 20.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787548825870,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:CL": {
+          "exchange": -48.245,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788330952893,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GOOGL": {
+          "exchange": 12.23,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789020561645,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:MRNA": {
+          "exchange": -288.73,
+          "internal": -20.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787326567570,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": false
+        },
+        "XYZ:SILVER": {
+          "exchange": 33.6,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789111156460,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SOXL": {
+          "exchange": -377.08,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787016812776,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:UNITREE": {
+          "exchange": -400.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786108160952,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x1fc2b8d6bf6ebbc5edba103bb791d38904c37a97": {
+      "epoch_id": "0x1fc2b8d6-1791398531945",
+      "epoch_baseline_ts_ms": 1791398531945,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:CBRS": {
+          "exchange": 13.21,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790574614903,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:MU": {
+          "exchange": 4.577,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789045065916,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x2ded914aa5fadadd7d32d678924188586d7c656b": {
+      "epoch_id": "0x2ded914a-1791398468595",
+      "epoch_baseline_ts_ms": 1791398468595,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:AAPL": {
+          "exchange": 14.801,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789543905978,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:AMZN": {
+          "exchange": 7.77,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786523980575,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:CL": {
+          "exchange": -83.61,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786026314596,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GOOGL": {
+          "exchange": 23.14,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786522433665,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SILVER": {
+          "exchange": 312.5,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786958650495,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x4101ce19ee81f24da894976e585f1e79119dbd93": {
+      "epoch_id": "0x4101ce19-1791398525199",
+      "epoch_baseline_ts_ms": 1791398525199,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:JP225": {
+          "exchange": -0.1,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1791285771156,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:KIOXIA": {
+          "exchange": -400.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785851437070,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:META": {
+          "exchange": -25.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790007060686,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:PLTR": {
+          "exchange": -20.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786155151756,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:XYZ100": {
+          "exchange": -0.8,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790835061940,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x41c684cbde3e449cc67c70aacb6132e3eb25b06d": {
+      "epoch_id": "0x41c684cb-1791398530124",
+      "epoch_baseline_ts_ms": 1791398530124,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:META": {
+          "exchange": 600.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790278584974,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x4343a57b45c4235d5131c9dafdfb7a9b1d9106c8": {
+      "epoch_id": "0x4343a57b-1791398559301",
+      "epoch_baseline_ts_ms": 1791398559301,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:EUR": {
+          "exchange": 979.8,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790999043184,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:JP225": {
+          "exchange": -0.01286,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790998472168,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:JPY": {
+          "exchange": -31.39,
+          "internal": -2.4899999999999998,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789208360692,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": false
+        },
+        "XYZ:SP500": {
+          "exchange": -0.229,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790057055197,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:XYZ100": {
+          "exchange": -0.0391,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790998546080,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x45ae322cba529d9201248a4dc72dd2bfa4efd286": {
+      "epoch_id": "0x45ae322c-1791398584733",
+      "epoch_baseline_ts_ms": 1791398584733,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:SPCX": {
+          "exchange": -53.11,
+          "internal": -22.939999999999998,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789622482291,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": false
+        },
+        "XYZ:TSLA": {
+          "exchange": -4.859,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789610084223,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x4655212f929e63d6be39a83e1def59fc533f32f9": {
+      "epoch_id": "0x4655212f-1791398466910",
+      "epoch_baseline_ts_ms": 1791398466910,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:IREN": {
+          "exchange": 273.8,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1791228203263,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x487033d8ed8c955098148e87fa66f54b046d5c41": {
+      "epoch_id": "0x487033d8-1791398522777",
+      "epoch_baseline_ts_ms": 1791398522777,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "IO:ANTH": {
+          "exchange": 8.55,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1791003446907,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "IO:DRAM": {
+          "exchange": -682.17,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789888859548,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "IO:EWY": {
+          "exchange": 33.24,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790545590765,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "IO:GPRO": {
+          "exchange": -756.2,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789270080643,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "IO:IONQ": {
+          "exchange": -260.24,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790064472354,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "IO:NBIS": {
+          "exchange": -468.88,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789282713300,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "IO:SNDK": {
+          "exchange": 4.3301,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789277344767,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "MKTS:SMALL2000": {
+          "exchange": -6.993,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789558884000,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "MKTS:USTECH": {
+          "exchange": -1.412,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789558847523,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:10Y": {
+          "exchange": 4374.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789344335353,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:AAOI": {
+          "exchange": 8.99,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789274843550,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:AVGO": {
+          "exchange": 14.08,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790092236257,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:CIEN": {
+          "exchange": 0.28,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789897290005,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:COHR": {
+          "exchange": 15.89,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789890038808,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:CRDO": {
+          "exchange": 100.97,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789270029555,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:GLW": {
+          "exchange": 57.38,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789277568165,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:IREN": {
+          "exchange": 279.37,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789240269963,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:NET": {
+          "exchange": -3.01,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790064507614,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:RDDT": {
+          "exchange": -119.84,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790064446288,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:SMCI": {
+          "exchange": -156.72,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789927515219,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:SOFI": {
+          "exchange": 57.59,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789928227165,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:STX": {
+          "exchange": 11.634,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789873357681,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:TER": {
+          "exchange": 25.12,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789897747254,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:UNITREE": {
+          "exchange": 40.98,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786941337240,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "PARA:VST": {
+          "exchange": -108.09,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789559134503,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:AAOI": {
+          "exchange": 29.42,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789256543445,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:AAPL": {
+          "exchange": 57.392,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789888791025,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:AMAT": {
+          "exchange": 2.26,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786919402429,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:AMD": {
+          "exchange": -8.965,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853843068,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:AMZN": {
+          "exchange": 58.248,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853759391,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:ARM": {
+          "exchange": -154.85,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853772874,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:ASML": {
+          "exchange": -4.485,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788133829870,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:AVGO": {
+          "exchange": -2.36,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785863171932,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:BB": {
+          "exchange": -4111.7,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786264991806,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:BE": {
+          "exchange": -30.91,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853843068,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:BIRD": {
+          "exchange": -566.5,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788108497977,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:BX": {
+          "exchange": -67.04,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853787351,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:CBRS": {
+          "exchange": -688.99,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786919461180,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:CL": {
+          "exchange": 83.536,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788278362122,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:COIN": {
+          "exchange": -4.233,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789270217625,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:COST": {
+          "exchange": 0.0111,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788106707202,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:CRWV": {
+          "exchange": 765.48,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853759391,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:CVX": {
+          "exchange": 0.48,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789836238451,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:CXMT": {
+          "exchange": -3311.7,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786931812064,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:DELL": {
+          "exchange": -14.98,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853759391,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:DKNG": {
+          "exchange": -1197.01,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786262763236,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:DRAM": {
+          "exchange": -883.1,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786959454529,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:EBAY": {
+          "exchange": 17.95,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786920915687,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:EWJ": {
+          "exchange": 10.43,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788133829870,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:EWT": {
+          "exchange": 86.45,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788133829870,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:EWY": {
+          "exchange": -29.426,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788105591830,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:EWZ": {
+          "exchange": -44.53,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787505536281,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GEV": {
+          "exchange": -6.913,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787451986086,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GIGADEV": {
+          "exchange": -45.08,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789888542117,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GME": {
+          "exchange": -293.97,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786263660763,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GOOGL": {
+          "exchange": 11.686,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786959639179,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:HIMS": {
+          "exchange": -351.92,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853759391,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:HYUNDAI": {
+          "exchange": -9.765,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:IBM": {
+          "exchange": 36.77,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787587905233,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:INTC": {
+          "exchange": 20.01,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853759391,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:IREN": {
+          "exchange": 364.1,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789241823530,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:JP225": {
+          "exchange": -8e-05,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789270023871,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:JPY": {
+          "exchange": 2160.68,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789288813589,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:KORU": {
+          "exchange": 2628.6,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788767158670,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:LITE": {
+          "exchange": 2.256,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853815327,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:LLY": {
+          "exchange": 2.2216,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788719708007,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:LYTE": {
+          "exchange": 362.11,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789277343462,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:MAGS": {
+          "exchange": -53.05,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790064411019,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:META": {
+          "exchange": -17.335,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786959693879,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:MINIMAX": {
+          "exchange": 72.51,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789270082465,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:MRNA": {
+          "exchange": -79.15,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790030037594,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:MRVL": {
+          "exchange": 9.96,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853787351,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:MSFT": {
+          "exchange": -1.001,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788719708007,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:MU": {
+          "exchange": 38.296,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853772874,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:NATGAS": {
+          "exchange": 3.5,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789360710684,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:NBIS": {
+          "exchange": -97.61,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853772874,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:NCLD": {
+          "exchange": -766.95,
+          "internal": 157.63000000000005,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789809336436,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": false
+        },
+        "XYZ:NET": {
+          "exchange": -8.73,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789270051012,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:NFLX": {
+          "exchange": -63.766,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788133829870,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:NOW": {
+          "exchange": -15.52,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786959718413,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:NVDA": {
+          "exchange": -25.288,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786959723606,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:ORCL": {
+          "exchange": 4.273,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788719708007,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:PLTR": {
+          "exchange": -35.735,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853759391,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:PURRDAT": {
+          "exchange": -211.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790024097080,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:QCOM": {
+          "exchange": -6.62,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853829187,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:QNT": {
+          "exchange": -215.78,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787588284280,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:RDDT": {
+          "exchange": -20.09,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790064446288,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:RIVN": {
+          "exchange": 166.62,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787588289546,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:RKLB": {
+          "exchange": -169.15,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853759391,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SHAZ": {
+          "exchange": 73.53,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788133829870,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SHEIN": {
+          "exchange": 776.8,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789270228147,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SKHX": {
+          "exchange": -39.211,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785937634828,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SKHY": {
+          "exchange": 32.14,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853759391,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SMH": {
+          "exchange": -85.317,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785861565565,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SMSN": {
+          "exchange": -28.487,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789923813685,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SNDK": {
+          "exchange": 5.969,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788719715065,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SNXX": {
+          "exchange": -58.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790958997955,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SOFTBANK": {
+          "exchange": -250.524,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789667346115,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SOXL": {
+          "exchange": 33.04,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789270022025,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SPCX": {
+          "exchange": -311.9,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786212807063,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:STRC": {
+          "exchange": -18.9,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:TSLA": {
+          "exchange": -298.572,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788133952383,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:TSM": {
+          "exchange": -22.558,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853759391,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:UNITREE": {
+          "exchange": 24.69,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786933518763,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:URNM": {
+          "exchange": -122.79,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786262928013,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:USAR": {
+          "exchange": -1425.21,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785853772874,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:WDC": {
+          "exchange": -299.161,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788767985837,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:XBI": {
+          "exchange": -21.82,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790064715584,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:XLE": {
+          "exchange": 75.68,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789888474503,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:ZM": {
+          "exchange": -41.241,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786919520587,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x4c968a3a530f76f655e7e7010075aa63cec87de2": {
+      "epoch_id": "0x4c968a3a-1791398476196",
+      "epoch_baseline_ts_ms": 1791398476196,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:XYZ100": {
+          "exchange": -17.9512,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1783616388461,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x54075eb39ac1a22cea2b8fc1f8398728b7890c04": {
+      "epoch_id": "0x54075eb3-1791398543592",
+      "epoch_baseline_ts_ms": 1791398543592,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:BRENTOIL": {
+          "exchange": 2.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:EUR": {
+          "exchange": -17.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789456097062,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GOLD": {
+          "exchange": -0.2562,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789785242350,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SILVER": {
+          "exchange": -13.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SP500": {
+          "exchange": -0.002,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1791267764038,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:XYZ100": {
+          "exchange": -0.0333,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x5c740a903a81fe71b2d4de262ca18ec3f7cf2539": {
+      "epoch_id": "0x5c740a90-1791398549538",
+      "epoch_baseline_ts_ms": 1791398549538,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:CBRS": {
+          "exchange": 1.46,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790132306707,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:CL": {
+          "exchange": -0.001,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GOOGL": {
+          "exchange": 0.885,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789162023923,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SILVER": {
+          "exchange": -0.01,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SP500": {
+          "exchange": -0.127,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:URNM": {
+          "exchange": 0.01,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:XYZ100": {
+          "exchange": -0.0056,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x6b72e906a80bb733b7cfb1a0ff3c102043f3e603": {
+      "epoch_id": "0x6b72e906-1791398493748",
+      "epoch_baseline_ts_ms": 1791398493748,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:CL": {
+          "exchange": -233.182,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785874322847,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GOLD": {
+          "exchange": 1.2675,
+          "internal": 0.0242,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786473397000,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": false
+        },
+        "XYZ:SILVER": {
+          "exchange": 44.43,
+          "internal": 1.69,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787889724262,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": false
+        },
+        "XYZ:SP500": {
+          "exchange": -2.564,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786333370488,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x6f42a18b6df587f018685fd8eade684ae91cd16d": {
+      "epoch_id": "0x6f42a18b-1791398478555",
+      "epoch_baseline_ts_ms": 1791398478555,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:GOLD": {
+          "exchange": 0.2751,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787662652593,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SP500": {
+          "exchange": 0.918,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1784577767136,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x734f033cfd98e90c018e66594323600024776ae7": {
+      "epoch_id": "0x734f033c-1791398459368",
+      "epoch_baseline_ts_ms": 1791398459368,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:HYUNDAI": {
+          "exchange": 38.287,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1783293933122,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:MINIMAX": {
+          "exchange": 112.0,
+          "internal": 80.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1783613700695,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": false
+        },
+        "XYZ:ZHIPU": {
+          "exchange": 99.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1783305265403,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x80b165ed5f0484866b133696e9cd732fca15e9ad": {
+      "epoch_id": "0x80b165ed-1791398553779",
+      "epoch_baseline_ts_ms": 1791398553779,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:JPY": {
+          "exchange": 478.28,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d": {
+      "epoch_id": "0x8bae3527-1791398467444",
+      "epoch_baseline_ts_ms": 1791398467444,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:GOOGL": {
+          "exchange": 219.928,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1784755948782,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SKHX": {
+          "exchange": 2107.974,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1784313360100,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SKHY": {
+          "exchange": -16202.56,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1784089088877,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x9221a960277fe388b899f58117aa9bd298463002": {
+      "epoch_id": "0x9221a960-1791398517694",
+      "epoch_baseline_ts_ms": 1791398517694,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:AMD": {
+          "exchange": 0.001,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787602968067,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:BABA": {
+          "exchange": 6.235,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789297155141,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:BB": {
+          "exchange": 1052.9,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:CRCL": {
+          "exchange": 55.011,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787327078532,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:DRAM": {
+          "exchange": 0.1,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:EWY": {
+          "exchange": 7.007,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785865599909,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GOLD": {
+          "exchange": -0.0001,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GOOGL": {
+          "exchange": 24.801,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789297135377,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:META": {
+          "exchange": 85.245,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:MSFT": {
+          "exchange": 1.686,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786110572281,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:NVDA": {
+          "exchange": 0.001,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SPCX": {
+          "exchange": 202.33,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789297488075,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x995a826fc3dd9cf4f26948dd187a08129ecc37e4": {
+      "epoch_id": "0x995a826f-1791398471669",
+      "epoch_baseline_ts_ms": 1791398471669,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:GOLD": {
+          "exchange": 5.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788001967858,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x9aca58e24ff5845f245e7c2c897fef1bc59b3555": {
+      "epoch_id": "0x9aca58e2-1791398468045",
+      "epoch_baseline_ts_ms": 1791398468045,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "PARA:VST": {
+          "exchange": 3117.37,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787935113122,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:ORCL": {
+          "exchange": 17156.444,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1783409798299,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:QCOM": {
+          "exchange": 5580.47,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1788275905982,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SPCX": {
+          "exchange": -2363.58,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790180911935,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0x9e70cd4c4d001d595e42e475ff905d5ecd4e85ea": {
+      "epoch_id": "0x9e70cd4c-1791398590063",
+      "epoch_baseline_ts_ms": 1791398590063,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:BRENTOIL": {
+          "exchange": -21.5,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790267224649,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:EUR": {
+          "exchange": 2539.3,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790183382042,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0xa6690c41f293b28d373f80b050e3cf67bcf15953": {
+      "epoch_id": "0xa6690c41-1791398461856",
+      "epoch_baseline_ts_ms": 1791398461856,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:MRNA": {
+          "exchange": 30.28,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1791240054479,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:NVDA": {
+          "exchange": -25.201,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1784067218824,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0xa8f02c6b221d01f8a6d8adbc88a5f85b8569cd8e": {
+      "epoch_id": "0xa8f02c6b-1791398556208",
+      "epoch_baseline_ts_ms": 1791398556208,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:JP225": {
+          "exchange": -0.05798,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1790924029293,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SP500": {
+          "exchange": -2.248,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0xbb5048a65be6366beb86e06b21fa3018bb99340d": {
+      "epoch_id": "0xbb5048a6-1791398477923",
+      "epoch_baseline_ts_ms": 1791398477923,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:HYUNDAI": {
+          "exchange": 0.611,
+          "internal": 0.246,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1783980344473,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": false
+        }
+      },
+      "proven": true
+    },
+    "0xd539db92e3e6de06cbd0d2ea94061d9bfb47ffc4": {
+      "epoch_id": "0xd539db92-1791398475644",
+      "epoch_baseline_ts_ms": 1791398475644,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:SPCX": {
+          "exchange": -0.44,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0xd5489a59e96cd16baca90eafda526ae1aa933b5d": {
+      "epoch_id": "0xd5489a59-1791398548935",
+      "epoch_baseline_ts_ms": 1791398548935,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:CL": {
+          "exchange": 5.65,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1791165842578,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SILVER": {
+          "exchange": 5.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789378847148,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0xd8c5228c515db3043dfa0c8cd6f22450ee9a99b0": {
+      "epoch_id": "0xd8c5228c-1791398524536",
+      "epoch_baseline_ts_ms": 1791398524536,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:AMZN": {
+          "exchange": -20550.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1787070438413,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:GOLD": {
+          "exchange": -650.4973,
+          "internal": -27.4432,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785702948033,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": false
+        },
+        "XYZ:GOOGL": {
+          "exchange": -34400.0,
+          "internal": 100.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785765610353,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": false
+        },
+        "XYZ:META": {
+          "exchange": -10380.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785852762131,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:NVDA": {
+          "exchange": -43700.0,
+          "internal": 400.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785765302672,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": false
+        },
+        "XYZ:SILVER": {
+          "exchange": -124056.24,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785764294271,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SP500": {
+          "exchange": 1069.297,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785766638227,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:XYZ100": {
+          "exchange": 35.0545,
+          "internal": -8.8648,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1785757847854,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": false
+        }
+      },
+      "proven": true
+    },
+    "0xe434bd49e491819366fc5a679e83df459e67302f": {
+      "epoch_id": "0xe434bd49-1791398536870",
+      "epoch_baseline_ts_ms": 1791398536870,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:SPCX": {
+          "exchange": 8.28,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1789654217540,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    },
+    "0xeeaf4055e581dae6a4eaea0a66181ecb207787f1": {
+      "epoch_id": "0xeeaf4055-1791398473620",
+      "epoch_baseline_ts_ms": 1791398473620,
+      "epoch_pre_fix": true,
+      "builder_coins": {
+        "XYZ:AAPL": {
+          "exchange": 100.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": null,
+          "fill_predates_fence": false,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:META": {
+          "exchange": -50.0,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1786457754156,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:SKHX": {
+          "exchange": -14.842,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1783902952487,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        },
+        "XYZ:XYZ100": {
+          "exchange": -4.7612,
+          "internal": 0.0,
+          "baseline": 0.0,
+          "ledger_earliest_fill_ms": 1784237198071,
+          "fill_predates_fence": true,
+          "no_post_fence_accrual": true
+        }
+      },
+      "proven": true
+    }
+  }
+}

@@ -211,11 +211,13 @@ def test_post_fix_non_target_not_rolled():
     })
     mod.requests = fr; mod.RATE_GUARD = None
     e.audit_position_drift_only(W, {"XYZ:MRNA": {"signed_size": -5.0}})
-    # guard still FLAGS it (surfaced), but the epoch must NOT be rolled
+    # NON-target: the pair must follow the ORDINARY drift path, NOT be quarantined
+    st = e.drift_state_by_wallet[W]["XYZ:MRNA"]["status"]
+    assert st in {"DRIFT_DETECTED", "DRIFT_UNRESOLVED", "UNRESOLVED_ESCALATED"}, st
     assert e.epoch_by_wallet[W]["epoch_id"] == "post-fix-999", "post-fix epoch must be untouched"
     assert e.audit["epochs_rolled_baseline_omission"] == 0
-    assert e.audit["baseline_remeasure_not_a_target"] == 1
-    print("PASS 5/6 post-fix / non-target epoch is NOT auto-rolled")
+    assert e.audit["baseline_invalid_remeasurement_required"] == 0
+    print("PASS 5/6 post-fix / non-target epoch: ordinary drift path, NOT rolled, NOT quarantined")
 
 
 def test_mixed_drift_wallet_not_rolled():
