@@ -303,25 +303,56 @@ def test_manifested_coin_delta_mismatch_blocks_roll():
     print("PASS 8/8 manifested coin delta mismatch -> ordinary DRIFT_*, no roll")
 
 
-def test_derivation_uses_snapshot_fence():
-    """The derivation must use the actual snapshot fence from the drift state,
-    not trusted_through. Verify the derivation script reads snapshot_fence_ms."""
-    import subprocess, sys
-    r = subprocess.run(
-        [sys.executable, r"C:/Users/wigmore/.hermes/cache/scratch/derive_r5.py"],
-        capture_output=True, text=True, timeout=120
+def test_derivation_rejects_incomplete_interval():
+    """A pair where userFillsByTime(old_fence, snapshot_fence) is incomplete
+    must be EXCLUDED from proven_coins (fail closed)."""
+    import hip3_omission_derivation as deriv
+
+    # Use realistic timestamps (ms since epoch)
+    old_fence = 1791446594000      # 2026-10-08T08:03:14Z
+    snapshot_fence = 1791446774000  # 3 min later
+
+    # Simulate: exchange=-5, baseline=0
+    # But the fetch only returns fills up to 120s before snapshot_fence (incomplete)
+    def incomplete_fetch(wallet, start_ms, end_ms):
+        return [
+            {"signed_delta": -5.0, "timestamp_ms": old_fence + 1000},
+            {"signed_delta": 0.0, "timestamp_ms": snapshot_fence - 120000},  # 120s gap
+        ]
+
+    proven, evidence = deriv.derive_omission(
+        "0xtest", "XYZ:MRNA", exchange_size=-5.0, baseline_size=0.0,
+        old_fence_ms=old_fence, snapshot_fence_ms=snapshot_fence, epoch_pre_fix=True,
+        fetch_fn=incomplete_fetch,
     )
-    # The derivation should run without error (even if 0 proven due to no restart yet)
-    assert r.returncode == 0, f"derive_r5.py failed: {r.stderr}"
-    # Check that the derivation file uses snapshot_fence_ms
-    deriv_path = WF / "hip3_baseline_omission_derivation.json"
-    if deriv_path.exists():
-        d = json.loads(deriv_path.read_text())
-        # All entries should have snapshot_fence_ms field
-        for w, v in d.get("wallets", {}).items():
-            for c, coin_data in v.get("builder_coins", {}).items():
-                assert "snapshot_fence_ms" in coin_data, f"Missing snapshot_fence_ms for {w}/{c}"
-    print("PASS 9/9 derivation uses actual snapshot fence (snapshot_fence_ms)")
+    assert not proven, "Incomplete interval must NOT be proven"
+    assert evidence["reason"] == "interval_incomplete"
+    print("PASS 9/9 derivation rejects incomplete interval (fail closed)")
+
+
+def test_derivation_proves_complete_interval():
+    """A pair where userFillsByTime(old_fence, snapshot_fence) is complete
+    must be proven."""
+    import hip3_omission_derivation as deriv
+
+    old_fence = 1791446594000
+    snapshot_fence = 1791446774000  # 3 min later
+
+    # exchange=-5, baseline=0, no fills after old fence -> omitted=-5 (proven)
+    def complete_fetch(wallet, start_ms, end_ms):
+        return [
+            {"signed_delta": 0.0, "timestamp_ms": old_fence + 1000},
+            {"signed_delta": 0.0, "timestamp_ms": snapshot_fence - 1000},  # covers full interval
+        ]
+
+    proven, evidence = deriv.derive_omission(
+        "0xtest", "XYZ:MRNA", exchange_size=-5.0, baseline_size=0.0,
+        old_fence_ms=old_fence, snapshot_fence_ms=snapshot_fence, epoch_pre_fix=True,
+        fetch_fn=complete_fetch,
+    )
+    assert proven, f"Complete interval must be proven: {evidence}"
+    assert evidence["omitted_position_at_old_fence"] == -5.0
+    print("PASS 10/10 derivation proves complete interval")
 
 
 if __name__ == "__main__":
@@ -333,5 +364,6 @@ if __name__ == "__main__":
     test_mixed_drift_wallet_not_rolled()
     test_unmanifested_builder_coin_blocks_roll()
     test_manifested_coin_delta_mismatch_blocks_roll()
-    test_derivation_uses_snapshot_fence()
+    test_derivation_rejects_incomplete_interval()
+    test_derivation_proves_complete_interval()
     print("\nALL BASELINE-OMISSION ROLL TESTS PASSED")
