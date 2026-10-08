@@ -6,9 +6,9 @@ post-fence interval:
 
     omitted_at_fence = exchange - sum(signed fill deltas strictly after old_fence)
 
-where the sum is computed from an explicit userFillsByTime(old_fence, snapshot_fence)
-call that must return COMPLETE data. If the fetch fails or is incomplete, the pair
-is EXCLUDED (fail closed).
+where the sum is computed from the engine's fetch_fills_since() which returns
+{"ok": bool, "complete": bool, "rows": [...]} and handles the 2000-row cap,
+inclusive boundaries, and tied timestamps fail-closed.
 
 The snapshot fence is the actual fence returned by fetch_wallet_positions(), stored
 as snapshot_fence_ms in the drift state.
@@ -17,9 +17,7 @@ This module is called by the derivation script and is also importable for testin
 """
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 log = logging.getLogger(__name__)
@@ -41,12 +39,19 @@ def fetch_fills_in_interval(
 ) -> Tuple[Optional[float], bool]:
     """Fetch and sum signed fill deltas in (old_fence, snapshot_fence].
 
+    Uses the engine's fetch_fills_since() contract:
+      fetch_fn(wallet, start_ms, end_ms) -> {"ok": bool, "complete": bool, "rows": [...]}
+
+    Completeness is proven ONLY when ok == true AND complete == true.
+    The 2000-row cap, inclusive boundaries, and tied timestamps are handled
+    by the engine's fetch_fills_since() -- this module does NOT re-implement
+    pagination or use any time-based heuristic.
+
     Args:
         wallet: the wallet address
         old_fence_ms: the old epoch baseline fence (exclusive)
         snapshot_fence_ms: the actual snapshot fence (inclusive)
-        fetch_fn: callable(wallet, start_ms, end_ms) -> list of fill dicts
-                  Each fill dict must have 'signed_delta' (float) and 'timestamp_ms' (int)
+        fetch_fn: callable matching the fetch_fills_since() contract
 
     Returns:
         (sum_of_deltas, is_complete)
@@ -56,36 +61,33 @@ def fetch_fills_in_interval(
         return None, False
 
     try:
-        fills = fetch_fn(wallet, old_fence_ms, snapshot_fence_ms)
+        result = fetch_fn(wallet, old_fence_ms, snapshot_fence_ms)
     except Exception as e:
         log.warning("FETCH_FILLS_FAILED wallet=%s err=%s", wallet, e)
         return None, False
 
-    if fills is None:
+    if result is None:
         return None, False
 
-    # Verify completeness: the fills must cover the full interval
-    # We check that the last fill's timestamp is close to the snapshot fence
-    # (within a reasonable tolerance) to prove we have all fills up to the fence
-    total = 0.0
-    max_ts = 0
-    for f in fills:
-        delta = float(f.get("signed_delta") or 0)
-        ts = int(f.get("timestamp_ms") or 0)
-        total += delta
-        if ts > max_ts:
-            max_ts = ts
+    # Must use the engine's ok/complete contract
+    ok = bool(result.get("ok"))
+    complete = bool(result.get("complete"))
+    rows = result.get("rows")
 
-    # Completeness check: the last fill must be within 60s of the snapshot fence
-    # (or there must be no fills at all, which is also complete)
-    # This proves we have all fills up to the snapshot fence
-    if fills and max_ts < snapshot_fence_ms - 60000:
-        # The last fill is too far from the snapshot fence -> incomplete
+    if not ok or not complete or rows is None:
         log.warning(
-            "INCOMPLETE_INTERVAL wallet=%s max_fill_ts=%d snapshot_fence=%d",
-            wallet, max_ts, snapshot_fence_ms,
+            "INCOMPLETE_INTERVAL wallet=%s ok=%s complete=%s reason=%s",
+            wallet, ok, complete, result.get("reason", "unknown"),
         )
         return None, False
+
+    # Sum signed deltas from the returned rows
+    total = 0.0
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        delta = float(r.get("signed_delta") or r.get("size") or 0)
+        total += delta
 
     return total, True
 
@@ -137,7 +139,8 @@ def derive_omission(
         evidence["reason"] = "invalid_snapshot_fence"
         return False, evidence
 
-    # Fetch and prove the post-fence interval is complete
+    # Fetch and prove the post-fence interval is complete using the engine's
+    # fetch_fills_since() ok/complete/rows contract
     post_fence_delta, is_complete = fetch_fills_in_interval(
         wallet, old_fence_ms, snapshot_fence_ms, fetch_fn,
     )
@@ -169,7 +172,7 @@ def derive_cohort_from_truth(
 
     Args:
         truth: the parsed engine_truth.json dict
-        fetch_fn: callable(wallet, start_ms, end_ms) -> list of fill dicts
+        fetch_fn: callable matching the fetch_fills_since() contract
 
     Returns:
         dict with 'targets', 'wallets', 'proven_wallet_count', 'proven_pair_count'
@@ -227,9 +230,9 @@ def derive_cohort_from_truth(
             total_pairs += len(v["proven_coins"])
 
     return {
-        "schema": "hip3_baseline_omission_derivation.v4",
+        "schema": "hip3_baseline_omission_derivation.v5",
         "fix_restart_ms": FIX_RESTART_MS,
-        "criteria": "pre-fix epoch AND baseline==0 AND exchange!=0 AND userFillsByTime(old_fence, snapshot_fence) complete AND (exchange - post_fence_delta) != 0",
+        "criteria": "pre-fix epoch AND baseline==0 AND exchange!=0 AND fetch_fills_since(old_fence, snapshot_fence) ok==true AND complete==true AND (exchange - post_fence_delta) != 0",
         "proven_wallet_count": len(targets),
         "proven_pair_count": total_pairs,
         "targets": targets,

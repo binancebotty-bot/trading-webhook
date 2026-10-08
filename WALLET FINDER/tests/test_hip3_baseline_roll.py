@@ -304,21 +304,15 @@ def test_manifested_coin_delta_mismatch_blocks_roll():
 
 
 def test_derivation_rejects_incomplete_interval():
-    """A pair where userFillsByTime(old_fence, snapshot_fence) is incomplete
-    must be EXCLUDED from proven_coins (fail closed)."""
+    """A pair where fetch_fills_since returns complete=false must be EXCLUDED."""
     import hip3_omission_derivation as deriv
 
-    # Use realistic timestamps (ms since epoch)
-    old_fence = 1791446594000      # 2026-10-08T08:03:14Z
-    snapshot_fence = 1791446774000  # 3 min later
+    old_fence = 1791446594000
+    snapshot_fence = 1791446774000
 
-    # Simulate: exchange=-5, baseline=0
-    # But the fetch only returns fills up to 120s before snapshot_fence (incomplete)
+    # complete=false even though there are rows
     def incomplete_fetch(wallet, start_ms, end_ms):
-        return [
-            {"signed_delta": -5.0, "timestamp_ms": old_fence + 1000},
-            {"signed_delta": 0.0, "timestamp_ms": snapshot_fence - 120000},  # 120s gap
-        ]
+        return {"ok": True, "complete": False, "rows": [{"signed_delta": -5.0}], "reason": "saturated"}
 
     proven, evidence = deriv.derive_omission(
         "0xtest", "XYZ:MRNA", exchange_size=-5.0, baseline_size=0.0,
@@ -327,23 +321,19 @@ def test_derivation_rejects_incomplete_interval():
     )
     assert not proven, "Incomplete interval must NOT be proven"
     assert evidence["reason"] == "interval_incomplete"
-    print("PASS 9/9 derivation rejects incomplete interval (fail closed)")
+    print("PASS 9/11 derivation rejects incomplete interval (fail closed)")
 
 
 def test_derivation_proves_complete_interval():
-    """A pair where userFillsByTime(old_fence, snapshot_fence) is complete
-    must be proven."""
+    """A pair where fetch_fills_since returns ok=true, complete=true must be proven."""
     import hip3_omission_derivation as deriv
 
     old_fence = 1791446594000
-    snapshot_fence = 1791446774000  # 3 min later
+    snapshot_fence = 1791446774000
 
     # exchange=-5, baseline=0, no fills after old fence -> omitted=-5 (proven)
     def complete_fetch(wallet, start_ms, end_ms):
-        return [
-            {"signed_delta": 0.0, "timestamp_ms": old_fence + 1000},
-            {"signed_delta": 0.0, "timestamp_ms": snapshot_fence - 1000},  # covers full interval
-        ]
+        return {"ok": True, "complete": True, "rows": []}
 
     proven, evidence = deriv.derive_omission(
         "0xtest", "XYZ:MRNA", exchange_size=-5.0, baseline_size=0.0,
@@ -352,7 +342,30 @@ def test_derivation_proves_complete_interval():
     )
     assert proven, f"Complete interval must be proven: {evidence}"
     assert evidence["omitted_position_at_old_fence"] == -5.0
-    print("PASS 10/10 derivation proves complete interval")
+    print("PASS 10/11 derivation proves complete interval (zero rows)")
+
+
+def test_derivation_rejects_complete_false_with_recent_fill():
+    """complete=false even with a fill 1ms before snapshot must be rejected."""
+    import hip3_omission_derivation as deriv
+
+    old_fence = 1791446594000
+    snapshot_fence = 1791446774000
+
+    # A fill 1ms before snapshot, but complete=false (saturated boundary)
+    def saturated_fetch(wallet, start_ms, end_ms):
+        return {"ok": True, "complete": False,
+                "rows": [{"signed_delta": -5.0, "timestamp_ms": snapshot_fence - 1}],
+                "reason": "saturated_boundary"}
+
+    proven, evidence = deriv.derive_omission(
+        "0xtest", "XYZ:MRNA", exchange_size=-5.0, baseline_size=0.0,
+        old_fence_ms=old_fence, snapshot_fence_ms=snapshot_fence, epoch_pre_fix=True,
+        fetch_fn=saturated_fetch,
+    )
+    assert not proven, "Saturated boundary must NOT be proven"
+    assert evidence["reason"] == "interval_incomplete"
+    print("PASS 11/11 derivation rejects complete=false with recent fill")
 
 
 if __name__ == "__main__":
@@ -366,4 +379,5 @@ if __name__ == "__main__":
     test_manifested_coin_delta_mismatch_blocks_roll()
     test_derivation_rejects_incomplete_interval()
     test_derivation_proves_complete_interval()
+    test_derivation_rejects_complete_false_with_recent_fill()
     print("\nALL BASELINE-OMISSION ROLL TESTS PASSED")
