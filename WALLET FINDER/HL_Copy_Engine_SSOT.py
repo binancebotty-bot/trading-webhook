@@ -1134,17 +1134,17 @@ class EngineSSOT:
                       | set(self.wallet_builder_dexes.get(wallet, set())))
 
     def cold_bootstrap_dexes(self, wallet: str) -> List[str]:
-        """Builder DEXes to union at cold bootstrap for this wallet.
+        """Builder DEXes to union at COLD BOOTSTRAP: EVERY enumerated DEX.
 
-        A wallet can only HOLD a builder position if it traded that market, and
-        the append-only ledger holds every fill the engine has ever seen for the
-        wallet.  So the ledger's builder-dex set is a completeness PROOF: a
-        wallet with no builder fills anywhere in its ledger cannot be holding a
-        builder position, and native-only is provably complete for it.  Wallets
-        that DO show builder activity get the full DEX fan-out, once.
+        The local ledger is NOT proof of absence -- a wallet can already hold a
+        builder position opened before the retained/monitor ledger window, so a
+        native-only bootstrap would recreate the original blind spot.  Therefore
+        the cold bootstrap unions native + ALL builder DEXes exactly ONCE; the
+        per-cycle poll then narrows to only the DEXes this wallet actually uses.
+
+        An empty return means the perpDexs enumeration failed (there is always at
+        least one builder DEX on Hyperliquid), and the caller MUST fail closed.
         """
-        if not self.wallet_builder_dexes.get(wallet.lower()):
-            return []
         return self.load_perp_dex_names()
 
     def _no_fills_between(self, wallet: str, lo_ms: int, hi_ms: int) -> bool:
@@ -1211,11 +1211,21 @@ class EngineSSOT:
     def bootstrap_wallet_from_exchange(self, wallet: str, ts_ms: Optional[int] = None) -> None:
         wallet = wallet.lower()
         dexes = self.cold_bootstrap_dexes(wallet)
+        if not dexes:
+            # The perpDexs enumeration FAILED (empty cache + failed refresh).
+            # A native-only bootstrap could open an apparently measured epoch
+            # while a builder position stays invisible -- the exact blind spot.
+            # FAIL CLOSED: no epoch, not ready.
+            self.audit["bootstrap_perp_dexs_unavailable"] += 1
+            log("WARNING", f"BOOTSTRAP_PERP_DEXS_UNAVAILABLE wallet={wallet} action=fail_closed_no_epoch_no_ready")
+            self.wallet_runtime.setdefault(wallet, {})["ready"] = False
+            return
         snapshot, fence, _dex_times = self.fetch_wallet_positions(wallet, dexes)
         if snapshot is None:
-            # FAIL CLOSED: a failed snapshot must NOT create an epoch.  An empty
-            # snapshot would otherwise become a fake "measured" zero baseline and
-            # make every future fill look like drift.  No epoch, no READY.
+            # FAIL CLOSED: a failed snapshot (or an incoherent DEX union) must
+            # NOT create an epoch.  An empty snapshot would otherwise become a
+            # fake "measured" zero baseline and make every future fill look like
+            # drift.  No epoch, no READY.
             self.audit["bootstrap_snapshot_failed"] += 1
             log("WARNING", f"BOOTSTRAP_SNAPSHOT_FAILED wallet={wallet} dexes={dexes} action=abort_no_epoch_no_ready")
             self.wallet_runtime.setdefault(wallet, {})["ready"] = False

@@ -188,24 +188,26 @@ def test_intervening_fill_fails_closed():
 
 
 def test_native_wallet_unchanged_and_no_fanout():
-    """(4) native reconciliation unchanged; (5) no DEX fan-out for normal wallets."""
+    """(4) native reconciliation unchanged; (5) no PER-CYCLE DEX fan-out."""
     e = new_engine()
+    e.perp_dex_names = ["xyz", "flx", "vntl", "hyna", "km", "abcd", "cash", "para", "mkts", "io"]
     fr = FakeRequests({
         "clearinghouseState": lambda b: ch_state([pos("BTC", 2.0)], 1791445590000),
         "userFillsByTime": lambda b: [],
     })
     mod.requests = fr
     mod.RATE_GUARD = None
-    # a wallet with NO builder history: cold bootstrap proves native-only complete
-    assert e.cold_bootstrap_dexes(NATIVE_W) == [], "native-only wallet must not fan out"
-    assert e.wallet_poll_dexes(NATIVE_W) == [], "native-only wallet must not fan out"
+    # cold bootstrap fans out ONCE over every DEX (ledger is not proof of absence)
+    assert e.cold_bootstrap_dexes(NATIVE_W) == e.perp_dex_names
+    # but the PER-CYCLE poll for a wallet with no builder activity is native-only
+    assert e.wallet_poll_dexes(NATIVE_W) == [], "native-only wallet must not fan out per cycle"
     snap, fence, times = e.fetch_wallet_positions(NATIVE_W, e.wallet_poll_dexes(NATIVE_W))
     assert snap == {"BTC": {"signed_size": 2.0, "entry_price": 1.0, "unrealized_pnl": 0.0}}
     assert fence == 1791445590000 and times == {"native": 1791445590000}
-    assert fr.count("clearinghouseState") == 1, "native wallet must issue exactly 1 snapshot"
+    assert fr.count("clearinghouseState") == 1, "native wallet per-cycle = exactly 1 snapshot"
     assert fr.count("userFillsByTime") == 0, "single-dex union needs no fence proof"
 
-    # a builder wallet is targeted to its OWN dexes only (2 of the 10 available)
+    # a builder wallet is targeted to its OWN dexes only (1 of the 10 available)
     e2 = new_engine()
     e2.wallet_builder_dexes[W] = {"xyz"}
     e2.wallet_active_dexes[W] = {"xyz"}
@@ -222,7 +224,58 @@ def test_native_wallet_unchanged_and_no_fanout():
     snap2, _f, _t = e2.fetch_wallet_positions(W, e2.wallet_poll_dexes(W))
     assert fr2.count("clearinghouseState") == 2, "builder poll = native + its 1 dex"
     assert fr2.count("clearinghouseState", dex="flx") == 0, "must NOT touch unrelated dexes"
-    print("PASS 5/6 native unchanged; no fan-out (native=1 call, builder=2 calls of 10 dexes)")
+    print("PASS 5/6 native per-cycle unchanged; no fan-out (native=1 call, builder=2 calls of 10 dexes)")
+
+
+def test_cold_bootstrap_discovers_preledger_builder_position():
+    """(NEW) wallet with NO builder fills in its ledger, but an EXISTING builder position."""
+    e = new_engine()
+    # ledger knows NOTHING about any builder market for this wallet
+    assert e.wallet_builder_dexes.get(W) is None
+    e.perp_dex_names = ["xyz", "para"]
+    fr = FakeRequests({
+        "clearinghouseState": lambda b: (
+            ch_state([pos("xyz:MRNA", -288.73)], 1791445590000) if b.get("dex") == "xyz"
+            else ch_state([], 1791445590000) if b.get("dex") == "para"
+            else ch_state([pos("BTC", 1.0)], 1791445590000)
+        ),
+        "userFillsByTime": lambda b: [],
+    })
+    mod.requests = fr
+    mod.RATE_GUARD = None
+    # cold bootstrap still fans out over EVERY dex despite the empty ledger
+    assert e.cold_bootstrap_dexes(W) == ["xyz", "para"]
+    snap, _f, _t = e.fetch_wallet_positions(W, e.cold_bootstrap_dexes(W))
+    assert "XYZ:MRNA" in snap, "pre-ledger builder position MUST be discovered"
+    assert snap["XYZ:MRNA"]["signed_size"] == -288.73
+    # and it is now recorded as an active dex for the targeted per-cycle poll
+    e.wallet_active_dexes[W] = e._builder_dexes_in_snapshot(snap)
+    assert e.wallet_poll_dexes(W) == ["xyz"]
+    print("PASS 7/8 cold bootstrap discovers a pre-ledger builder position")
+
+
+def test_failed_perp_dexs_blocks_bootstrap():
+    """(NEW) failed initial perpDexs enumeration must PREVENT bootstrap (fail closed)."""
+    e = new_engine()
+    e.epoch_by_wallet = {}
+    e.wallet_runtime = {}
+
+    def _boom(b):
+        raise RuntimeError("perpDexs unavailable")
+
+    fr = FakeRequests({"perpDexs": _boom})
+    mod.requests = fr
+    mod.RATE_GUARD = None
+    assert e.perp_dex_names == []
+    assert e.cold_bootstrap_dexes(W) == [], "failed enumeration -> empty dex set"
+    # bootstrap must refuse: no snapshot, no epoch, not ready
+    e.bootstrap_wallet_from_exchange(W)
+    assert e.wallet_runtime.get(W, {}).get("ready") is False, "wallet must stay NOT READY"
+    assert e.epoch_by_wallet == {}, "no epoch may be opened on a failed enumeration"
+    assert e.audit["bootstrap_perp_dexs_unavailable"] == 1
+    # and no clearinghouseState was issued (it never got that far)
+    assert fr.count("clearinghouseState") == 0
+    print("PASS 8/8 failed perpDexs enumeration -> bootstrap FAILS CLOSED")
 
 
 def test_fill_hook_learns_builder_dex():
@@ -234,7 +287,7 @@ def test_fill_hook_learns_builder_dex():
     e._remember_builder_dex(W, "BTC")       # native must NOT register a dex
     assert e.wallet_builder_dexes[W] == {"xyz"}
     assert e.wallet_poll_dexes(W) == ["xyz"]
-    print("PASS 6/6 builder fill registers the DEX; native fill does not")
+    print("PASS 6/8 builder fill registers the DEX; native fill does not")
 
 
 if __name__ == "__main__":
@@ -244,4 +297,6 @@ if __name__ == "__main__":
     test_intervening_fill_fails_closed()
     test_native_wallet_unchanged_and_no_fanout()
     test_fill_hook_learns_builder_dex()
+    test_cold_bootstrap_discovers_preledger_builder_position()
+    test_failed_perp_dexs_blocks_bootstrap()
     print("\nALL HIP-3 PROOF TESTS PASSED")
