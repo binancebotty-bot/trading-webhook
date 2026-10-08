@@ -1121,7 +1121,7 @@ class EngineSSOT:
             # a shard that is no longer connected.  Only an OPEN shard can be
             # fresh, and it must ALSO be within the window.
             status = str(st.get("status", "") or "").upper()
-            if status and status != "OPEN":
+            if status != "OPEN":
                 self.audit["ws_shard_not_open"] += 1
                 return False
             last_data = int(st.get("last_data_ms", 0) or 0)
@@ -2624,10 +2624,19 @@ class EngineSSOT:
                 self._clear_proof_fence(wallet)
             return
 
-        # Step 1: Activate per-wallet WS proof guard BEFORE snapshots.
-        # Use a high sentinel so any WS fill arriving during this proof job
-        # is buffered (we will compute the real fence in step 3).
-        self._set_proof_fence(wallet, now)
+        # Step 1: Activate per-wallet WS proof guard BEFORE snapshots.  The
+        # receive path buffers a WS fill when fill.timestamp_ms > fence_hi, so a
+        # fill at or below the fence is applied INLINE -- exactly the
+        # contamination this fence exists to prevent during snapshot capture.
+        # The exchange clock lags local time, so a fill inside the snapshot
+        # interval can carry a timestamp BELOW now; a `now` sentinel would then
+        # fail the > test and queue it inline while the baseline is measured.
+        # Set the fence to the TRUSTED boundary instead: every fill that is not
+        # yet proven is buffered, and only fills at or below the watermark are
+        # safe to apply.  The real, higher fence_hi from the snapshot is set in
+        # step 3.
+        proof_fence_start = int(self.trusted_through_ms_by_wallet.get(wallet, 0) or 0)
+        self._set_proof_fence(wallet, proof_fence_start)
 
         try:
             # Step 2: Snapshots first (native + builder DEXes), NO proof fetch.
