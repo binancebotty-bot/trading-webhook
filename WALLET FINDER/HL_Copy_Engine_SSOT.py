@@ -1621,7 +1621,29 @@ class EngineSSOT:
         wallet = wallet.lower()
         start_ms = max(0, int(start_ms))
         fence_hi_ms = max(start_ms, int(fence_hi_ms))
-        fetch = self.fetch_fills_since(wallet, start_ms, fence_hi_ms)
+        fence_lo_ms = int(fence_lo_ms)
+
+        # STALE SNAPSHOT.  fence_hi earlier than the watermark already proven
+        # means this snapshot cannot advance trust -- it would move the watermark
+        # BACKWARDS, and its older union could overwrite a newer measured one.
+        # Fail closed before spending a REST call.
+        proven_through = int(self.trusted_through_ms_by_wallet.get(wallet, 0) or 0)
+        if fence_hi_ms < proven_through:
+            self.audit["hip3_stale_snapshot_rejected"] += 1
+            log("WARNING", f"HIP3_STALE_SNAPSHOT wallet={wallet} "
+                           f"fence_hi={fence_hi_ms} proven_through={proven_through} "
+                           f"action=fail_closed")
+            return {"ok": True, "complete": False, "hip3_coherent": False,
+                    "rows": [], "rest_pages": 0, "reason": "stale_snapshot"}
+
+        # ONE fetch covering the WHOLE span.  Fetching from start_ms alone can
+        # miss a fill that landed before start_ms but inside (fence_lo, fence_hi]:
+        # it would never be returned, the coherence scan would not see it, and an
+        # incoherent union would be accepted.  Fetch from the earlier of the two.
+        scan_start = min(start_ms, fence_lo_ms)
+        if scan_start < start_ms:
+            self.audit["hip3_coherence_scan_widened"] += 1
+        fetch = self.fetch_fills_since(wallet, scan_start, fence_hi_ms)
         rest_pages = int(fetch.get("rest_pages", 1))
         if not fetch.get("ok"):
             self.audit["hip3_fence_proof_unavailable"] += 1
@@ -1748,12 +1770,13 @@ class EngineSSOT:
             log("WARNING", f"BOOTSTRAP_SNAPSHOT_FAILED wallet={wallet} dexes={dexes} action=abort_no_epoch_no_ready")
             self.wallet_runtime.setdefault(wallet, {})["ready"] = False
             return
-        # Record which builder DEXes this wallet holds so the per-cycle poll is
-        # targeted rather than a fan-out over every DEX.
-        self.wallet_active_dexes[wallet] = self._builder_dexes_in_snapshot(snapshot)
-        self.last_exchange_snapshot_by_wallet[wallet] = {k: dict(v) for k, v in snapshot.items()}
+        # STAGE, do not publish.  These three were written before the coherence
+        # check, so a rejected union still left authoritative-looking snapshot
+        # state behind -- later reads could treat an incoherent union as the
+        # baseline.  They are committed only once the proof below succeeds.
+        staged_dexes = self._builder_dexes_in_snapshot(snapshot)
+        staged_snapshot = {k: dict(v) for k, v in snapshot.items()}
         fence_hi = max(dex_times.values()) if dex_times else now
-        self.last_exchange_snapshot_ts_by_wallet[wallet] = fence_hi
 
         # Maintain the legacy baseline mirror for any downstream readers, but the
         # authoritative model is the measured proof epoch below.  The epoch is
@@ -1775,6 +1798,11 @@ class EngineSSOT:
             # before the baseline is measured, or it is silently lost.
             if proof.get("rows"):
                 self.ingest_fetched_rows(wallet, proof["rows"], fence_hi, "bootstrap")
+
+        # PROVEN -- now, and only now, publish the snapshot state.
+        self.wallet_active_dexes[wallet] = staged_dexes
+        self.last_exchange_snapshot_by_wallet[wallet] = staged_snapshot
+        self.last_exchange_snapshot_ts_by_wallet[wallet] = fence_hi
 
         self.set_exchange_baseline(wallet, snapshot, ts_ms=fence_hi)
 
