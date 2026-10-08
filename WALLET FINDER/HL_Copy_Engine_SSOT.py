@@ -38,7 +38,7 @@ from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 try:
     import requests  # type: ignore
@@ -81,6 +81,11 @@ WS_DATA_STALE_MS = int(os.getenv("HL_WS_DATA_STALE_MS", "0"))
 WS_WATCHDOG_INTERVAL_SEC = float(os.getenv("HL_WS_WATCHDOG_INTERVAL_SEC", "5"))
 WS_RESTART_COOLDOWN_SEC = float(os.getenv("HL_WS_RESTART_COOLDOWN_SEC", "15"))
 POLL_OVERLAP_MS = int(os.getenv("HL_POLL_OVERLAP_MS", "300000"))  # 5m overlap, matching proven universe_builder pattern
+
+# How long the HIP-3 builder perp-dex name list is cached.  The list changes
+# only when a new builder DEX is deployed, so an hour is safe and keeps the
+# perpDexs request off the per-cycle hot path.
+PERP_DEX_CACHE_MS = int(os.getenv("HL_PERP_DEX_CACHE_MS", "3600000"))
 POLL_WINDOW_MS = int(os.getenv("HL_POLL_WINDOW_MS", str(24 * 60 * 60 * 1000)))
 # Hyperliquid userFillsByTime hard row cap, proven by live probe (2026-10-07):
 # a wide window returns exactly 2000 rows, oldest-first, inclusive boundaries.
@@ -510,6 +515,20 @@ class EngineSSOT:
         # timestamp a measured epoch: fills are timestamped on the SAME server
         # clock, so a fill at ts <= fence is provably reflected in the snapshot.
         self.last_exchange_snapshot_ts_by_wallet: Dict[str, int] = {}
+        # ---- HIP-3 builder-dex awareness ------------------------------------
+        # The native `clearinghouseState` (no `dex`) returns ONLY the first perp
+        # DEX, so a wallet holding builder-deployed perps (XYZ:, PARA:, ...) was
+        # invisible to the snapshot and its real fills could never reconcile.
+        # The global builder-dex name list is cached here; per-wallet sets are
+        # derived from the wallet's own ledger and from the last union snapshot.
+        self.perp_dex_names: List[str] = []
+        self.perp_dex_names_loaded_ms: int = 0
+        # builder dexes this wallet has EVER traded (from the ledger) -- reveals
+        # a builder market even before it appears in a snapshot.
+        self.wallet_builder_dexes: Dict[str, Set[str]] = {}
+        # builder dexes where the wallet held a position at the last snapshot --
+        # the targeted poll set, so a normal wallet never fans out over all dexes.
+        self.wallet_active_dexes: Dict[str, Set[str]] = {}
         self.exchange_baseline_by_wallet: Dict[str, Dict[str, Dict[str, float]]] = self.load_exchange_baselines()
         self.wallet_runtime: Dict[str, Dict[str, Any]] = {}
         self.drift_state_by_wallet: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -534,6 +553,11 @@ class EngineSSOT:
 
         startup_fills = self.load_fills_from_ledger()
         self._startup_fill_wallets: Set[str] = {f.wallet for f in startup_fills}
+        # Seed per-wallet builder-dex knowledge from the WHOLE ledger.  A wallet
+        # can only hold a builder position if it traded that market, so this set
+        # proves which wallets need a builder-DEX fan-out at cold bootstrap.
+        for _f in startup_fills:
+            self._remember_builder_dex(_f.wallet, _f.coin)
         self.last_ledger_ts_by_wallet: Dict[str, int] = defaultdict(int)
         # Per-wallet memory of the last drift-recovery attempt, so a barren
         # recovery is not repeated every cycle.  Persisted so a restart does not
@@ -982,12 +1006,16 @@ class EngineSSOT:
     def baseline_size(self, wallet: str, coin: str) -> float:
         return fnum((self.exchange_baseline_by_wallet.get(wallet.lower(), {}).get(str(coin).upper(), {}) or {}).get("signed_size"))
 
-    def fetch_exchange_positions(self, wallet: str) -> Tuple[Optional[Dict[str, Dict[str, float]]], int]:
+    def fetch_exchange_positions(self, wallet: str, dex: Optional[str] = None) -> Tuple[Optional[Dict[str, Dict[str, float]]], int]:
         """Fetch the current clearinghouseState.
 
         Returns (positions, fence_ms).  fence_ms is the SERVER `time` from the
         response -- the provable snapshot timestamp.  On any failure returns
         (None, 0); callers must abort, never treat failure as a flat account.
+
+        `dex` selects a HIP-3 builder perp DEX.  With no `dex` the API returns
+        ONLY the first perp DEX (native), which is exactly why builder markets
+        were invisible before.
         """
         if requests is None:
             return None, 0
@@ -1001,15 +1029,18 @@ class EngineSSOT:
             log("INFO", f"RATE_BUDGET_SKIP wallet={wallet} request=clearinghouseState")
             return None, 0
         try:
+            req_body: Dict[str, Any] = {"type": "clearinghouseState", "user": wallet}
+            if dex:
+                req_body["dex"] = str(dex)
             r = requests.post(
                 "https://api.hyperliquid.xyz/info",
-                json={"type": "clearinghouseState", "user": wallet},
+                json=req_body,
                 timeout=10,
             )
             data = r.json()
             if not isinstance(data, dict) or "assetPositions" not in data:
                 self.audit["position_snapshot_invalid"] += 1
-                log("WARNING", f"POSITION_SNAPSHOT_INVALID wallet={wallet} response={str(data)[:160]}")
+                log("WARNING", f"POSITION_SNAPSHOT_INVALID wallet={wallet} dex={dex or 'native'} response={str(data)[:160]}")
                 return None, 0
             # Provable fence: the server's own response time.  A snapshot without
             # it cannot fence an epoch, so fail closed rather than guess.
@@ -1037,17 +1068,161 @@ class EngineSSOT:
             log("ERROR", f"POSITION_SNAPSHOT_ERROR wallet={wallet} err={e}")
             return None, 0
 
+    # ------------------- HIP-3 builder-dex snapshots -------------------
+    def load_perp_dex_names(self, force: bool = False) -> List[str]:
+        """Cached list of HIP-3 builder perp-dex names.
+
+        `clearinghouseState` with NO `dex` returns ONLY the first perp DEX, so
+        every builder-deployed market (XYZ:, PARA:, ...) is invisible to the
+        native snapshot.  The dex list changes rarely, so it is cached; a failed
+        refresh keeps the previous cache rather than silently dropping a dex.
+        """
+        if requests is None:
+            return list(self.perp_dex_names)
+        if not force and self.perp_dex_names and (utc_now_ms() - self.perp_dex_names_loaded_ms) < PERP_DEX_CACHE_MS:
+            return list(self.perp_dex_names)
+        if RATE_GUARD is not None and not RATE_GUARD.acquire("perpDexs", timeout_s=SSOT_ACQUIRE_TIMEOUT_SEC):
+            self.audit["rate_budget_skipped_perp_dexs"] += 1
+            log("INFO", "RATE_BUDGET_SKIP request=perpDexs")
+            return list(self.perp_dex_names)
+        try:
+            r = requests.post("https://api.hyperliquid.xyz/info", json={"type": "perpDexs"}, timeout=10)
+            data = r.json()
+            if isinstance(data, list):
+                names = [str(d.get("name")) for d in data if isinstance(d, dict) and d.get("name")]
+                if names:
+                    self.perp_dex_names = names
+                    self.perp_dex_names_loaded_ms = utc_now_ms()
+                    self.audit["perp_dexs_loaded"] += 1
+                    log("INFO", f"PERP_DEXS_LOADED n={len(names)} names={names}")
+                    return list(names)
+            self.audit["perp_dexs_invalid"] += 1
+            log("WARNING", f"PERP_DEXS_INVALID response={str(data)[:160]}")
+        except Exception as e:
+            self.audit["perp_dexs_errors"] += 1
+            log("ERROR", f"PERP_DEXS_ERROR err={e}")
+        return list(self.perp_dex_names)
+
+    @staticmethod
+    def _builder_dex_of(coin: str) -> Optional[str]:
+        """Builder dex name for a namespaced coin ('XYZ:MRNA' -> 'xyz'), else None.
+
+        Builder markets are always '<dex>:<SYMBOL>'.  Native perps are bare and
+        native spot pairs are '@<n>' / '<BASE>/<QUOTE>', so only a colon coin
+        (and not one starting with '@') names a builder dex.
+        """
+        c = str(coin or "")
+        if ":" in c and not c.startswith("@"):
+            return c.split(":", 1)[0].lower() or None
+        return None
+
+    def _remember_builder_dex(self, wallet: str, coin: str) -> None:
+        d = self._builder_dex_of(coin)
+        if d:
+            self.wallet_builder_dexes.setdefault(str(wallet).lower(), set()).add(d)
+
+    def wallet_poll_dexes(self, wallet: str) -> List[str]:
+        """Builder DEXes to snapshot for this wallet this cycle.
+
+        Native is ALWAYS polled.  A builder DEX is polled only when the wallet is
+        KNOWN to use it -- from its ledger (it traded that market) or from the
+        last snapshot (it held a position there).  That is why a normal wallet
+        never fans out over every DEX every cycle.
+        """
+        wallet = wallet.lower()
+        return sorted(set(self.wallet_active_dexes.get(wallet, set()))
+                      | set(self.wallet_builder_dexes.get(wallet, set())))
+
+    def cold_bootstrap_dexes(self, wallet: str) -> List[str]:
+        """Builder DEXes to union at cold bootstrap for this wallet.
+
+        A wallet can only HOLD a builder position if it traded that market, and
+        the append-only ledger holds every fill the engine has ever seen for the
+        wallet.  So the ledger's builder-dex set is a completeness PROOF: a
+        wallet with no builder fills anywhere in its ledger cannot be holding a
+        builder position, and native-only is provably complete for it.  Wallets
+        that DO show builder activity get the full DEX fan-out, once.
+        """
+        if not self.wallet_builder_dexes.get(wallet.lower()):
+            return []
+        return self.load_perp_dex_names()
+
+    def _no_fills_between(self, wallet: str, lo_ms: int, hi_ms: int) -> bool:
+        """True iff userFillsByTime PROVES no fill for wallet in (lo_ms, hi_ms].
+
+        Used to certify a multi-DEX snapshot union.  Fails closed: an
+        unavailable or incomplete fetch returns False, so the union is rejected.
+        """
+        if hi_ms <= lo_ms:
+            return True
+        fetch = self.fetch_fills_since(wallet, lo_ms, hi_ms)
+        if not fetch.get("ok") or not fetch.get("complete"):
+            self.audit["hip3_fence_proof_unavailable"] += 1
+            return False
+        return len(fetch.get("rows") or []) == 0
+
+    def fetch_wallet_positions(
+        self, wallet: str, dexes: Iterable[str]
+    ) -> Tuple[Optional[Dict[str, Dict[str, float]]], int, Dict[str, int]]:
+        """Snapshot native + the given builder DEXes and UNION the positions.
+
+        Returns (positions, fence_ms, dex_times).  Any failure returns
+        (None, 0, {}) -- a partial union is never reported as complete.
+
+        FENCE INVARIANT: sequential snapshots carry different server times, so
+        the union is coherent ONLY if no fill for this wallet landed between the
+        earliest and latest snapshot time.  When the times differ the union is
+        certified with userFillsByTime over [min, max]; if a fill is found, or
+        the proof fetch fails, the union FAILS CLOSED.  The fence is the LATEST
+        server time, so a fill at ts <= fence is provably reflected in it.
+        """
+        wallet = wallet.lower()
+        base, fence = self.fetch_exchange_positions(wallet)
+        if base is None:
+            return None, 0, {}
+        out: Dict[str, Dict[str, float]] = {k: dict(v) for k, v in base.items()}
+        dex_times: Dict[str, int] = {"native": fence}
+        for dex in sorted({str(d).lower() for d in dexes if d}):
+            snap, t = self.fetch_exchange_positions(wallet, dex=dex)
+            if snap is None:
+                self.audit["hip3_snapshot_failed"] += 1
+                log("WARNING", f"HIP3_SNAPSHOT_FAILED wallet={wallet} dex={dex} action=fail_closed")
+                return None, 0, {}
+            out.update({k: dict(v) for k, v in snap.items()})
+            dex_times[dex] = t
+        fence_hi = max(dex_times.values())
+        fence_lo = min(dex_times.values())
+        if fence_hi != fence_lo and not self._no_fills_between(wallet, fence_lo, fence_hi):
+            self.audit["hip3_union_incoherent"] += 1
+            log("WARNING", f"HIP3_UNION_INCOHERENT wallet={wallet} lo={fence_lo} hi={fence_hi} "
+                           f"dexes={sorted(dex_times)} action=fail_closed")
+            return None, 0, {}
+        self.audit["hip3_snapshot_unions"] += 1
+        return out, fence_hi, dex_times
+
+    def _builder_dexes_in_snapshot(self, snapshot: Dict[str, Dict[str, float]]) -> Set[str]:
+        out: Set[str] = set()
+        for coin in snapshot.keys():
+            d = self._builder_dex_of(coin)
+            if d:
+                out.add(d)
+        return out
+
     def bootstrap_wallet_from_exchange(self, wallet: str, ts_ms: Optional[int] = None) -> None:
         wallet = wallet.lower()
-        snapshot, fence = self.fetch_exchange_positions(wallet)
+        dexes = self.cold_bootstrap_dexes(wallet)
+        snapshot, fence, _dex_times = self.fetch_wallet_positions(wallet, dexes)
         if snapshot is None:
             # FAIL CLOSED: a failed snapshot must NOT create an epoch.  An empty
             # snapshot would otherwise become a fake "measured" zero baseline and
             # make every future fill look like drift.  No epoch, no READY.
             self.audit["bootstrap_snapshot_failed"] += 1
-            log("WARNING", f"BOOTSTRAP_SNAPSHOT_FAILED wallet={wallet} action=abort_no_epoch_no_ready")
+            log("WARNING", f"BOOTSTRAP_SNAPSHOT_FAILED wallet={wallet} dexes={dexes} action=abort_no_epoch_no_ready")
             self.wallet_runtime.setdefault(wallet, {})["ready"] = False
             return
+        # Record which builder DEXes this wallet holds so the per-cycle poll is
+        # targeted rather than a fan-out over every DEX.
+        self.wallet_active_dexes[wallet] = self._builder_dexes_in_snapshot(snapshot)
         self.last_exchange_snapshot_by_wallet[wallet] = {k: dict(v) for k, v in snapshot.items()}
         self.last_exchange_snapshot_ts_by_wallet[wallet] = fence
 
@@ -1215,6 +1390,9 @@ class EngineSSOT:
         w.last_fill_ts = fill.timestamp_iso
         w.last_source = fill.source
         self.mark_prices[fill.coin] = fill.price
+        # Remember builder-dex activity so a wallet that traded a HIP-3 market
+        # (even before it appears in a snapshot) is polled on that DEX.
+        self._remember_builder_dex(fill.wallet, fill.coin)
         pos = self.positions.setdefault((fill.wallet, fill.coin), RawPosition(fill.wallet, fill.coin))
         pos.apply_fill(fill)
 
@@ -1757,10 +1935,13 @@ class EngineSSOT:
             else:
                 self.consecutive_poll_failures[wallet] = 0
 
-            snapshot, fence = self.fetch_exchange_positions(wallet)
+            snapshot, fence, _dex_times = self.fetch_wallet_positions(wallet, self.wallet_poll_dexes(wallet))
             if snapshot is None:
                 log("WARNING", f"POLL_SNAPSHOT_SKIPPED wallet={wallet} reason=invalid_or_failed")
                 continue
+            # A newly-seen builder market expands the targeted poll set from the
+            # next cycle onward (it is already unioned into this snapshot).
+            self.wallet_active_dexes[wallet] = self._builder_dexes_in_snapshot(snapshot)
             self.last_exchange_snapshot_by_wallet[wallet] = {k: dict(v) for k, v in snapshot.items()}
             self.last_exchange_snapshot_ts_by_wallet[wallet] = fence
             self.audit_position_drift_only(wallet, snapshot)
