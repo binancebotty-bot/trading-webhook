@@ -106,6 +106,27 @@ SSOT_SNAPSHOT_WEIGHT = 2
 # fixed SLA is achievable; if not, capacity_achievable=False and proof
 # currentness fails visibly.
 SSOT_PROOF_SLA_SECONDS = int(os.getenv("HL_PROOF_SLA_SECONDS", "2160"))  # 36 minutes
+# Gate C: how soon a wallet deferred by the rate budget is retried.  A deferral
+# produced no evidence at all, so the wallet is still inside its SLA window and
+# should come back promptly rather than a whole cadence later.  This timer does
+# NOT pace traffic -- RATE_GUARD.acquire still refuses anything over budget, so
+# a short retry interval cannot overspend; it only stops a single refused
+# request from becoming a full cycle of lost freshness.
+DEFERRED_RETRY_MS = int(os.getenv("HL_DEFERRED_RETRY_MS", "60000"))  # 1 minute
+
+# Gate C: the value a rate-guarded fetch returns when the budget REFUSED the
+# request.  It is a distinct singleton rather than a bare None so the refusal
+# carries its own cause all the way to the caller.  Callers must test identity
+# (`is RATE_BUDGET_DEFERRED`), never truthiness -- both it and None are falsy,
+# and conflating them is exactly the defect this gate closes.
+class _RateBudgetDeferred:
+    __slots__ = ()
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "<RATE_BUDGET_DEFERRED>"
+    def __bool__(self) -> bool:
+        return False
+
+RATE_BUDGET_DEFERRED = _RateBudgetDeferred()
 
 # How long the HIP-3 builder perp-dex name list is cached.  The list changes
 # only when a new builder DEX is deployed, so an hour is safe and keeps the
@@ -600,6 +621,11 @@ class EngineSSOT:
         self._capacity_rest_pages: Dict[str, List[int]] = defaultdict(list)
         # Per-wallet due time for the continuous scheduler (ms epoch)
         self._wallet_due_ms: Dict[str, int] = {}
+        # Gate C: a wallet whose cycle was DEFERRED because the rate budget
+        # refused the request -- not because a proof failed.  Recorded as a
+        # COUNT so the scheduler can retry soon and `inputs_current` can tell a
+        # budget deferral apart from a genuine incoherent/failed proof.
+        self._budget_deferred_cycles: Dict[str, int] = defaultdict(int)
         self._compute_capacity_invariant()
 
         # ---- Per-wallet proof fence ------------------------------------------
@@ -811,6 +837,14 @@ class EngineSSOT:
             return False
         self._baseline_remeasure_gate[wallet] = time.time()
         snapshot, dex_times = self._fetch_snapshots_only(wallet, dexes)
+        # Gate C: test the deferral sentinel BEFORE the None check. It is falsy,
+        # so `snapshot is None` would NOT catch it and a budget refusal would be
+        # mistaken for a real measurement. A refusal must never roll a baseline.
+        if snapshot is RATE_BUDGET_DEFERRED:
+            self.audit["baseline_remeasure_deferred_rate_budget"] += 1
+            log("INFO", f"BASELINE_REMEASURE_DEFERRED wallet={wallet} "
+                       f"reason=rate_budget_refused action=retry_next_cycle")
+            return False
         if snapshot is None:
             self.audit["baseline_remeasure_skipped_snapshot_failed"] += 1
             log("WARNING", f"BASELINE_REMEASURE_SKIPPED wallet={wallet} reason=union_snapshot_or_fence_failed")
@@ -1176,6 +1210,13 @@ class EngineSSOT:
         now_ms = utc_now_ms()
         lag_ms = (now_ms - global_tt) if global_tt else None
         failed = [w for w in required if int(self.consecutive_poll_failures.get(w, 0)) > 0]
+        # Gate C: wallets whose last cycle the rate budget refused.  Tracked
+        # separately from `failed` because they are still perfectly healthy --
+        # they simply were not asked.  Safe access for __new__-built instances.
+        budget_deferred = [
+            w for w in required
+            if int(getattr(self, "_budget_deferred_cycles", {}).get(w, 0) or 0) > 0
+        ]
         # Use the declared proof SLA from the capacity invariant, not POLL_SECONDS*2.
         # The capacity invariant is computed dynamically and reflects the actual
         # measured workload.  If capacity_achievable=False, inputs_current is always False.
@@ -1231,6 +1272,11 @@ class EngineSSOT:
             "required_wallets": len(required),
             "wallets_never_current": len(never),
             "wallets_with_consecutive_failures": len(failed),
+            # Gate C: budget deferrals are reported but deliberately NOT folded
+            # into `failed`.  A deferral means the request never left the process,
+            # so it is not evidence of bad data -- but it IS reported so a
+            # starved wallet is visible rather than silently looked-healthy.
+            "wallets_rate_budget_deferred": len(budget_deferred),
             "wallets_without_proven_epoch": len(wallets_without_proven_epoch),
             "inputs_current": inputs_current,
             "operational_inputs_fresh": bool(
@@ -1383,7 +1429,10 @@ class EngineSSOT:
             # path in another process its headroom.
             self.audit["rate_budget_skipped_snapshots"] += 1
             log("INFO", f"RATE_BUDGET_SKIP wallet={wallet} request=clearinghouseState")
-            return None, 0
+            # The sentinel (falsy, like None) carries the refusal out to the
+            # caller so _fetch_snapshots_only can report it as a DEFERRAL without
+            # inferring it from the shared audit counter.
+            return RATE_BUDGET_DEFERRED, 0
         try:
             req_body: Dict[str, Any] = {"type": "clearinghouseState", "user": wallet}
             if dex:
@@ -1590,16 +1639,27 @@ class EngineSSOT:
         Any snapshot failure returns (None, {}).  This is the snapshot-only path
         used by _process_wallet_proof, which performs the canonical proof
         separately over (trusted_through, fence_hi].
+
+        Gate C: a rate-budget REFUSAL propagates as (RATE_BUDGET_DEFERRED, {})
+        rather than being flattened into the same (None, {}) a bad payload
+        produces.  The sentinel is falsy, so a caller that only checks
+        `snapshot is None` would NOT recognise it -- _process_wallet_proof tests
+        identity first.  This keeps the refusal's cause attached instead of
+        inferred from a shared, process-wide audit counter.
         """
         wallet = wallet.lower()
         dex_times: Dict[str, int] = {}
         base, fence = self.fetch_exchange_positions(wallet)
+        if base is RATE_BUDGET_DEFERRED:
+            return RATE_BUDGET_DEFERRED, {}
         if base is None:
             return None, {}
         out: Dict[str, Dict[str, float]] = {k: dict(v) for k, v in base.items()}
         dex_times["native"] = fence
         for dex in sorted({str(d).lower() for d in dexes if d}):
             snap, t = self.fetch_exchange_positions(wallet, dex=dex)
+            if snap is RATE_BUDGET_DEFERRED:
+                return RATE_BUDGET_DEFERRED, {}
             if snap is None:
                 self.audit["hip3_snapshot_failed"] += 1
                 log("WARNING", f"HIP3_SNAPSHOT_FAILED wallet={wallet} dex={dex} action=fail_closed")
@@ -1668,6 +1728,10 @@ class EngineSSOT:
             self.audit["hip3_fence_proof_unavailable"] += 1
             return {"ok": False, "complete": False, "hip3_coherent": False,
                     "rows": [], "rest_pages": rest_pages,
+                    # Gate C: carry the DEFERRED distinction out of the fetch so
+                    # the caller can reschedule soon instead of treating a budget
+                    # refusal as a failed proof.  Anything else is a real failure.
+                    "deferred": bool(fetch.get("deferred", False)),
                     "reason": fetch.get("reason", "fetch_failed")}
         if not fetch.get("complete"):
             self.audit["hip3_fence_proof_incomplete"] += 1
@@ -1726,12 +1790,23 @@ class EngineSSOT:
         """
         wallet = wallet.lower()
         base, fence = self.fetch_exchange_positions(wallet)
+        # Gate C: the deferral sentinel is falsy, so it MUST be tested before the
+        # None check. It is mapped onto the same fail-closed return as a bad
+        # payload -- this legacy path has no deferral channel of its own, and
+        # inventing one is out of Gate C's scope -- but it must never be mistaken
+        # for a successful measurement.
+        if base is RATE_BUDGET_DEFERRED:
+            self.audit["legacy_fetch_deferred_rate_budget"] += 1
+            return None, 0, {}, None
         if base is None:
             return None, 0, {}, None
         out: Dict[str, Dict[str, float]] = {k: dict(v) for k, v in base.items()}
         dex_times: Dict[str, int] = {"native": fence}
         for dex in sorted({str(d).lower() for d in dexes if d}):
             snap, t = self.fetch_exchange_positions(wallet, dex=dex)
+            if snap is RATE_BUDGET_DEFERRED:
+                self.audit["legacy_fetch_deferred_rate_budget"] += 1
+                return None, 0, {}, None
             if snap is None:
                 self.audit["hip3_snapshot_failed"] += 1
                 log("WARNING", f"HIP3_SNAPSHOT_FAILED wallet={wallet} dex={dex} action=fail_closed")
@@ -1780,6 +1855,16 @@ class EngineSSOT:
             self.wallet_runtime.setdefault(wallet, {})["ready"] = False
             return
         snapshot, dex_times = self._fetch_snapshots_only(wallet, dexes)
+        # Gate C: a budget REFUSAL must never bootstrap a "measured" epoch. The
+        # sentinel is falsy, so it must be tested BEFORE the None check -- and it
+        # gets its own audit counter so a starved cold start is distinguishable
+        # from a genuinely failed one.
+        if snapshot is RATE_BUDGET_DEFERRED:
+            self.audit["bootstrap_snapshot_deferred_rate_budget"] += 1
+            log("INFO", f"BOOTSTRAP_SNAPSHOT_DEFERRED wallet={wallet} "
+                       f"reason=rate_budget_refused action=no_epoch_no_ready_retry_next_cycle")
+            self.wallet_runtime.setdefault(wallet, {})["ready"] = False
+            return
         if snapshot is None:
             # FAIL CLOSED: a failed snapshot (or an incoherent DEX union) must
             # NOT create an epoch.  An empty snapshot would otherwise become a
@@ -2078,17 +2163,26 @@ class EngineSSOT:
 
         Returns None on request/API failure so callers do NOT advance the cursor.
         Returns [] on a successful empty range.
+
+        Gate C: a rate-budget REFUSAL returns the RATE_BUDGET_DEFERRED sentinel
+        instead of a bare None.  Both are falsy, so every existing `is None`
+        caller still fails closed identically -- but the refusal now carries its
+        own reason instead of the caller having to INFER it from the shared,
+        process-wide `rate_budget_skipped_fill_fetches` counter.  Inference was
+        unsound: a concurrent skip belonging to a different wallet could
+        relabel this wallet's genuine network failure as a deferral, which is a
+        false green in the exact direction this gate exists to prevent.
         """
         if requests is None:
             return None
         if RATE_GUARD is not None and not RATE_GUARD.acquire(
             "userFillsByTime", timeout_s=SSOT_ACQUIRE_TIMEOUT_SEC
         ):
-            # None (not []) so the caller does NOT advance its cursor: a skipped
-            # fetch must never be mistaken for a proven-empty window.
+            # A sentinel (not []) so the caller does NOT advance its cursor: a
+            # skipped fetch must never be mistaken for a proven-empty window.
             self.audit["rate_budget_skipped_fill_fetches"] += 1
             log("INFO", f"RATE_BUDGET_SKIP wallet={wallet} request=userFillsByTime")
-            return None
+            return RATE_BUDGET_DEFERRED
         try:
             payload: Dict[str, Any] = {
                 "type": "userFillsByTime",
@@ -2158,10 +2252,23 @@ class EngineSSOT:
             window_complete = False
             while page_count < POLL_MAX_PAGES_PER_WINDOW:
                 rows = self.fetch_fills_range(wallet, page_cursor, window_end)
-                if rows is None:
-                    # Transient failure: completeness unknown. Do NOT advance.
+                if rows is RATE_BUDGET_DEFERRED:
+                    # The budget REFUSED: the request never left the process, so
+                    # this is evidence about nothing.  Flag it as a DEFERRAL so
+                    # the caller reschedules soon instead of recording a failed
+                    # proof.  Identity test on the sentinel -- no inference from
+                    # the shared audit counter, which a concurrent skip for
+                    # another wallet could otherwise falsify.
                     return {"ok": False, "complete": False, "rows": all_rows,
-                            "reason": "fetch_failed", "rest_pages": total_rest_pages}
+                            "deferred": True,
+                            "reason": "rate_budget_deferred",
+                            "rest_pages": total_rest_pages}
+                if rows is None:
+                    # Genuine transient failure: completeness unknown. Do NOT advance.
+                    return {"ok": False, "complete": False, "rows": all_rows,
+                            "deferred": False,
+                            "reason": "fetch_failed",
+                            "rest_pages": total_rest_pages}
                 total_rest_pages += 1  # Count every physical REST page
                 if not rows:
                     window_complete = True
@@ -2597,6 +2704,20 @@ class EngineSSOT:
                 )
         return recovered + unresolved
 
+    def _record_budget_deferral(self, wallet: str) -> int:
+        """Count one rate-budget deferral for a wallet and return the new count.
+
+        Safe access: several suites (and the mutation harnesses) build instances
+        via ``__new__`` without running ``__init__``, so the counter may not
+        exist yet.  Materialise it on demand rather than assuming it does.
+        """
+        if not hasattr(self, "_budget_deferred_cycles"):
+            self._budget_deferred_cycles = defaultdict(int)
+        self._budget_deferred_cycles[wallet] = int(
+            self._budget_deferred_cycles.get(wallet, 0)
+        ) + 1
+        return int(self._budget_deferred_cycles[wallet])
+
     def _process_wallet_proof(self, wallet: str, now: int) -> None:
         """Process one wallet's proof job with a fail-safe, ordered proof fence.
 
@@ -2640,9 +2761,25 @@ class EngineSSOT:
 
         try:
             # Step 2: Snapshots first (native + builder DEXes), NO proof fetch.
+            # Gate C: the refusal reason travels with the return value
+            # (RATE_BUDGET_DEFERRED), never inferred from a shared counter.
             dexes = self.wallet_poll_dexes(wallet)
             snapshot, dex_times = self._fetch_snapshots_only(wallet, dexes)
+            if snapshot is RATE_BUDGET_DEFERRED:
+                # The budget REFUSED: we never asked, so there is no evidence
+                # about this wallet at all -- a DEFERRAL, not a failure.  It must
+                # be retried soon, not backoff-scheduled a whole cycle later.
+                deferrals = self._record_budget_deferral(wallet)
+                self.audit["poll_cycle_deferred_rate_budget"] += 1
+                log("INFO", f"POLL_DEFERRED_RATE_BUDGET wallet={wallet} "
+                           f"deferrals={deferrals} "
+                           f"action=retry_soon_no_failure_counted")
+                return
             if snapshot is None:
+                # The exchange answered but the payload was unusable: a genuine
+                # failure.  (Counting this the same as a refusal made a starved
+                # wallet look incoherent, failing inputs_current for the wrong
+                # reason AND pushing the retry a whole cycle out.)
                 log("WARNING", f"POLL_SNAPSHOT_SKIPPED wallet={wallet} reason=invalid_or_failed")
                 self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
                 self.audit["poll_cycle_failed_no_cursor_advance"] += 1
@@ -2676,6 +2813,19 @@ class EngineSSOT:
             # snapshot fence_lo == fence_hi and that interval is empty -- a
             # property of the interval, not of the completeness proof.
             proof = self.prove_interval_coherent(wallet, start_ms, fence_lo, fence_hi)
+            if proof.get("deferred"):
+                # Gate C: the budget refused the proof fetch, so we have NO
+                # evidence about this wallet -- not evidence of bad data.  Count
+                # it as a deferral and let the scheduler retry soon; counting it
+                # as a failure would fail `inputs_current` for the wrong reason
+                # AND push the retry a whole cycle out, turning one refused
+                # request into a self-sustaining starvation loop.
+                deferrals = self._record_budget_deferral(wallet)
+                self.audit["poll_cycle_deferred_rate_budget"] += 1
+                log("INFO", f"POLL_DEFERRED_RATE_BUDGET wallet={wallet} "
+                           f"deferrals={deferrals} "
+                           f"action=retry_soon_no_failure_counted")
+                return
             if not (proof.get("ok") and proof.get("complete") and proof.get("hip3_coherent")):
                 # Fail closed: no watermark advance, no drift acceptance, and the
                 # snapshot is NOT recorded as current truth for this wallet.
@@ -2700,6 +2850,15 @@ class EngineSSOT:
 
             if ingest.get("complete"):
                 self.consecutive_poll_failures[wallet] = 0
+                # Gate C: a completed cycle proves the wallet was actually served,
+                # so any earlier budget deferral is resolved -- clear it or the
+                # wallet would be reported as starved forever.
+                prior_deferrals = int(
+                    getattr(self, "_budget_deferred_cycles", {}).get(wallet, 0) or 0
+                )
+                if prior_deferrals:
+                    self.audit["rate_budget_deferrals_resolved"] += prior_deferrals
+                    self._budget_deferred_cycles[wallet] = 0
                 # Completeness AND coherence are both proven through fence_hi, so
                 # the watermark advances via the canonical helper.
                 self._advance_trusted_through(wallet, fence_hi)
@@ -2774,13 +2933,27 @@ class EngineSSOT:
                 for wallet in due_wallets:
                     if self.stop_event.is_set():
                         break
+                    deferred_before = int(
+                        getattr(self, "_budget_deferred_cycles", {}).get(wallet, 0) or 0
+                    )
                     try:
                         self._process_wallet_proof(wallet, now)
                     except Exception as e:
                         log("ERROR", f"POLL_WALLET_EXCEPTION wallet={wallet} err={e}")
                         self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
-                    # Update due time: schedule strictly inside the SLA.
-                    self._wallet_due_ms[wallet] = utc_now_ms() + schedule_target_ms
+                    # Gate C: a wallet deferred by the rate budget has produced NO
+                    # evidence either way, so rescheduling it a full cadence out
+                    # would waste the entire cycle it was waiting for.  Retry on
+                    # the short cadence instead -- the budget guard is what paces
+                    # real traffic, not this timer, so this cannot overspend.
+                    deferred_now = int(
+                        getattr(self, "_budget_deferred_cycles", {}).get(wallet, 0) or 0
+                    ) > deferred_before
+                    if deferred_now:
+                        self._wallet_due_ms[wallet] = utc_now_ms() + DEFERRED_RETRY_MS
+                    else:
+                        # Update due time: schedule strictly inside the SLA.
+                        self._wallet_due_ms[wallet] = utc_now_ms() + schedule_target_ms
                 self.write_state()
             # Short poll interval (5s), not full-SLA sleep
             self.stop_event.wait(5)
