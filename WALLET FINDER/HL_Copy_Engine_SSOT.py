@@ -564,10 +564,11 @@ class EngineSSOT:
         # _remeasure_epoch_baseline_omission): a failed union fetch must not
         # re-issue every poll cycle.
         self._baseline_remeasure_gate: Dict[str, float] = {}
-        # Frozen {wallet: expected_epoch_id} manifest of proven pre-fix baselines;
-        # auto re-measurement is permitted ONLY for a wallet whose current epoch_id
-        # still matches.  Empty manifest => no automatic roll (fail closed).
-        self._hip3_omission_targets: Dict[str, str] = self._load_hip3_omission_targets()
+        # Frozen {wallet: {epoch_id, proven_coins}} manifest of proven pre-fix
+        # baseline omissions; auto re-measurement is permitted ONLY for a wallet
+        # whose current epoch_id matches AND only for the listed proven_coins.
+        # Empty manifest => no automatic roll (fail closed).
+        self._hip3_omission_targets: Dict[str, Dict[str, Any]] = self._load_hip3_omission_targets()
 
         startup_fills = self.load_fills_from_ledger()
         self._startup_fill_wallets: Set[str] = {f.wallet for f in startup_fills}
@@ -668,13 +669,11 @@ class EngineSSOT:
             "wallets": self.epoch_by_wallet,
         })
 
-    def _load_hip3_omission_targets(self) -> Dict[str, str]:
-        """Frozen manifest {wallet: expected_epoch_id} of proven pre-fix baselines.
+    def _load_hip3_omission_targets(self) -> Dict[str, Dict[str, Any]]:
+        """Frozen manifest of proven pre-fix HIP-3 baseline omissions.
 
-        Missing/empty manifest => {} => NO wallet is eligible for automatic
-        re-measurement (fail closed).  This binds the guard to the exact cohort we
-        proved defective, so a legitimately-later builder position can never be
-        rebaselined.
+        Format: {wallet: {"epoch_id": str, "proven_coins": {coin: omitted_position}}}.
+        Missing/empty manifest => {} => NO wallet is eligible (fail closed).
         """
         try:
             if not HIP3_BASELINE_OMISSION_MANIFEST.exists():
@@ -683,7 +682,18 @@ class EngineSSOT:
             tg = data.get("targets", data) if isinstance(data, dict) else {}
             if not isinstance(tg, dict):
                 return {}
-            return {str(w).lower(): str(e) for w, e in tg.items() if e}
+            out: Dict[str, Dict[str, Any]] = {}
+            for w, v in tg.items():
+                if not isinstance(v, dict):
+                    continue
+                eid = v.get("epoch_id")
+                coins = v.get("proven_coins") or {}
+                if isinstance(eid, str) and eid and isinstance(coins, dict):
+                    out[str(w).lower()] = {
+                        "epoch_id": eid,
+                        "proven_coins": {str(c).upper(): float(p) for c, p in coins.items()},
+                    }
+            return out
         except Exception as e:
             log("WARNING", f"HIP3_OMISSION_MANIFEST_LOAD_FAILED err={e} action=no_auto_roll")
             return {}
@@ -1882,8 +1892,10 @@ class EngineSSOT:
         # defective epoch (frozen manifest) may be treated as a baseline omission.
         # A non-target / post-fix epoch follows the ORDINARY drift path -- its
         # builder discrepancy may be a genuinely missing fill, not a bad baseline.
-        target_epoch = (self._hip3_omission_targets or {}).get(wallet)
+        target_info = (self._hip3_omission_targets or {}).get(wallet)
         current_epoch_id = (self.epoch_by_wallet.get(wallet) or {}).get("epoch_id")
+        target_epoch = target_info.get("epoch_id") if isinstance(target_info, dict) else None
+        target_coins = target_info.get("proven_coins") if isinstance(target_info, dict) else None
         is_omission_target = bool(target_epoch) and target_epoch == current_epoch_id
         for coin in sorted(coins):
             exch_size = fnum((snapshot.get(coin) or {}).get("signed_size"))
@@ -1909,6 +1921,8 @@ class EngineSSOT:
             # re-measurement instead.  Never generalised to ordinary drift.
             if (
                 is_omission_target
+                and target_coins is not None
+                and coin in target_coins
                 and self._builder_dex_of(coin) is not None
                 and abs(baseline) <= POSITION_EPSILON
                 and abs(exch_size) > POSITION_EPSILON

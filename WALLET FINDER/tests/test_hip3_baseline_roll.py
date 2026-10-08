@@ -91,7 +91,7 @@ def test_guard_flags_builder_omission_not_native_drift():
         "epoch_id": "w-1", "epoch_status": "OPEN", "baseline_ts_ms": T - 10**9,
         "baseline_position": {"BTC": {"signed_size": 1.0, "entry_price": 1.0}},
     }
-    e._hip3_omission_targets = {W: "w-1"}   # frozen manifest: this epoch is the proven defect
+    e._hip3_omission_targets = {W: {"epoch_id": "w-1", "proven_coins": {"XYZ:MRNA": -5.0}}}   # frozen manifest: this epoch is the proven defect
     # a genuine NATIVE drift the guard must NOT capture
     e.epoch_by_wallet[NATIVE_W] = {
         "epoch_id": "n-1", "epoch_status": "OPEN", "baseline_ts_ms": T - 10**9,
@@ -131,7 +131,7 @@ def test_prior_epoch_preserved_unresolved():
         "epoch_id": "defective-1", "epoch_status": "OPEN", "baseline_ts_ms": T - 10**9,
         "baseline_position": {},
     }
-    e._hip3_omission_targets = {W: "defective-1"}
+    e._hip3_omission_targets = {W: {"epoch_id": "defective-1", "proven_coins": {"XYZ:MRNA": -5.0}}}
     fr = FakeRequests({
         "clearinghouseState": lambda b: ch_state([pos("xyz:MRNA", -5.0)], T) if b.get("dex") == "xyz"
         else ch_state([], T),
@@ -156,7 +156,7 @@ def test_roll_fails_closed_on_union_failure():
         "epoch_id": "defective-1", "epoch_status": "OPEN", "baseline_ts_ms": T - 10**9,
         "baseline_position": {},
     }
-    e._hip3_omission_targets = {W: "defective-1"}
+    e._hip3_omission_targets = {W: {"epoch_id": "defective-1", "proven_coins": {"XYZ:MRNA": -5.0}}}
 
     def boom(b):
         raise RuntimeError("perpDexs down")
@@ -203,7 +203,7 @@ def test_post_fix_non_target_not_rolled():
         "baseline_position": {},   # builder position opened AFTER the epoch
     }
     # manifest holds a DIFFERENT (the old) epoch_id -> current epoch is NOT a target
-    e._hip3_omission_targets = {W: "defective-OLD"}
+    e._hip3_omission_targets = {W: {"epoch_id": "defective-OLD", "proven_coins": {"XYZ:MRNA": -5.0}}}
     fr = FakeRequests({
         "clearinghouseState": lambda b: ch_state([pos("xyz:MRNA", -5.0)], T) if b.get("dex") == "xyz"
         else ch_state([], T),
@@ -227,7 +227,7 @@ def test_mixed_drift_wallet_not_rolled():
         "epoch_id": "defective-1", "epoch_status": "OPEN", "baseline_ts_ms": T - 10**9,
         "baseline_position": {"ETH": {"signed_size": 0.0, "entry_price": 0.0}},  # ETH omitted too
     }
-    e._hip3_omission_targets = {W: "defective-1"}   # it IS a manifest target
+    e._hip3_omission_targets = {W: {"epoch_id": "defective-1", "proven_coins": {"XYZ:MRNA": -5.0}}}   # it IS a manifest target
     fr = FakeRequests({
         "clearinghouseState": lambda b: ch_state([pos("xyz:MRNA", -5.0), pos("ETH", 7.0)], T)
         if b.get("dex") == "xyz" else ch_state([pos("ETH", 7.0)], T),
@@ -244,6 +244,36 @@ def test_mixed_drift_wallet_not_rolled():
     print("PASS 6/6 mixed-drift (target + native) wallet is NOT rolled; native drift preserved")
 
 
+def test_unmanifested_builder_coin_blocks_roll():
+    """A target wallet with one manifested omission coin PLUS a different
+    unmanifested builder discrepancy: the second must go ordinary DRIFT_* and
+    the wallet must NOT roll (mixed drift)."""
+    e = new_engine()
+    e.epoch_by_wallet[W] = {
+        "epoch_id": "defective-1", "epoch_status": "OPEN", "baseline_ts_ms": T - 10**9,
+        "baseline_position": {},
+    }
+    # MRNA is manifested; XYZ:OTHER is NOT in proven_coins
+    e._hip3_omission_targets = {W: {"epoch_id": "defective-1", "proven_coins": {"XYZ:MRNA": -5.0}}}
+    fr = FakeRequests({
+        "clearinghouseState": lambda b: ch_state([pos("xyz:MRNA", -5.0), pos("xyz:OTHER", 3.0)], T)
+        if b.get("dex") == "xyz" else ch_state([], T),
+        "perpDexs": lambda b: {"perpDexs": [{"name": "xyz"}]},
+    })
+    mod.requests = fr; mod.RATE_GUARD = None
+    e.audit_position_drift_only(W, {"XYZ:MRNA": {"signed_size": -5.0}, "XYZ:OTHER": {"signed_size": 3.0}})
+    # MRNA: manifested -> BASELINE_INVALID_REMEASUREMENT_REQUIRED
+    assert e.drift_state_by_wallet[W]["XYZ:MRNA"]["status"] == "BASELINE_INVALID_REMEASUREMENT_REQUIRED"
+    # OTHER: NOT manifested -> ordinary DRIFT_*
+    st_other = e.drift_state_by_wallet[W]["XYZ:OTHER"]["status"]
+    assert st_other in {"DRIFT_DETECTED", "DRIFT_UNRESOLVED", "UNRESOLVED_ESCALATED"}, st_other
+    # Wallet must NOT roll (mixed drift)
+    assert e.epoch_by_wallet[W]["epoch_id"] == "defective-1"
+    assert e.audit["epochs_rolled_baseline_omission"] == 0
+    assert e.audit["baseline_remeasure_mixed_drift_blocked"] == 1
+    print("PASS 7/7 unmanifested builder coin -> ordinary DRIFT_*, wallet NOT rolled")
+
+
 if __name__ == "__main__":
     test_guard_flags_builder_omission_not_native_drift()
     test_prior_epoch_preserved_unresolved()
@@ -251,4 +281,5 @@ if __name__ == "__main__":
     test_remeasure_is_gated()
     test_post_fix_non_target_not_rolled()
     test_mixed_drift_wallet_not_rolled()
+    test_unmanifested_builder_coin_blocks_roll()
     print("\nALL BASELINE-OMISSION ROLL TESTS PASSED")
