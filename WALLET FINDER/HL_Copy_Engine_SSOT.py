@@ -101,7 +101,11 @@ POLL_OVERLAP_MS = int(os.getenv("HL_POLL_OVERLAP_MS", "300000"))  # 5m overlap, 
 SSOT_WEIGHT_PER_MIN = 150
 SSOT_FILL_WEIGHT = 20
 SSOT_SNAPSHOT_WEIGHT = 2
-SSOT_PROOF_SLA_HEADROOM = 1.3  # 30% headroom over theoretical minimum
+# Fixed product SLA (seconds).  This is a declared product decision, NOT
+# dynamically stretched.  The capacity invariant measures whether this
+# fixed SLA is achievable; if not, capacity_achievable=False and proof
+# currentness fails visibly.
+SSOT_PROOF_SLA_SECONDS = int(os.getenv("HL_PROOF_SLA_SECONDS", "2160"))  # 36 minutes
 
 # How long the HIP-3 builder perp-dex name list is cached.  The list changes
 # only when a new builder DEX is deployed, so an hour is safe and keeps the
@@ -163,7 +167,7 @@ except Exception:  # pragma: no cover - never let the guard break the tracker
     RATE_GUARD = None
 CLEAN_REBUILD = os.getenv("HL_CLEAN_REBUILD", "0") == "1"
 USER_WALLET = os.getenv("HL_USER_WALLET", "").lower()
-ENABLE_WS = False
+ENABLE_WS = os.getenv("HL_ENABLE_WS", "1") == "1"
 
 RECORDING_WS_CAPTURED = "WS_CAPTURED"   # genuine websocket capture only
 RECORDING_POLL = "POLL"                 # REST/userFillsByTime polling
@@ -589,8 +593,13 @@ class EngineSSOT:
         # Computed at startup and recomputed when wallets or builder DEX sets
         # change.  If measured workload exceeds the declared SLA,
         # capacity_achievable=False and proof currentness fails visibly.
+        # ALL capacity state MUST be initialized BEFORE _compute_capacity_invariant().
         self._capacity_invariant: Dict[str, Any] = {}
         self._capacity_bootstrap_complete: bool = False
+        # Per-wallet REST page counts (last 10 measurements each)
+        self._capacity_rest_pages: Dict[str, List[int]] = defaultdict(list)
+        # Per-wallet due time for the continuous scheduler (ms epoch)
+        self._wallet_due_ms: Dict[str, int] = {}
         self._compute_capacity_invariant()
 
         # ---- Per-wallet proof fence ------------------------------------------
@@ -602,8 +611,6 @@ class EngineSSOT:
         self._proof_fence_by_wallet: Dict[str, int] = {}
         self._post_fence_buffer: Dict[str, List[Any]] = defaultdict(list)
         self._proof_fence_lock = threading.Lock()
-        # Per-wallet REST page counts (last 10 measurements each)
-        self._capacity_rest_pages: Dict[str, List[int]] = defaultdict(list)
 
         startup_fills = self.load_fills_from_ledger()
         self._startup_fill_wallets: Set[str] = {f.wallet for f in startup_fills}
@@ -803,7 +810,7 @@ class EngineSSOT:
             self.audit["baseline_remeasure_gated"] += 1
             return False
         self._baseline_remeasure_gate[wallet] = time.time()
-        snapshot, fence, _dex_times = self.fetch_wallet_positions(wallet, dexes)
+        snapshot, fence, _dex_times, _unified = self.fetch_wallet_positions(wallet, dexes)
         if snapshot is None:
             self.audit["baseline_remeasure_skipped_snapshot_failed"] += 1
             log("WARNING", f"BASELINE_REMEASURE_SKIPPED wallet={wallet} reason=union_snapshot_or_fence_failed")
@@ -985,6 +992,11 @@ class EngineSSOT:
         a wallet.  If the measured workload exceeds the declared SLA,
         capacity_achievable=False and proof currentness fails visibly.
         """
+        # Safe access: tests may create instances via __new__ without __init__
+        if not hasattr(self, '_capacity_bootstrap_complete'):
+            return
+        if not hasattr(self, '_capacity_rest_pages'):
+            self._capacity_rest_pages = defaultdict(list)
         if wallet not in self._capacity_rest_pages:
             self._capacity_rest_pages[wallet] = []
         self._capacity_rest_pages[wallet].append(rest_pages)
@@ -1005,15 +1017,19 @@ class EngineSSOT:
         falling back to 1 page per wallet (lower bound) for wallets that have
         not been measured yet.
         """
-        wallet_count = len(self.wallets)
+        # Safe access: tests may create instances via __new__ without __init__
+        if not hasattr(self, '_capacity_bootstrap_complete'):
+            return
+        wallets = getattr(self, 'wallets', [])
+        wallet_count = len(wallets)
         # Count builder DEX snapshots per wallet using wallet_poll_dexes
         builder_snapshot_count = 0
-        for w in self.wallets:
+        for w in wallets:
             builder_snapshot_count += len(self.wallet_poll_dexes(w))
         # REST pages: use actual measured page counts when available,
         # falling back to 1 page per wallet (lower bound) for unmeasured wallets.
         rest_pages = 0
-        for w in self.wallets:
+        for w in wallets:
             pages_list = self._capacity_rest_pages.get(w)
             if pages_list:
                 # Use the maximum observed page count (worst case)
@@ -1026,9 +1042,10 @@ class EngineSSOT:
             + builder_snapshot_count * SSOT_SNAPSHOT_WEIGHT
         )
         theoretical_min_cycle_sec = (total_weight / SSOT_WEIGHT_PER_MIN) * 60
-        declared_sla_sec = int(theoretical_min_cycle_sec * SSOT_PROOF_SLA_HEADROOM)
+        # Use the FIXED product SLA, not a dynamically stretched one.
         # capacity_achievable is False if the theoretical minimum exceeds
-        # the declared SLA (i.e., the system cannot meet its own freshness gate)
+        # the fixed SLA (i.e., the system cannot meet its own freshness gate).
+        declared_sla_sec = SSOT_PROOF_SLA_SECONDS
         capacity_achievable = theoretical_min_cycle_sec <= declared_sla_sec
         self._capacity_invariant = {
             "wallet_count": wallet_count,
@@ -1040,7 +1057,6 @@ class EngineSSOT:
             "total_weight_per_sweep": total_weight,
             "theoretical_minimum_cycle_seconds": int(theoretical_min_cycle_sec),
             "declared_freshness_sla_seconds": declared_sla_sec,
-            "headroom_pct": int((SSOT_PROOF_SLA_HEADROOM - 1.0) * 100),
             "capacity_achievable": capacity_achievable,
             "bootstrap_complete": self._capacity_bootstrap_complete,
         }
@@ -1049,7 +1065,7 @@ class EngineSSOT:
                     f"rest_pages={rest_pages} "
                     f"total_weight={total_weight} "
                     f"min_cycle={int(theoretical_min_cycle_sec)}s "
-                    f"declared_sla={declared_sla_sec}s "
+                    f"fixed_sla={declared_sla_sec}s "
                     f"achievable={capacity_achievable}")
 
     def build_currentness(self) -> Dict[str, Any]:
@@ -1446,6 +1462,8 @@ class EngineSSOT:
         fetch = self.fetch_fills_since(wallet, start_ms, fence_hi_ms)
         rest_pages = int(fetch.get("rest_pages", 1))
         if not fetch.get("ok") or not fetch.get("complete"):
+            if not fetch.get("ok"):
+                self.audit["hip3_fence_proof_unavailable"] += 1
             return {
                 "ok": fetch.get("ok", False),
                 "complete": False,
@@ -1481,11 +1499,11 @@ class EngineSSOT:
 
     def fetch_wallet_positions(
         self, wallet: str, dexes: Iterable[str]
-    ) -> Tuple[Optional[Dict[str, Dict[str, float]]], int, Dict[str, int]]:
+    ) -> Tuple[Optional[Dict[str, Dict[str, float]]], int, Dict[str, int], Optional[Dict[str, Any]]]:
         """Snapshot native + the given builder DEXes and UNION the positions.
 
-        Returns (positions, fence_ms, dex_times).  Any failure returns
-        (None, 0, {}) -- a partial union is never reported as complete.
+        Returns (positions, fence_ms, dex_times, unified_result).  Any failure
+        returns (None, 0, {}, None) -- a partial union is never reported as complete.
 
         FENCE INVARIANT: sequential snapshots carry different server times, so
         the union is coherent ONLY if no fill for this wallet landed between the
@@ -1500,11 +1518,16 @@ class EngineSSOT:
         is rejected fail-closed.  This eliminates the separate
         _no_fills_between() REST call, reducing per-wallet cost from
         2 REST calls to 1.
+
+        SINGLE-FETCH PROOF: The unified_result contains the canonical REST proof
+        (rows, rest_pages, complete) that serves completeness, REST page accounting,
+        missed-WS ingestion, trusted-through advancement, AND HIP-3 coherence.
+        The caller MUST reuse this result instead of issuing a second fetch.
         """
         wallet = wallet.lower()
         base, fence = self.fetch_exchange_positions(wallet)
         if base is None:
-            return None, 0, {}
+            return None, 0, {}, None
         out: Dict[str, Dict[str, float]] = {k: dict(v) for k, v in base.items()}
         dex_times: Dict[str, int] = {"native": fence}
         for dex in sorted({str(d).lower() for d in dexes if d}):
@@ -1512,26 +1535,29 @@ class EngineSSOT:
             if snap is None:
                 self.audit["hip3_snapshot_failed"] += 1
                 log("WARNING", f"HIP3_SNAPSHOT_FAILED wallet={wallet} dex={dex} action=fail_closed")
-                return None, 0, {}
+                return None, 0, {}, None
             out.update({k: dict(v) for k, v in snap.items()})
             dex_times[dex] = t
         fence_hi = max(dex_times.values())
         fence_lo = min(dex_times.values())
-        # HIP-3 unified proof: the same fetch_fills_since result certifies
-        # both fill completeness AND snapshot coherence.  If any fill lies in
-        # (fence_lo, fence_hi], the union is incoherent -> fail closed.
+        # SINGLE-FETCH PROOF: one fetch_fills_since call serves both
+        # fill completeness AND HIP-3 snapshot coherence.
+        # For single-DEX (native) wallets, fence_hi == fence_lo, so no
+        # fence proof is needed and no REST call is made.
         if fence_hi != fence_lo:
-            # Use the unified REST path: one fetch_fills_since call serves both
-            # fill completeness and HIP-3 snapshot coherence.
-            last_tt = int(self.trusted_through_ms_by_wallet.get(wallet, 0) or 0)
-            unified = self.fetch_fills_since_unified(wallet, last_tt, fence_hi, fence_lo)
+            start_ms = int(self.last_poll_ts_by_wallet.get(wallet, 0) or 0)
+            if start_ms == 0:
+                start_ms = int(self.trusted_through_ms_by_wallet.get(wallet, 0) or 0)
+            unified = self.fetch_fills_since_unified(wallet, start_ms, fence_hi, fence_lo)
             if not unified.get("hip3_coherent", False):
                 self.audit["hip3_union_incoherent"] += 1
                 log("WARNING", f"HIP3_UNION_INCOHERENT wallet={wallet} lo={fence_lo} hi={fence_hi} "
-                               f"dexes={sorted(dex_times)} action=fail_closed")
-                return None, 0, {}
+                           f"dexes={sorted(dex_times)} action=fail_closed")
+                return None, 0, {}, None
+        else:
+            unified = None
         self.audit["hip3_snapshot_unions"] += 1
-        return out, fence_hi, dex_times
+        return out, fence_hi, dex_times, unified
 
     def _builder_dexes_in_snapshot(self, snapshot: Dict[str, Dict[str, float]]) -> Set[str]:
         out: Set[str] = set()
@@ -1553,7 +1579,7 @@ class EngineSSOT:
             log("WARNING", f"BOOTSTRAP_PERP_DEXS_UNAVAILABLE wallet={wallet} action=fail_closed_no_epoch_no_ready")
             self.wallet_runtime.setdefault(wallet, {})["ready"] = False
             return
-        snapshot, fence, _dex_times = self.fetch_wallet_positions(wallet, dexes)
+        snapshot, fence, _dex_times, _unified = self.fetch_wallet_positions(wallet, dexes)
         if snapshot is None:
             # FAIL CLOSED: a failed snapshot (or an incoherent DEX union) must
             # NOT create an epoch.  An empty snapshot would otherwise become a
@@ -1697,6 +1723,16 @@ class EngineSSOT:
 
     # ------------------------- truth application -------------------------
     def accept_fill(self, fill: RawFill, persist: bool = True) -> bool:
+        # Proof fence enforcement at the canonical application boundary.
+        # A WS fill queued immediately before the proof job can be consumed
+        # by worker_loop after the fence activates.  Check here, not just
+        # in _on_ws_message, to close the race.
+        with self._proof_fence_lock:
+            fence_hi = self._proof_fence_by_wallet.get(fill.wallet)
+        if fence_hi is not None and fill.timestamp_ms > fence_hi:
+            self._buffer_post_fence_fill(fill.wallet, fill)
+            self.audit["ws_post_fence_buffered_accept"] += 1
+            return False
         if not self._remember_id(fill.fill_id):
             self.audit["duplicates"] += 1
             self.wallets_raw.setdefault(fill.wallet, RawWallet(fill.wallet)).duplicate_fill_count += 1
@@ -1985,6 +2021,9 @@ class EngineSSOT:
             log("WARNING", f"REAL_FILL_INGEST_FAILED wallet={wallet} reason={reason} start={start_ms} end={end_ms} fetch_reason={fetch.get('reason')}")
             return {"ok": False, "complete": False, "parsed": 0, "applied": 0,
                     "deduped": 0, "max_ts": start_ms, "reason": fetch.get("reason")}
+        # Update capacity invariant with actual REST page count
+        rest_pages = int(fetch.get("rest_pages", 1))
+        self._update_capacity_with_rest_pages(wallet, rest_pages)
         raw_fills = fetch.get("rows", [])
         complete = bool(fetch.get("complete"))
         if not complete:
@@ -2298,102 +2337,169 @@ class EngineSSOT:
                 )
         return recovered + unresolved
 
-    def poll_once(self) -> None:
-        """Fair paced per-wallet scheduler with proof fence.
+    def _process_wallet_proof(self, wallet: str, now: int) -> None:
+        """Process one wallet's proof job: snapshot + REST proof + reconcile.
 
+        This is the per-wallet unit of work for the continuous scheduler.
         Each wallet gets its own `now` timestamp captured at the start of
-        its proof job, not one timestamp captured at the start of a
-        potentially long sweep.  The proof fence prevents WS fills newer
-        than fence_hi from contaminating reconciliation.
+        its proof job.  The proof fence prevents WS fills newer than
+        fence_hi from contaminating reconciliation.
         """
-        self.refresh_manual_wallets()
-        # Fair scheduler: start each sweep where the last one stopped.
-        # Under a weight ceiling a sweep may not reach every wallet, and a
-        # sweep that always starts at index 0 would poll the front of the
-        # list forever and never once look at the back of it.  Rotating
-        # makes the shortfall show up as latency spread evenly across
-        # wallets instead of a permanently blind tail.
-        order = list(self.wallets)
-        if order:
-            offset = self._poll_rotation_offset % len(order)
-            order = order[offset:] + order[:offset]
-            self._poll_rotation_offset = (offset + 1) % len(order)
-        for wallet in order:
-            wallet = wallet.lower()
-            # Per-wallet `now`: captured at the start of THIS wallet's proof
-            # job, not at the start of the sweep.
-            now = utc_now_ms()
-            if not self._is_wallet_ready(wallet):
-                log("INFO", f"POLL_BOOTSTRAP wallet={wallet}")
-                self.bootstrap_wallet_from_exchange(wallet, ts_ms=now)
-                continue
+        wallet = wallet.lower()
+        if not self._is_wallet_ready(wallet):
+            log("INFO", f"POLL_BOOTSTRAP wallet={wallet}")
+            self.bootstrap_wallet_from_exchange(wallet, ts_ms=now)
+            return
 
-            # Step 1: Snapshots first (native + builder DEXes)
-            dexes = self.wallet_poll_dexes(wallet)
-            snapshot, fence, _dex_times = self.fetch_wallet_positions(wallet, dexes)
-            if snapshot is None:
-                log("WARNING", f"POLL_SNAPSHOT_SKIPPED wallet={wallet} reason=invalid_or_failed")
-                self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
-                continue
+        # Step 1: Snapshots first (native + builder DEXes)
+        dexes = self.wallet_poll_dexes(wallet)
+        snapshot, fence, _dex_times, unified = self.fetch_wallet_positions(wallet, dexes)
+        if snapshot is None:
+            log("WARNING", f"POLL_SNAPSHOT_SKIPPED wallet={wallet} reason=invalid_or_failed")
+            self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
+            return
 
-            # Step 2: Set proof fence BEFORE the REST call so WS fills newer
-            # than fence_hi are buffered, not applied to the position.
-            self._set_proof_fence(wallet, fence)
+        # Step 2: Set proof fence BEFORE the REST call so WS fills newer
+        # than fence_hi are buffered, not applied to the position.
+        self._set_proof_fence(wallet, fence)
 
-            # Step 3: Unified REST proof (one fetch_fills_since call serves
-            # both fill completeness AND HIP-3 snapshot coherence)
+        # Step 3: SINGLE-FETCH PROOF — reuse the unified result from
+        # fetch_wallet_positions.  This one REST call serves completeness,
+        # REST page accounting, missed-WS ingestion, trusted-through
+        # advancement, AND HIP-3 coherence.  No second fetch is issued.
+        # For native-only wallets (unified is None), fall back to the
+        # standard ingest path.
+        if unified is not None:
+            ingest = {
+                "ok": unified.get("ok", False),
+                "complete": unified.get("complete", False),
+                "applied": 0,
+                "deduped": 0,
+                "max_ts": 0,
+                "reason": unified.get("reason", "no_unified"),
+            }
+            if unified.get("ok"):
+                # Apply fills from the unified result (same as ingest_real_fills_window)
+                raw_fills = unified.get("rows", [])
+                parsed: List[RawFill] = []
+                min_ts = monitor_start_ms()
+                for raw in raw_fills:
+                    fill = self.parse_fill(wallet, raw, source="poll")
+                    if fill is not None and min_ts and fill.timestamp_ms < min_ts:
+                        self.audit["poll_pre_monitor_skipped"] += 1
+                        continue
+                    if fill is not None:
+                        parsed.append(fill)
+                parsed.sort(key=lambda f: (f.timestamp_ms, f.wallet, f.coin, f.fill_id))
+                for fill in parsed:
+                    if self.accept_fill(fill, persist=True):
+                        ingest["applied"] += 1
+                    else:
+                        ingest["deduped"] += 1
+                if parsed:
+                    ingest["max_ts"] = max(f.timestamp_ms for f in parsed)
+                # Advance cursor and trusted-through
+                if ingest["complete"]:
+                    self.last_poll_ts_by_wallet[wallet] = fence
+                    self.trusted_through_ms_by_wallet[wallet] = fence
+                self.audit["poll_ingest_attempts"] = int(self.audit.get("poll_ingest_attempts", 0)) + 1
+        else:
+            # Native-only wallet: no unified proof needed, use standard ingest
             start = self.last_poll_ts_by_wallet.get(wallet, now)
             ingest = self.ingest_real_fills_window(
                 wallet,
                 max(0, start - POLL_OVERLAP_MS),
-                fence,  # Use fence as end_ms, not now
+                fence,
                 "poll",
                 advance_cursor=True,
             )
 
-            # Step 4: Clear proof fence and apply buffered post-fence fills
-            buffered = self._clear_proof_fence(wallet)
-            if buffered:
-                buffered.sort(key=lambda f: (f.timestamp_ms, f.wallet, f.coin, f.fill_id))
-                for fill in buffered:
-                    self.accept_fill(fill, persist=True)
-                    self.audit["ws_post_fence_applied"] += 1
+        # Step 4: Clear proof fence and apply buffered post-fence fills
+        buffered = self._clear_proof_fence(wallet)
+        if buffered:
+            buffered.sort(key=lambda f: (f.timestamp_ms, f.wallet, f.coin, f.fill_id))
+            for fill in buffered:
+                self.accept_fill(fill, persist=True)
+                self.audit["ws_post_fence_applied"] += 1
 
-            if not ingest.get("ok"):
-                self.audit["poll_cycle_failed_no_cursor_advance"] += 1
-                self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
-                continue
-            if not ingest.get("complete"):
-                # Input through this interval is NOT proven complete: do not
-                # advance trusted-through, but the cycle itself did not error.
-                self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
-            else:
-                self.consecutive_poll_failures[wallet] = 0
+        if not ingest.get("ok"):
+            self.audit["poll_cycle_failed_no_cursor_advance"] += 1
+            self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
+            return
+        if not ingest.get("complete"):
+            # Input through this interval is NOT proven complete: do not
+            # advance trusted-through, but the cycle itself did not error.
+            self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
+        else:
+            self.consecutive_poll_failures[wallet] = 0
 
-            # Step 5: Update drift state and reconcile
-            # A newly-seen builder market expands the targeted poll set from the
-            # next cycle onward (it is already unioned into this snapshot).
-            new_active_dexes = self._builder_dexes_in_snapshot(snapshot)
-            old_active_dexes = self.wallet_active_dexes.get(wallet, set())
-            self.wallet_active_dexes[wallet] = new_active_dexes
-            # Recompute capacity invariant if the builder DEX set changed
-            if new_active_dexes != old_active_dexes:
-                self._compute_capacity_invariant()
-            self.last_exchange_snapshot_by_wallet[wallet] = {k: dict(v) for k, v in snapshot.items()}
-            self.last_exchange_snapshot_ts_by_wallet[wallet] = fence
-            self.audit_position_drift_only(wallet, snapshot)
-            self._wallet_state(wallet)["last_poll_reconcile_ms"] = now
+        # Step 5: Update drift state and reconcile
+        # A newly-seen builder market expands the targeted poll set from the
+        # next cycle onward (it is already unioned into this snapshot).
+        new_active_dexes = self._builder_dexes_in_snapshot(snapshot)
+        old_active_dexes = self.wallet_active_dexes.get(wallet, set())
+        self.wallet_active_dexes[wallet] = new_active_dexes
+        # Recompute capacity invariant if the builder DEX set changed
+        if new_active_dexes != old_active_dexes:
+            self._compute_capacity_invariant()
+        self.last_exchange_snapshot_by_wallet[wallet] = {k: dict(v) for k, v in snapshot.items()}
+        self.last_exchange_snapshot_ts_by_wallet[wallet] = fence
+        self.audit_position_drift_only(wallet, snapshot)
+        self._wallet_state(wallet)["last_poll_reconcile_ms"] = now
 
+    def poll_once(self) -> None:
+        """Process all due wallets in one sweep.
+
+        This is retained for backward compatibility but the continuous
+        scheduler (poll_loop) is the primary path.
+        """
+        self.refresh_manual_wallets()
+        now = utc_now_ms()
+        for wallet in self.wallets:
+            self._process_wallet_proof(wallet, now)
         self.write_state()
 
     def poll_loop(self) -> None:
+        """Continuous due-wallet scheduler with fair pacing.
+
+        Instead of sweep/sleep, this maintains a per-wallet due time and
+        processes wallets as they come due.  The scheduler uses a short
+        poll interval (5s) and non-blocking budget acquisition.  If a
+        wallet's proof job fails, its due time is pushed back by a
+        backoff interval.
+        """
+        # Initialize due times: spread wallets evenly across the SLA window
+        # to avoid thundering herd at startup.
+        sla_ms = int(self._capacity_invariant.get("declared_freshness_sla_seconds", SSOT_PROOF_SLA_SECONDS)) * 1000
+        wallet_count = len(self.wallets)
+        interval_ms = sla_ms // max(1, wallet_count)
+        now = utc_now_ms()
+        for i, wallet in enumerate(self.wallets):
+            self._wallet_due_ms[wallet] = now + (i * interval_ms)
+
         while not self.stop_event.is_set():
-            self.poll_once()
-            # Use the declared proof SLA from the capacity invariant, not
-            # POLL_SECONDS.  The capacity invariant is computed dynamically
-            # and reflects the actual measured workload.
-            declared_sla_sec = self._capacity_invariant.get("declared_freshness_sla_seconds", POLL_SECONDS)
-            self.stop_event.wait(declared_sla_sec)
+            self.refresh_manual_wallets()
+            now = utc_now_ms()
+            # Find due wallets (due time <= now)
+            due_wallets = [w for w in self.wallets if self._wallet_due_ms.get(w, 0) <= now]
+            if due_wallets:
+                # Process due wallets in fair order (rotating offset)
+                offset = self._poll_rotation_offset % len(due_wallets)
+                due_wallets = due_wallets[offset:] + due_wallets[:offset]
+                self._poll_rotation_offset = (offset + 1) % len(due_wallets)
+                for wallet in due_wallets:
+                    if self.stop_event.is_set():
+                        break
+                    try:
+                        self._process_wallet_proof(wallet, now)
+                    except Exception as e:
+                        log("ERROR", f"POLL_WALLET_EXCEPTION wallet={wallet} err={e}")
+                        self.consecutive_poll_failures[wallet] = int(self.consecutive_poll_failures.get(wallet, 0)) + 1
+                    # Update due time: next due = now + SLA
+                    self._wallet_due_ms[wallet] = utc_now_ms() + sla_ms
+                self.write_state()
+            # Short poll interval (5s), not full-SLA sleep
+            self.stop_event.wait(5)
 
     # ------------------------- websocket -------------------------
     def _on_ws_message(self, shard_id: int, _ws: Any, message: str) -> None:

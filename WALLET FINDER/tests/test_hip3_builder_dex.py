@@ -129,7 +129,7 @@ def test_union_matches_api_and_clears_false_drift():
     })
     mod.requests = fr
     mod.RATE_GUARD = None
-    snap, fence, times = e.fetch_wallet_positions(W, ["xyz"])
+    snap, fence, times, _unified = e.fetch_wallet_positions(W, ["xyz"])
     assert snap is not None, "union must succeed"
     assert set(snap.keys()) == {"BTC", "XYZ:MRNA", "XYZ:GOOGL"}, snap.keys()
     assert fence == t and times == {"native": t, "xyz": t}, times
@@ -166,7 +166,7 @@ def test_intervening_fill_fails_closed():
     })
     mod.requests = fr
     mod.RATE_GUARD = None
-    snap, fence, times = e.fetch_wallet_positions(W, ["xyz"])
+    snap, fence, times, _unified = e.fetch_wallet_positions(W, ["xyz"])
     assert snap is None and fence == 0 and times == {}, "incoherent union MUST fail closed"
     assert e.audit["hip3_union_incoherent"] == 1
     # and when the proof fetch itself ERRORS -> also fail closed
@@ -181,7 +181,7 @@ def test_intervening_fill_fails_closed():
         "userFillsByTime": _boom,   # transport failure
     })
     mod.requests = fr2
-    snap2, _f, _t = e2.fetch_wallet_positions(W, ["xyz"])
+    snap2, _f, _t, _u = e2.fetch_wallet_positions(W, ["xyz"])
     assert snap2 is None, "unavailable fence proof MUST fail closed"
     assert e2.audit["hip3_fence_proof_unavailable"] == 1
     print("PASS 4/6 intervening fill / unavailable proof -> FAIL CLOSED")
@@ -201,7 +201,7 @@ def test_native_wallet_unchanged_and_no_fanout():
     assert e.cold_bootstrap_dexes(NATIVE_W) == e.perp_dex_names
     # but the PER-CYCLE poll for a wallet with no builder activity is native-only
     assert e.wallet_poll_dexes(NATIVE_W) == [], "native-only wallet must not fan out per cycle"
-    snap, fence, times = e.fetch_wallet_positions(NATIVE_W, e.wallet_poll_dexes(NATIVE_W))
+    snap, fence, times, _unified = e.fetch_wallet_positions(NATIVE_W, e.wallet_poll_dexes(NATIVE_W))
     assert snap == {"BTC": {"signed_size": 2.0, "entry_price": 1.0, "unrealized_pnl": 0.0}}
     assert fence == 1791445590000 and times == {"native": 1791445590000}
     assert fr.count("clearinghouseState") == 1, "native wallet per-cycle = exactly 1 snapshot"
@@ -221,7 +221,7 @@ def test_native_wallet_unchanged_and_no_fanout():
     mod.requests = fr2
     assert e2.wallet_poll_dexes(W) == ["xyz"]
     assert e2.cold_bootstrap_dexes(W) == e2.perp_dex_names  # cold bootstrap fans out ONCE
-    snap2, _f, _t = e2.fetch_wallet_positions(W, e2.wallet_poll_dexes(W))
+    snap2, _f, _t, _u = e2.fetch_wallet_positions(W, e2.wallet_poll_dexes(W))
     assert fr2.count("clearinghouseState") == 2, "builder poll = native + its 1 dex"
     assert fr2.count("clearinghouseState", dex="flx") == 0, "must NOT touch unrelated dexes"
     print("PASS 5/6 native per-cycle unchanged; no fan-out (native=1 call, builder=2 calls of 10 dexes)")
@@ -245,7 +245,7 @@ def test_cold_bootstrap_discovers_preledger_builder_position():
     mod.RATE_GUARD = None
     # cold bootstrap still fans out over EVERY dex despite the empty ledger
     assert e.cold_bootstrap_dexes(W) == ["xyz", "para"]
-    snap, _f, _t = e.fetch_wallet_positions(W, e.cold_bootstrap_dexes(W))
+    snap, _f, _t, _u = e.fetch_wallet_positions(W, e.cold_bootstrap_dexes(W))
     assert "XYZ:MRNA" in snap, "pre-ledger builder position MUST be discovered"
     assert snap["XYZ:MRNA"]["signed_size"] == -288.73
     # and it is now recorded as an active dex for the targeted per-cycle poll
