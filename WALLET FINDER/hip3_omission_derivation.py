@@ -31,13 +31,60 @@ def is_builder_coin(coin: str) -> bool:
     return ":" in str(coin) and not str(coin).startswith("@")
 
 
+def _fnum(v: Any) -> float:
+    """Canonical numeric parse (matches engine fnum)."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _normalize_side(raw_side: Any, signed_size: float = 0.0, start_position: float = 0.0) -> str:
+    """Canonical side normalization (matches engine normalize_side)."""
+    s = str(raw_side or "").strip().lower()
+    if s in {"b", "buy", "long", "bid"}:
+        return "BUY"
+    if s in {"a", "s", "sell", "short", "ask"}:
+        return "SELL"
+    if signed_size > 0:
+        return "BUY"
+    if signed_size < 0:
+        return "SELL"
+    return "SELL" if start_position > 0 else "BUY"
+
+
+def _parse_raw_fill_delta(row: Dict[str, Any], target_coin: str) -> Optional[float]:
+    """Parse a raw Hyperliquid fill row and return its signed delta for target_coin.
+
+    Uses the same canonical parsing as parse_fill():
+      - coin: raw["coin"]
+      - size: abs(raw["sz"] or raw["size"] or raw["qty"])
+      - side: normalize_side(raw["side"], size, start_pos)
+      - delta: +size for BUY, -size for SELL
+
+    Returns None if the row is for a different coin or has invalid fields.
+    """
+    coin = str(row.get("coin") or row.get("symbol") or row.get("asset") or "").upper().strip()
+    if coin != target_coin.upper():
+        return None
+
+    size = abs(_fnum(row.get("sz") or row.get("size") or row.get("qty")))
+    if size <= 0:
+        return None
+
+    start_pos = _fnum(row.get("startPosition") or row.get("start_pos") or row.get("start_position"))
+    side = _normalize_side(row.get("side") or row.get("dir") or row.get("direction"), size, start_pos)
+    return size if side == "BUY" else -size
+
+
 def fetch_fills_in_interval(
     wallet: str,
     old_fence_ms: int,
     snapshot_fence_ms: int,
     fetch_fn,
+    target_coin: str,
 ) -> Tuple[Optional[float], bool]:
-    """Fetch and sum signed fill deltas in (old_fence, snapshot_fence].
+    """Fetch and sum signed fill deltas in (old_fence, snapshot_fence] for target_coin.
 
     Uses the engine's fetch_fills_since() contract:
       fetch_fn(wallet, start_ms, end_ms) -> {"ok": bool, "complete": bool, "rows": [...]}
@@ -47,11 +94,15 @@ def fetch_fills_in_interval(
     by the engine's fetch_fills_since() -- this module does NOT re-implement
     pagination or use any time-based heuristic.
 
+    Only rows for target_coin with old_fence_ms < time <= snapshot_fence_ms are summed.
+    The signed delta is computed using the same canonical parsing as parse_fill().
+
     Args:
         wallet: the wallet address
         old_fence_ms: the old epoch baseline fence (exclusive)
         snapshot_fence_ms: the actual snapshot fence (inclusive)
         fetch_fn: callable matching the fetch_fills_since() contract
+        target_coin: the coin to filter rows for
 
     Returns:
         (sum_of_deltas, is_complete)
@@ -81,13 +132,20 @@ def fetch_fills_in_interval(
         )
         return None, False
 
-    # Sum signed deltas from the returned rows
+    # Sum signed deltas for target_coin only, excluding fills at old_fence
     total = 0.0
     for r in rows:
         if not isinstance(r, dict):
             continue
-        delta = float(r.get("signed_delta") or r.get("size") or 0)
-        total += delta
+        # Exclude fills exactly at old_fence (epoch model consumes strictly after)
+        ts = int(r.get("time") or r.get("timestamp") or r.get("ts") or 0)
+        if ts <= old_fence_ms:
+            continue
+        if ts > snapshot_fence_ms:
+            continue
+        delta = _parse_raw_fill_delta(r, target_coin)
+        if delta is not None:
+            total += delta
 
     return total, True
 
@@ -142,7 +200,7 @@ def derive_omission(
     # Fetch and prove the post-fence interval is complete using the engine's
     # fetch_fills_since() ok/complete/rows contract
     post_fence_delta, is_complete = fetch_fills_in_interval(
-        wallet, old_fence_ms, snapshot_fence_ms, fetch_fn,
+        wallet, old_fence_ms, snapshot_fence_ms, fetch_fn, coin,
     )
 
     if not is_complete or post_fence_delta is None:
