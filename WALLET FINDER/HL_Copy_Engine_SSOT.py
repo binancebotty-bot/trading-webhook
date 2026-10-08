@@ -116,6 +116,10 @@ DRIFT_RECOVERY_RETRY_SEC = float(os.getenv("HL_DRIFT_RECOVERY_RETRY_SEC", "900")
 # UNRESOLVED_ESCALATED.  It stays visibly unresolved -- escalation is a louder
 # signal, never a quiet acceptance of a known-wrong state.
 DRIFT_ESCALATE_AFTER_ATTEMPTS = int(os.getenv("HL_DRIFT_ESCALATE_AFTER_ATTEMPTS", "3"))
+# One HIP-3 baseline re-measure attempt per wallet per interval.  A defective
+# (native-only) baseline is re-measured on the native+all-DEX union; a failed
+# attempt must not re-issue a full union fetch every poll cycle.
+BASELINE_REMEASURE_RETRY_SEC = float(os.getenv("HL_BASELINE_REMEASURE_RETRY_SEC", "900"))
 
 # This tracker is an independent product.  It shares no state, no cursor and
 # no business logic with the copy runtime or the :8014 proof engine -- only
@@ -550,6 +554,10 @@ class EngineSSOT:
         self.trusted_through_ms_by_wallet: Dict[str, int] = self.load_watermarks()
         self.consecutive_poll_failures: Dict[str, int] = defaultdict(int)
         self._last_currentness: Dict[str, Any] = {}
+        # One HIP-3 baseline re-measure attempt per wallet per interval (see
+        # _remeasure_epoch_baseline_omission): a failed union fetch must not
+        # re-issue every poll cycle.
+        self._baseline_remeasure_gate: Dict[str, float] = {}
 
         startup_fills = self.load_fills_from_ledger()
         self._startup_fill_wallets: Set[str] = {f.wallet for f in startup_fills}
@@ -690,6 +698,64 @@ class EngineSSOT:
                     f"positions={len(base)} provenance={reason} "
                     f"closed_prior={bool(prior)}")
         return epoch
+
+    def _remeasure_epoch_baseline_omission(self, wallet: str, n_pairs: int) -> bool:
+        """Controlled epoch roll for a PROVEN defective baseline (fix D + roll).
+
+        The epoch's measured baseline omits a builder position the wallet holds
+        (HIP-3 native-only-baseline omission), so the pair can never reconcile.
+        Re-measure: take a coherent native + all-builder-DEX union snapshot and
+        open a fresh MEASURED epoch (baseline = current exchange, internal_delta
+        = 0, PENDING).  _open_epoch closes the prior epoch, preserving it in
+        epoch_history (never rewritten CLEAN).  FAIL CLOSED: if the dex set is
+        empty or the union/fence proof fails, the wallet is NOT rolled and the
+        pairs stay flagged for re-measurement.
+        """
+        wallet = wallet.lower()
+        dexes = self.cold_bootstrap_dexes(wallet)
+        if not dexes:
+            self.audit["baseline_remeasure_skipped_no_dexes"] += 1
+            log("WARNING", f"BASELINE_REMEASURE_SKIPPED wallet={wallet} reason=perp_dexs_unavailable")
+            return False
+        # Gate: one re-measure attempt per wallet per interval.  A failed attempt
+        # must not re-issue a full union fetch every poll cycle (rate pressure).
+        # A SUCCESSFUL roll replaces the epoch, so the pairs stop being flagged
+        # and the gate is irrelevant until a new omission is ever detected.
+        last = float(self._baseline_remeasure_gate.get(wallet, 0.0) or 0.0)
+        if (time.time() - last) < BASELINE_REMEASURE_RETRY_SEC:
+            self.audit["baseline_remeasure_gated"] += 1
+            return False
+        self._baseline_remeasure_gate[wallet] = time.time()
+        snapshot, fence, _dex_times = self.fetch_wallet_positions(wallet, dexes)
+        if snapshot is None:
+            self.audit["baseline_remeasure_skipped_snapshot_failed"] += 1
+            log("WARNING", f"BASELINE_REMEASURE_SKIPPED wallet={wallet} reason=union_snapshot_or_fence_failed")
+            return False
+        prior = self.epoch_by_wallet.get(wallet) or {}
+        # Close the prior epoch as UNRESOLVED with the explicit reason BEFORE the
+        # roll, so _open_epoch preserves it as UNRESOLVED in epoch_history (it
+        # only relabels a still-trusted prior as SUPERSEDED).  The defective
+        # measurement is kept permanently as evidence, never rewritten CLEAN.
+        if prior:
+            prior["epoch_status"] = "UNRESOLVED"
+            prior["unresolved_reason"] = "HIP3_NATIVE_ONLY_BASELINE_OMISSION"
+            prior["closed_at_ms"] = fence
+        self._open_epoch(wallet, snapshot, ts_ms=fence,
+                         reason="hip3_baseline_omission_remeasure")
+        # The measured baseline now INCLUDES the current position, so internal
+        # accrual restarts at 0 (fills strictly after the new fence re-accrue it).
+        # This mirrors rebuild_from_ledger's epoch-aware reset; it is the
+        # definition of a fresh measured epoch, NOT baseline absorption (which
+        # would be baseline = exchange - internal).
+        for key in [k for k in list(self.positions.keys()) if k[0] == wallet]:
+            del self.positions[key]
+        self.last_exchange_snapshot_by_wallet[wallet] = {k: dict(v) for k, v in snapshot.items()}
+        self.last_exchange_snapshot_ts_by_wallet[wallet] = fence
+        self.wallet_active_dexes[wallet] = self._builder_dexes_in_snapshot(snapshot)
+        self.audit["epochs_rolled_baseline_omission"] += 1
+        log("WARNING", f"EPOCH_ROLLED_BASELINE_OMISSION wallet={wallet} pairs={n_pairs} "
+                       f"prior_epoch={prior.get('epoch_id')} new_fence={fence} status=PENDING")
+        return True
 
     def _close_epoch_unresolved(self, wallet: str, reason: str) -> None:
         wallet = wallet.lower()
@@ -857,6 +923,7 @@ class EngineSSOT:
         unresolved = 0
         escalated = 0
         total = 0
+        baseline_invalid = 0
         for w, coins in self.drift_state_by_wallet.items():
             for c, info in coins.items():
                 total += 1
@@ -866,6 +933,12 @@ class EngineSSOT:
                     unresolved += 1
                 elif st in {"DRIFT_UNRESOLVED", "DRIFT_DETECTED"}:
                     unresolved += 1
+                elif st == "BASELINE_INVALID_REMEASUREMENT_REQUIRED":
+                    # A known-defective baseline is NOT healthy: it counts as
+                    # unresolved (never a false-green) and is surfaced separately
+                    # so the re-measurement backlog is explicit.
+                    unresolved += 1
+                    baseline_invalid += 1
         wallets_without_proven_epoch = [
             w for w in required
             if (self.epoch_by_wallet.get(w) or {}).get("epoch_status") != "OPEN"
@@ -888,6 +961,7 @@ class EngineSSOT:
             "state_trustworthy": state_trustworthy,
             "unresolved_pairs": unresolved,
             "escalated_pairs": escalated,
+            "baseline_invalid_pairs": baseline_invalid,
             "audited_pairs": total,
             "note": "inputs_current = complete input consumed through global_trusted_through_ms; state_trustworthy = modelled state agrees with exchange truth. Independent.",
         }
@@ -1773,6 +1847,7 @@ class EngineSSOT:
         )
 
         drift_rows: List[Dict[str, Any]] = []
+        baseline_omission_rows: List[Dict[str, Any]] = []
         for coin in sorted(coins):
             exch_size = fnum((snapshot.get(coin) or {}).get("signed_size"))
             baseline = self.epoch_baseline(wallet, coin)
@@ -1785,6 +1860,28 @@ class EngineSSOT:
                     "delta": delta, "internal": internal_size, "exchange": exch_size,
                     "baseline": baseline, "tracked_exchange": tracked_exchange_size,
                 })
+                continue
+            # DEFECTIVE-BASELINE GUARD (narrow, builder-only).  A builder coin the
+            # wallet HOLDS on exchange but which is ABSENT from the epoch's
+            # measured baseline (baseline=0) is the proven HIP-3 native-only-
+            # baseline omission -- NOT genuine drift.  A post-fix epoch can never
+            # show baseline=0 for a held builder coin (the union captures it), so
+            # this signature is the defect itself.  It can never reconcile (the
+            # opening fills predate the fence and are correctly excluded), so it
+            # must NOT trigger a wide recovery fetch.  Surface it explicitly for
+            # re-measurement instead.  Never generalised to ordinary drift.
+            if (
+                self._builder_dex_of(coin) is not None
+                and abs(baseline) <= POSITION_EPSILON
+                and abs(exch_size) > POSITION_EPSILON
+            ):
+                self._set_drift_state(wallet, coin, "BASELINE_INVALID_REMEASUREMENT_REQUIRED", {
+                    "delta": delta, "internal": internal_size, "exchange": exch_size,
+                    "baseline": baseline, "tracked_exchange": tracked_exchange_size,
+                    "reason": "HIP3_NATIVE_ONLY_BASELINE_OMISSION",
+                })
+                self.audit["baseline_invalid_remeasurement_required"] += 1
+                baseline_omission_rows.append({"coin": coin})
                 continue
             drift_rows.append({
                 "coin": coin,
@@ -1803,8 +1900,15 @@ class EngineSSOT:
                 f"tracked_exchange={tracked_exchange_size} action=recover_from_real_fills"
             )
 
+        if baseline_omission_rows:
+            # The wallet's epoch baseline is a known-defective pre-fix measurement.
+            # Re-measure it on the current native + all-builder-DEX union (the
+            # approved HIP-3 path).  Fail closed: if enumeration/snapshot/fence
+            # proof fails, the wallet is NOT rolled and the pairs stay flagged.
+            self._remeasure_epoch_baseline_omission(wallet, len(baseline_omission_rows))
+
         if not drift_rows:
-            return 0
+            return len(baseline_omission_rows)
 
         # One recovery call per wallet, not one fake row per coin.  Recovery must
         # look at ground the normal poll did NOT just cover: fetch the interval
