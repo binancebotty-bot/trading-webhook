@@ -1860,9 +1860,18 @@ class EngineSSOT:
         # gets its own audit counter so a starved cold start is distinguishable
         # from a genuinely failed one.
         if snapshot is RATE_BUDGET_DEFERRED:
+            # Gate C2: the per-wallet deferral counter must be bumped HERE too,
+            # not only in _process_wallet_proof.  An UNREADY wallet reaches its
+            # first snapshot fetch through this bootstrap path, so recording the
+            # deferral only in the poll path left every cold-start wallet at
+            # counter 0 -- poll_loop's `deferred_now` test then read False and
+            # rescheduled it a FULL cadence (1,728,000 ms) later instead of the
+            # 60s retry.  The starvation loop survived cold bootstrap.
+            deferrals = self._record_budget_deferral(wallet)
             self.audit["bootstrap_snapshot_deferred_rate_budget"] += 1
             log("INFO", f"BOOTSTRAP_SNAPSHOT_DEFERRED wallet={wallet} "
-                       f"reason=rate_budget_refused action=no_epoch_no_ready_retry_next_cycle")
+                       f"reason=rate_budget_refused deferrals={deferrals} "
+                       f"action=no_epoch_no_ready_retry_next_cycle")
             self.wallet_runtime.setdefault(wallet, {})["ready"] = False
             return
         if snapshot is None:
