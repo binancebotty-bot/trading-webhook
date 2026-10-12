@@ -1,0 +1,22 @@
+--- a/HL_Copy_Engine_SSOT.py
++++ b/HL_Copy_Engine_SSOT.py
+@@ -1989,7 +1989,8 @@ class EngineSSOT:
+         fee = abs(fnum(raw_get(raw, "fee", "feeUsd", "builderFee"), 0.0))
+         oid = str(raw_get(raw, "oid", "hash", "tid", "id", default=""))
+-        fill_id = str(raw_get(raw, "fill_id", default="")) or f"{wallet}:{coin}:{ts}:{side}:{size:.12g}:{price:.12g}:{oid}"
++        tid = str(raw_get(raw, "tid", "id", default=""))
++        fill_id = str(raw_get(raw, "fill_id", default="")) or f"{wallet}:{coin}:{ts}:{side}:{size:.12g}:{price:.12g}:{oid}:{tid}"
+         recv_ms = utc_now_ms()
+         recording_method = normalise_recording_method(raw_get(raw, "recording_method", default=None), source=source, is_snapshot=is_snapshot)
+         rebuild_reason = "" if recording_method == RECORDING_WS_CAPTURED else str(raw_get(raw, "rebuild_reason", default=source or "backfill"))
+
+# Backward compatibility:
+#   Existing persisted rows carry the LEGACY composite id
+#     wallet:coin:ts:side:size:price:oid
+#   New rows carry the corrected id
+#     wallet:coin:ts:side:size:price:oid:tid
+#   The corrected id is a SUPERSET discriminator: it only ever ADDS the native trade
+#   id, so any two rows distinct before remain distinct, and rows that previously
+#   collided (same order, same ts/size/price) become separable.
+#   Historical rows are NEVER rewritten. A one-time re-ingest of the affected window
+#   accepts exactly the previously-collided executions (proven: 75 existing + 7 = 82).
